@@ -91,36 +91,51 @@ fn write_database(session: &Session, opts: &EmitOptions, new_id: &str, conn: &mu
 
     // FTS5 virtual tables + sync triggers, mirroring hermes_state.py's FTS_SQL / FTS_TRIGRAM_SQL.
     // Without these, a port into a *fresh* state.db is invisible to Hermes's search (which queries
-    // `messages_fts`). Created BEFORE inserting rows so the AFTER INSERT triggers populate the
-    // index. One shape per index, spelled once below: the unicode61 table is part of bundled FTS5
-    // and always available; the trigram table is the same SQL with its tokenizer, for CJK/substring
-    // search, and is guarded — if the trigram tokenizer isn't compiled in, skip it (and its
-    // triggers) rather than failing the whole emit. The unicode61 table is enough for Hermes to
-    // find ASCII content; the trigram index is a CJK nicety.
-    let fts_sql = |table: &str, tokenize: &str| {
-        format!(
-            "CREATE VIRTUAL TABLE IF NOT EXISTS {table} USING fts5(content{tokenize});
-             CREATE TRIGGER IF NOT EXISTS {table}_insert AFTER INSERT ON messages BEGIN
-                 INSERT INTO {table}(rowid, content) VALUES (
-                     new.id,
-                     COALESCE(new.content, '') || ' ' || COALESCE(new.tool_name, '') || ' ' || COALESCE(new.tool_calls, '')
-                 );
-             END;
-             CREATE TRIGGER IF NOT EXISTS {table}_delete AFTER DELETE ON messages BEGIN
-                 DELETE FROM {table} WHERE rowid = old.id;
-             END;
-             CREATE TRIGGER IF NOT EXISTS {table}_update AFTER UPDATE ON messages BEGIN
-                 DELETE FROM {table} WHERE rowid = old.id;
-                 INSERT INTO {table}(rowid, content) VALUES (
-                     new.id,
-                     COALESCE(new.content, '') || ' ' || COALESCE(new.tool_name, '') || ' ' || COALESCE(new.tool_calls, '')
-                 );
-             END;"
-        )
-    };
-    tx.execute_batch(&fts_sql("messages_fts", ""))
-        .context("creating hermes messages_fts (FTS5)")?;
-    if let Err(e) = tx.execute_batch(&fts_sql("messages_fts_trigram", ", tokenize='trigram'")) {
+    // `messages_fts`). The unicode61 table is part of bundled FTS5 and always available; the trigram
+    // tokenizer is too in modern SQLite, but we still guard it so emit succeeds on any build that
+    // lacks it. Created BEFORE inserting rows so the AFTER INSERT triggers populate the index.
+    tx.execute_batch(
+        "CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(content);
+         CREATE TRIGGER IF NOT EXISTS messages_fts_insert AFTER INSERT ON messages BEGIN
+             INSERT INTO messages_fts(rowid, content) VALUES (
+                 new.id,
+                 COALESCE(new.content, '') || ' ' || COALESCE(new.tool_name, '') || ' ' || COALESCE(new.tool_calls, '')
+             );
+         END;
+         CREATE TRIGGER IF NOT EXISTS messages_fts_delete AFTER DELETE ON messages BEGIN
+             DELETE FROM messages_fts WHERE rowid = old.id;
+         END;
+         CREATE TRIGGER IF NOT EXISTS messages_fts_update AFTER UPDATE ON messages BEGIN
+             DELETE FROM messages_fts WHERE rowid = old.id;
+             INSERT INTO messages_fts(rowid, content) VALUES (
+                 new.id,
+                 COALESCE(new.content, '') || ' ' || COALESCE(new.tool_name, '') || ' ' || COALESCE(new.tool_calls, '')
+             );
+         END;",
+    )
+    .context("creating hermes messages_fts (FTS5)")?;
+
+    // Trigram table for CJK/substring search. Guarded: if the trigram tokenizer isn't compiled in,
+    // skip it (and its triggers) rather than failing the whole emit. The unicode61 table above is
+    // enough for Hermes to find ASCII content; the trigram index is a CJK nicety.
+    let trigram_sql = "CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts_trigram USING fts5(content, tokenize='trigram');
+         CREATE TRIGGER IF NOT EXISTS messages_fts_trigram_insert AFTER INSERT ON messages BEGIN
+             INSERT INTO messages_fts_trigram(rowid, content) VALUES (
+                 new.id,
+                 COALESCE(new.content, '') || ' ' || COALESCE(new.tool_name, '') || ' ' || COALESCE(new.tool_calls, '')
+             );
+         END;
+         CREATE TRIGGER IF NOT EXISTS messages_fts_trigram_delete AFTER DELETE ON messages BEGIN
+             DELETE FROM messages_fts_trigram WHERE rowid = old.id;
+         END;
+         CREATE TRIGGER IF NOT EXISTS messages_fts_trigram_update AFTER UPDATE ON messages BEGIN
+             DELETE FROM messages_fts_trigram WHERE rowid = old.id;
+             INSERT INTO messages_fts_trigram(rowid, content) VALUES (
+                 new.id,
+                 COALESCE(new.content, '') || ' ' || COALESCE(new.tool_name, '') || ' ' || COALESCE(new.tool_calls, '')
+             );
+         END;";
+    if let Err(e) = tx.execute_batch(trigram_sql) {
         eprintln!("cv: hermes trigram FTS unavailable, skipping ({e}); unicode61 FTS still active");
     }
 
