@@ -2782,7 +2782,8 @@ mod tests {
     /// full reads recorded each session's count (the certified counts list), then with the store
     /// replaced by a fresh copy of the same bytes, as the dump-hash stage rebuilds it: that is
     /// another store, so the listing is the cold one again, not the counts certified for the old
-    /// file's rows.
+    /// file's rows. The copy is created after the old file is unlinked and renamed over its path,
+    /// so a filesystem that reuses freed inodes (ext4) gives it the old inode number.
     #[test]
     fn corpus_listing_of_a_replaced_store_is_the_cold_listing() {
         let corpus = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/corpus/hermes");
@@ -2795,7 +2796,9 @@ mod tests {
             let db = home.join("state.db");
             let stage = || {
                 let _ = std::fs::remove_file(&db);
-                std::fs::copy(version.join(".hermes/state.db"), &db).unwrap();
+                let next = home.join("state.db.next");
+                std::fs::copy(version.join(".hermes/state.db"), &next).unwrap();
+                std::fs::rename(&next, &db).unwrap();
             };
             let listing = || {
                 let mut rows: Vec<(String, Option<usize>)> = crate::sessions()

@@ -600,20 +600,11 @@ impl Baseline {
     /// store's own files aside, every dependency is as recorded, and `r`'s rows certify as they
     /// did ([`Rows`]).
     pub fn rows_fresh(&self, r: &SessionRef, current: &Self, probe: &mut Probe) -> bool {
-        let (Some(rows), Some(then), Some(now_primary), Some(old), Some(now)) = (
-            self.rows,
-            self.primary,
-            current.primary,
-            self.stamp.as_ref(),
-            current.stamp.as_ref(),
-        ) else {
+        let (Some(rows), Some(_), Some(old), Some(now)) =
+            (self.rows, current.primary, self.stamp.as_ref(), current.stamp.as_ref())
+        else {
             return false;
         };
-        // Writes to a store keep its file; a store replaced by another file (a copy, a restore)
-        // is another store, whose rows nothing here has read.
-        if (then.dev, then.ino) != (now_primary.dev, now_primary.ino) {
-            return false;
-        }
         let primary = probe.primary_path(r);
         let mut store: Vec<PathBuf> = sqlite_sidecars(&primary).into();
         store.push(primary);
@@ -744,6 +735,32 @@ impl<T: Payload> Record<T> {
 pub struct Dependencies {
     pub files: Vec<PathBuf>,
     pub directories: Vec<PathBuf>,
+}
+
+/// The store file's identity, folded into each of its sessions' certificates: device, inode and
+/// birth time. Writes to a store keep its file; a store replaced by another file (a copy, a
+/// restore) is another store whose rows nothing here has read, even when the copy holds the same
+/// bytes (so no SQLite header field tells them apart) and the filesystem reuses the freed inode
+/// (ext4 does; the birth time then differs). Where the filesystem keeps no birth time, device and
+/// inode alone.
+fn store_birth(path: &Path) -> [u8; 32] {
+    let mut out = [0u8; 32];
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return out;
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        out[..8].copy_from_slice(&metadata.dev().to_le_bytes());
+        out[8..16].copy_from_slice(&metadata.ino().to_le_bytes());
+    }
+    let born = metadata
+        .created()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map_or(0, |d| d.as_nanos());
+    out[16..].copy_from_slice(&born.to_le_bytes());
+    out
 }
 
 /// A shared SQLite store, and the certificates of its sessions ([`Probe::rows`]).
@@ -959,7 +976,13 @@ impl Probe {
                     .filter(|(at, _)| *at == before)
                     .map(|(_, certified)| certified.clone());
                 cached.unwrap_or_else(|| {
-                    let certified = adapter.rows(&r.path).map(std::sync::Arc::new);
+                    let born = store_birth(&store.1);
+                    let certified = adapter.rows(&r.path).map(|mut rows| {
+                        for certificate in rows.values_mut() {
+                            certificate.digest = Rows::fold(certificate.digest, &born);
+                        }
+                        std::sync::Arc::new(rows)
+                    });
                     // Kept only when no write landed while certifying.
                     if state(&store.1) == before {
                         STORES
