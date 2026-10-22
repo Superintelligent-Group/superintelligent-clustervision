@@ -381,10 +381,43 @@ mod tests {
         assert_eq!(v["options"], serde_json::json!(["a", "b"]));
         assert!(v.get("deadline").is_none() && v.get("source").is_none(), "{v}");
 
-        // Tag helper stays in sync with serde.
+        // Tag helper stays in sync with serde, for every kind (the hand map must spell what
+        // `rename_all` writes).
         for (kind, tag) in [
+            (
+                TaskEventKind::Opened {
+                    title: "t".into(),
+                    body: String::new(),
+                    repo: None,
+                    issue: None,
+                    channel: None,
+                    assignee: None,
+                },
+                "opened",
+            ),
+            (TaskEventKind::Claimed { assignee: "a".into() }, "claimed"),
             (TaskEventKind::Released {}, "released"),
-            (TaskEventKind::StatusSet { text: "s".into() }, "status_set"),
+            (TaskEventKind::Noted { text: "n".into(), session_ref: None }, "noted"),
+            (
+                TaskEventKind::Done {
+                    observed: None,
+                    check: None,
+                },
+                "done",
+            ),
+            (TaskEventKind::Abandoned { reason: "r".into() }, "abandoned"),
+            (TaskEventKind::Superseded { by_task: "b".into() }, "superseded"),
+            (TaskEventKind::Tagged { tags: vec![] }, "tagged"),
+            (TaskEventKind::BlockedBy { task: "b".into() }, "blocked_by"),
+            (
+                TaskEventKind::Posed {
+                    options: vec!["a".into()],
+                    default_choice: "a".into(),
+                    deadline: None,
+                    source: None,
+                },
+                "posed",
+            ),
             (
                 TaskEventKind::Resolved {
                     choice: "a".into(),
@@ -393,6 +426,7 @@ mod tests {
                 },
                 "resolved",
             ),
+            (TaskEventKind::StatusSet { text: "s".into() }, "status_set"),
         ] {
             let v: serde_json::Value =
                 serde_json::from_str(&serde_json::to_string(&event(kind.clone())).unwrap()).unwrap();

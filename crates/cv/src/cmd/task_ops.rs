@@ -634,15 +634,16 @@ pub(crate) fn render_inbox_md(page: &task::InboxPage) -> String {
                 }
                 out.push('\n');
             }
-            if !i.body.trim().is_empty() {
-                for para in i.body.trim().split("\n\n") {
+            if let Some(body) = i.body.as_deref().filter(|body| !body.trim().is_empty()) {
+                for para in body.trim().split("\n\n") {
                     out.push_str(&md_block(para));
                     out.push_str("\n\n");
                 }
             }
-            if !i.notes.is_empty() {
-                out.push_str(&format!("notes ({}):\n\n", i.notes.len()));
-                for note in &i.notes {
+            if i.notes.as_ref().is_some_and(|notes| !notes.is_empty()) {
+                let notes = i.notes.as_ref().unwrap();
+                out.push_str(&format!("notes ({}):\n\n", notes.len()));
+                for note in notes {
                     let mut line = format!(
                         "- _{}, {}{}:_ {}",
                         md_inline(&note.by),
@@ -791,7 +792,7 @@ mod tests {
             assert!(brief
                 .items
                 .iter()
-                .all(|row| row.body.is_empty() && row.notes.is_empty() && row.status.is_none()));
+                .all(|row| row.body.is_none() && row.notes.is_none() && row.status.is_none()));
             assert!(brief
                 .items
                 .iter()
@@ -801,7 +802,9 @@ mod tests {
             assert!(full
                 .items
                 .iter()
-                .any(|row| row.body == body && row.status.as_deref() == Some(body.as_str())));
+                .any(|row| {
+                    row.body.as_deref() == Some(body.as_str()) && row.status.as_deref() == Some(body.as_str())
+                }));
         }
         assert_eq!(outcome.model.tasks[&action_id].body, body);
         assert_eq!(outcome.model.tasks[&action_id].notes[0].text, body);
