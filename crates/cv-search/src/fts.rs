@@ -7103,7 +7103,10 @@ mod tests {
             version: format!("{}-older", head(2).version),
             ..head(2)
         };
-        cv_core::resume::update(&[(r2.clone(), Some((other, cp)))]);
+        cv_core::resume::update(&[cv_core::resume::MarkUpdate {
+            session: r2.clone(),
+            mark: Some((other, cp)),
+        }]);
 
         let swept = sweep(&dir, refs.clone(), false, false).unwrap();
         assert_eq!((swept.changed, swept.resumed), (3, 0));
