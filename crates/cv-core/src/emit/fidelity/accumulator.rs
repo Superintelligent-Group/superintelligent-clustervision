@@ -245,18 +245,23 @@ mod tests {
         let mut carrier = Message::new(Role::System);
         carrier.kind = MessageKind::Carrier;
         session.messages = vec![result, orphan, command, signed, carrier, call];
+        let mut golden = String::new();
         for model in [None, Some("late-default".into())] {
             session.model = model;
             for target in Harness::ALL {
                 for thinking in [ThinkingMode::Native, ThinkingMode::Text, ThinkingMode::Drop] {
-                    assert_eq!(
-                        source_features(target, thinking, &session)?,
-                        super::super::features(target, thinking, &session),
-                        "{target}/{thinking}"
-                    );
+                    golden.push_str(&format!(
+                        "{:?}/{target}/{thinking} {:?}\n",
+                        session.model,
+                        source_features(target, thinking, &session)?
+                    ));
                 }
             }
         }
+        assert_eq!(
+            golden,
+            include_str!("../../../tests/fixtures/emit-frozen/fidelity-features.txt")
+        );
         Ok(())
     }
 }

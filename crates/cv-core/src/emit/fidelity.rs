@@ -293,35 +293,6 @@ pub(super) fn block_survives(target: Harness, thinking: ThinkingMode, b: &Block)
     }
 }
 
-#[cfg(test)]
-pub(super) fn features(target: Harness, thinking: ThinkingMode, session: &Session) -> Features {
-    let mut f = Features::default();
-    // The Claude emitter drops a `tool_use` the transcript never answered (`claude::emit`, rule
-    // 1), and an assistant turn that held nothing else goes with it. That is the format's
-    // resumability rule, not a loss the target could have avoided, so the verifier compares both
-    // sides without them. For every other target the set is unused.
-    let answered_only = write_rules(target).answered_calls_only;
-    let answered: std::collections::HashSet<&str> = if answered_only {
-        session
-            .messages
-            .iter()
-            .flat_map(|m| &m.content)
-            .filter_map(|b| match b {
-                Block::ToolResult { tool_use_id, .. } => Some(tool_use_id.as_str()),
-                _ => None,
-            })
-            .collect()
-    } else {
-        Default::default()
-    };
-    let orphan_call =
-        |b: &Block| answered_only && matches!(b, Block::ToolUse { id, .. } if !answered.contains(id.as_str()));
-    for message in &session.messages {
-        f.note(target, thinking, message, session.model.is_some(), &orphan_call);
-    }
-    f
-}
-
 impl Features {
     fn note(
         &mut self,
@@ -694,8 +665,8 @@ pub(super) fn diff_fidelity(
     input: &Session,
     reparsed: &Session,
 ) -> FidelityReport {
-    let before = features(target, thinking, input);
-    let after = features(target, thinking, reparsed);
+    let before = source_features(target, thinking, input).unwrap();
+    let after = source_features(target, thinking, reparsed).unwrap();
     diff_features(target, thinking, input, reparsed, before, after)
 }
 
