@@ -1348,6 +1348,9 @@ impl cv_core::MessageSink for CallbackCounter<'_> {
     fn dependency(&mut self, path: &Path) {
         self.inner.dependency(path);
     }
+    fn append_only_dependency(&mut self, path: &Path) {
+        self.inner.append_only_dependency(path);
+    }
     fn wants_checkpoint(&mut self, offset: u64) -> bool {
         self.inner.wants_checkpoint(offset)
     }
@@ -2117,6 +2120,9 @@ impl cv_core::MessageSink for ChunkSink<'_> {
     }
     fn dependency(&mut self, path: &Path) {
         self.dependencies.record(path);
+    }
+    fn append_only_dependency(&mut self, path: &Path) {
+        self.dependencies.record_append_only(path);
     }
     fn meta(&mut self, s: &cv_core::Session) {
         self.meta_title = s.title.clone();
@@ -4716,6 +4722,54 @@ mod tests {
         assert_eq!(refresh().changed, 1);
         assert_eq!(counts().get(&cv_core::affordance::Kind::Fork).copied().unwrap_or(0), 0);
         assert_eq!(refresh().changed, 0);
+    }
+
+    /// One project directory of 48 sessions, two of them forks (inferred from their siblings'
+    /// heads) of a third: an append to any one session rereads that session alone (its siblings
+    /// are append-only dependencies of the forks), while a new session in the directory still
+    /// rereads the forks, whose source it could be.
+    #[test]
+    fn an_append_to_one_of_48_siblings_rereads_one() {
+        let _home = IsolatedHome::new();
+        let (dir, sdir) = (tmpdir(), tmpdir());
+        let copied = serde_json::json!({"type":"user","uuid":"shared","sessionId":"source",
+            "timestamp":"2026-09-19T00:00:00Z","message":{"role":"user","content":"sourcebody"}});
+        let queued = serde_json::json!({"type":"queue-operation","timestamp":"2026-09-19T01:00:00Z"});
+        let mut refs = Vec::new();
+        let source = sdir.join("source.jsonl");
+        std::fs::write(&source, format!("{copied}\n")).unwrap();
+        refs.push(sref("source", "source", source.display().to_string()));
+        for fork in ["fork-a", "fork-b"] {
+            let p = sdir.join(format!("{fork}.jsonl"));
+            std::fs::write(&p, format!("{queued}\n{copied}\n")).unwrap();
+            refs.push(sref(fork, fork, p.display().to_string()));
+        }
+        for i in 0..45 {
+            let id = format!("plain-{i}");
+            refs.push(sref(&id, &id, write_claude(&sdir, &id, &format!("plain body {i}"))));
+        }
+        assert_eq!(refs.len(), 48);
+        let refresh = |refs: &[cv_core::SessionRef]| sweep(&dir, refs.to_vec(), false, false).unwrap();
+        assert_eq!(refresh(&refs).changed, 48);
+        let fork = refs[1].clone();
+        let forks = || cv_core::catalog::AffordanceTable::load().counts(&fork).unwrap();
+        assert_eq!(forks().get(&cv_core::affordance::Kind::Fork), Some(&1));
+        assert_eq!(refresh(&refs).changed, 0);
+        let append = |p: &Path, id: &str| {
+            let line = serde_json::json!({"type":"user","uuid":format!("{id}-more"),"sessionId":id,
+                "message":{"role":"user","content":"appended"}});
+            let mut file = std::fs::OpenOptions::new().append(true).open(p).unwrap();
+            std::io::Write::write_all(&mut file, format!("{line}\n").as_bytes()).unwrap();
+        };
+        // A fork resumed after a sibling grew publishes a record that admits that growth too.
+        for r in [&refs[10], &refs[0], &refs[2], &refs[20], &refs[1], &refs[0], &refs[30]] {
+            append(&r.path, &r.id);
+            assert_eq!(refresh(&refs).changed, 1, "an append to {}", r.id);
+        }
+        assert_eq!(forks().get(&cv_core::affordance::Kind::Fork), Some(&1));
+        let late = sref("late", "late", write_claude(&sdir, "late", "late body"));
+        refs.push(late);
+        assert_eq!(refresh(&refs).changed, 3, "the new session and the two forks");
     }
 
     #[test]

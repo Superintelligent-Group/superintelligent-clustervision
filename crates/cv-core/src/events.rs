@@ -186,6 +186,11 @@ impl MessageSink for EventSink {
             self.dependencies.record(path);
         }
     }
+    fn append_only_dependency(&mut self, path: &std::path::Path) {
+        if !self.latch.failed() {
+            self.dependencies.record_append_only(path);
+        }
+    }
     fn meta(&mut self, s: &Session) {
         if !self.latch.failed() && self.cwd.is_none() {
             self.cwd = s.cwd.clone();

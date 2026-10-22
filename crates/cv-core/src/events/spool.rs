@@ -188,6 +188,12 @@ impl MessageSink for SpoolingSink {
         }
     }
 
+    fn append_only_dependency(&mut self, path: &std::path::Path) {
+        if !self.latch.failed() {
+            self.inner.append_only_dependency(path);
+        }
+    }
+
     fn meta(&mut self, session: &Session) {
         if !self.latch.failed() {
             self.inner.meta(session);

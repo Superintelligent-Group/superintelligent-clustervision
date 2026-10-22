@@ -168,6 +168,15 @@ pub(super) fn source(path: &Path) -> Option<String> {
 }
 
 /// The source's session id and `path`'s own head's begin time, from one head read.
+///
+/// The answer depends on the directory's entries and, of each sibling, on its head, whether it
+/// was live at the copied record's time, and (a boundary match) whether it holds the boundary.
+/// A transcript is append-only: a head that holds a `uuid` record never changes, and a source
+/// wrote the boundary before the fork copied it, so bytes appended since cannot make a sibling
+/// the source. Every sibling is therefore an append-only dependency (its growth leaves the
+/// answer; a rewrite of its sampled bytes does not), except a live one without a `uuid` head yet
+/// (an append can give it one); the directory is exact (a new or removed sibling). An append to
+/// a sibling rereads no fork of the directory.
 pub(super) fn source_tracked(
     path: &Path,
     sink: &mut dyn crate::MessageSink,
@@ -179,40 +188,49 @@ pub(super) fn source_tracked(
     let at = me.at?;
     let dir = path.parent()?;
     sink.dependency(dir); // A new/deleted eligible sibling can change the inferred source.
-    let mut candidates: Vec<(DateTime<Utc>, PathBuf, Head)> = fs::read_dir(dir)
-        .ok()?
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| p != path)
-        .filter(|p| {
-            p.file_name()
+    let mut candidates: Vec<(DateTime<Utc>, PathBuf, Head)> = Vec::new();
+    for p in fs::read_dir(dir).ok()?.flatten().map(|e| e.path()) {
+        let eligible = p != path
+            && p.file_name()
                 .and_then(|n| n.to_str())
-                .is_some_and(|n| n.ends_with(".jsonl") && !n.ends_with(".flat.jsonl"))
-        })
-        .filter(|p| {
-            sink.dependency(p);
-            p.is_file()
-        })
+                .is_some_and(|n| n.ends_with(".jsonl") && !n.ends_with(".flat.jsonl"));
+        if !eligible {
+            continue;
+        }
+        if !p.is_file() {
+            sink.dependency(&p);
+            continue;
+        }
         // Live at the copied record's time: written since.
-        .filter(|p| modified(p).is_some_and(|m| m >= at))
-        .filter_map(|p| {
-            let h = head(&p)?;
-            let first = h.at?;
-            (first <= at).then_some((first, p, h))
-        })
-        .collect();
+        if !modified(&p).is_some_and(|m| m >= at) {
+            sink.append_only_dependency(&p);
+            continue;
+        }
+        let Some(h) = head(&p) else {
+            sink.dependency(&p);
+            continue;
+        };
+        match h.at {
+            Some(first) if first <= at => candidates.push((first, p, h)),
+            _ => sink.append_only_dependency(&p),
+        }
+    }
     candidates.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
-    candidates
-        .into_iter()
-        .find(|(_, p, h)| {
-            if h.uuid == me.uuid {
+    let mut source = None;
+    for (_, p, h) in &candidates {
+        sink.append_only_dependency(p);
+        // Only the first match is read for: later candidates' bytes are never searched.
+        let matched = source.is_none()
+            && if h.uuid == me.uuid {
                 !h.copied
             } else {
                 me.boundary && holds(p, &me.uuid)
-            }
-        })
-        .and_then(|(_, p, _)| p.file_stem().and_then(|s| s.to_str()).map(str::to_string))
-        .map(|id| (id, me.began))
+            };
+        if matched {
+            source = p.file_stem().and_then(|s| s.to_str()).map(str::to_string);
+        }
+    }
+    source.map(|id| (id, me.began))
 }
 
 #[cfg(test)]

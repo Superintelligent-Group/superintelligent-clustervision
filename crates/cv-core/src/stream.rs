@@ -187,6 +187,15 @@ pub trait MessageSink {
     /// membership). Adapters report before reading; wrappers must forward the notification.
     fn dependency(&mut self, _path: &std::path::Path) {}
 
+    /// [`dependency`](MessageSink::dependency) on an append-only file of which the adapter
+    /// consults the head, never what is appended: its growth leaves the reader's output as it
+    /// was ([`crate::source::ReadSet::record_append_only`]). Wrappers forward it; a recorder
+    /// that does not know it records the path exactly. Default:
+    /// [`dependency`](MessageSink::dependency).
+    fn append_only_dependency(&mut self, path: &std::path::Path) {
+        self.dependency(path);
+    }
+
     /// The adapter is between records, holding nothing back, `offset` bytes into the file: may it
     /// take a [`Checkpoint`] here? Only a sink that can put everything it holds into one says
     /// yes, so a pass through any other sink never takes one. Default: no.
@@ -365,6 +374,13 @@ impl MessageSink for Guard<'_> {
         if !self.latch.failed() {
             let started = self.start();
             self.inner.dependency(path);
+            self.after(started, false);
+        }
+    }
+    fn append_only_dependency(&mut self, path: &std::path::Path) {
+        if !self.latch.failed() {
+            let started = self.start();
+            self.inner.append_only_dependency(path);
             self.after(started, false);
         }
     }
@@ -554,6 +570,17 @@ impl MessageSink for TeeSink<'_> {
         self.capture();
         if !self.latch.failed() {
             self.b.dependency(path);
+            self.capture();
+        }
+    }
+    fn append_only_dependency(&mut self, path: &std::path::Path) {
+        if self.latch.failed() {
+            return;
+        }
+        self.a.append_only_dependency(path);
+        self.capture();
+        if !self.latch.failed() {
+            self.b.append_only_dependency(path);
             self.capture();
         }
     }
@@ -995,6 +1022,16 @@ impl MessageSink for Counting<'_> {
             guard.reads.record(path);
         }
         self.inner.dependency(path);
+    }
+    fn append_only_dependency(&mut self, path: &std::path::Path) {
+        if self.latch.failed() {
+            return;
+        }
+        self.dependencies.record_append_only(path);
+        if let Some(guard) = &mut self.guard {
+            guard.reads.record_append_only(path);
+        }
+        self.inner.append_only_dependency(path);
     }
     fn meta(&mut self, s: &Session) {
         if self.latch.failed() {

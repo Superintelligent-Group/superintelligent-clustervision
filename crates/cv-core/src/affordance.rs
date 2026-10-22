@@ -591,6 +591,11 @@ impl MessageSink for AffordanceSink<'_> {
             self.inner.dependency(path);
         }
     }
+    fn append_only_dependency(&mut self, path: &std::path::Path) {
+        if !self.latch.failed() {
+            self.inner.append_only_dependency(path);
+        }
+    }
     fn take_error(&mut self) -> Option<anyhow::Error> {
         self.latch.take_or(self.inner, "affordance consumer")
     }

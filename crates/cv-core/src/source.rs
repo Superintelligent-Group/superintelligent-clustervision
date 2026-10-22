@@ -188,6 +188,23 @@ struct Entry {
     state: Option<FileId>,
     #[serde(skip)]
     prefix: Option<Prefix>,
+    /// An append-only file whose head the reader consulted ([`ReadSet::record_append_only`]):
+    /// its growth keeps the entry fresh while this sample still holds ([`FileId::admits`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    grows: Option<Prefix>,
+}
+
+impl Entry {
+    /// Still as recorded, or (an append-only entry) only grown.
+    fn holds(&self, probe: &mut Probe) -> bool {
+        let now = probe.entry(&self.path);
+        now.as_ref() == Some(self)
+            || self
+                .grows
+                .zip(self.state)
+                .zip(now.and_then(|now| now.state))
+                .is_some_and(|((sample, then), now)| then.admits(&sample, &now, &self.path))
+    }
 }
 
 impl PartialEq for Entry {
@@ -273,19 +290,14 @@ impl Stamp {
         let Some(Some(reads)) = self.reads() else {
             return false;
         };
-        kept(old) == kept(now)
-            && kept(reads)
-                .iter()
-                .all(|entry| probe.entry(&entry.path).as_ref() == Some(entry))
+        kept(old) == kept(now) && kept(reads).iter().all(|entry| entry.holds(probe))
     }
 
     /// The same inventory, and every recorded read still as recorded: the stamp of a pass whose
     /// read set is unrecorded never matches.
     fn matches(&self, current: &Stamp, probe: &mut Probe) -> bool {
         self.entries.get() == current.entries.get()
-            && matches!(self.reads(), Some(Some(reads)) if reads
-                .iter()
-                .all(|entry| probe.entry(&entry.path).as_ref() == Some(entry)))
+            && matches!(self.reads(), Some(Some(reads)) if reads.iter().all(|entry| entry.holds(probe)))
     }
 }
 
@@ -377,6 +389,29 @@ impl ReadSet {
         }
     }
 
+    /// [`Self::record`] of an append-only file whose head (and length so far) the reader
+    /// consulted, not its growth: an append keeps it fresh, a rewrite of its sampled bytes
+    /// ([`Prefix`]) does not.
+    pub fn record_append_only(&mut self, path: &Path) {
+        let Some(path) = absolute(path) else {
+            self.known = false;
+            return;
+        };
+        if let std::collections::btree_map::Entry::Vacant(slot) = self.entries.entry(path) {
+            match Probe::default().entry(slot.key()) {
+                Some(mut entry) => {
+                    if let Some(state) = entry.state {
+                        entry.grows = std::fs::File::open(&entry.path)
+                            .ok()
+                            .and_then(|file| Prefix::of(&file, state.len));
+                    }
+                    slot.insert(entry);
+                }
+                None => self.known = false,
+            }
+        }
+    }
+
     /// The `(mtime_ns, len)` recorded for an existing `path`, the key persisted caches index by.
     pub(crate) fn signature(&self, path: &Path) -> Option<(u64, u64)> {
         let state = self.entries.get(&absolute(path)?)?.state.as_ref()?;
@@ -409,11 +444,7 @@ impl ReadSet {
 
     /// Revalidate exactly the paths captured by this consumer, including absence and identity.
     pub fn fresh(&self, probe: &mut Probe) -> bool {
-        self.known
-            && self
-                .entries
-                .values()
-                .all(|entry| probe.entry(&entry.path).as_ref() == Some(entry))
+        self.known && self.entries.values().all(|entry| entry.holds(probe))
     }
 
     /// [`Self::fresh`], except that a primary recorded as appendable may also
@@ -422,12 +453,11 @@ impl ReadSet {
     pub(crate) fn fresh_or_grown(&self, probe: &mut Probe) -> bool {
         self.known
             && self.entries.values().all(|entry| {
-                let now = probe.entry(&entry.path);
-                now.as_ref() == Some(entry)
+                entry.holds(probe)
                     || entry
                         .state
                         .zip(entry.prefix)
-                        .zip(now.and_then(|now| now.state))
+                        .zip(probe.entry(&entry.path).and_then(|now| now.state))
                         .is_some_and(|((then, prefix), now)| then.admits(&prefix, &now, &entry.path))
             })
     }
@@ -759,6 +789,7 @@ impl Probe {
             path,
             state,
             prefix: None,
+            grows: None,
         })
     }
 
@@ -867,6 +898,7 @@ impl Probe {
                     path,
                     state,
                     prefix: None,
+                    grows: None,
                 })
             })
             .collect()
@@ -975,11 +1007,9 @@ pub(crate) fn unchanged_with(r: &SessionRef, primary: &Path, baseline: &Baseline
     let same = entries == now;
     drop(entries);
     drop(now);
-    same && reads.as_ref().is_none_or(|reads| {
-        reads
-            .iter()
-            .all(|entry| probe.entry(&entry.path).as_ref() == Some(entry))
-    })
+    same && reads
+        .as_ref()
+        .is_none_or(|reads| reads.iter().all(|entry| entry.holds(probe)))
 }
 
 pub type Update = (SessionRef, Baseline);
