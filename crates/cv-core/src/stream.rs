@@ -410,8 +410,12 @@ impl Checkpoint {
     /// Store `layer`'s state (serialization of these plain structs cannot fail; if it did, the
     /// layer would be missing and a resume would decline).
     pub fn put(&mut self, layer: &str, state: &impl Serialize) {
-        if let Ok(v) = serde_json::to_value(state) {
-            self.state.insert(layer.to_string(), v);
+        match serde_json::to_value(state) {
+            Ok(v) => {
+                self.state.insert(layer.to_string(), v);
+            }
+            // A release build keeps the documented decline; a debug build refuses to ship it.
+            Err(error) => debug_assert!(false, "checkpoint layer {layer:?} did not serialize: {error}"),
         }
     }
 
@@ -962,7 +966,7 @@ impl MessageSink for Counting<'_> {
             return Flow::Stop;
         }
         if let Some(guard) = &mut self.guard {
-            crate::source::record_message_reads(&m, &guard.primary, &mut guard.reads);
+            crate::source::record_message_reads(&m, Some(&guard.primary), &mut guard.reads);
         }
         let flow = self.inner.message(m);
         self.stopped |= flow == Flow::Stop;

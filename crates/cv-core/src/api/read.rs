@@ -131,7 +131,7 @@ pub(super) fn shared() -> &'static Cache {
 }
 
 pub(super) fn note_message_sources(message: &crate::Message, primary: &std::path::Path, reads: &mut ReadSet) {
-    crate::source::record_message_reads(message, primary, reads);
+    crate::source::record_message_reads(message, Some(primary), reads);
 }
 
 fn captured(r: &SessionRef, primary: &std::path::Path) -> (Baseline, ReadSet) {

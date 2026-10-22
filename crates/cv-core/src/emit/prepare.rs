@@ -28,7 +28,7 @@ impl Collect {
         Ok(())
     }
     fn note(&mut self, message: crate::Message) -> Result<()> {
-        crate::source::record_message_reads(&message, &self.primary, &mut self.reads);
+        crate::source::record_message_reads(&message, Some(&self.primary), &mut self.reads);
         let index = self.index;
         self.index += 1;
         if index < self.start || self.end.is_some_and(|end| index >= end) {

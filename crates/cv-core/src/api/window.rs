@@ -193,7 +193,7 @@ impl MessageSink for WindowSink {
         }
     }
     fn message(&mut self, m: Message) -> Flow {
-        crate::source::record_message_reads(&m, &self.primary, &mut self.reads);
+        crate::source::record_message_reads(&m, Some(&self.primary), &mut self.reads);
         let index = self.idx;
         if self.fail.is_some() {
             return Flow::Stop;

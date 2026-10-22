@@ -51,6 +51,20 @@ pub fn refuse_existing(path: &Path, hint: &'static str) -> Result<()> {
     }
 }
 
+/// Raw transform output ids also become filenames/resource directory names. Keep them within the
+/// selected output directory; this does not restrict ids stored in arbitrary IR or restamped text.
+pub(crate) fn validate_output_id(id: &str) -> anyhow::Result<()> {
+    let mut components = std::path::Path::new(id).components();
+    anyhow::ensure!(
+        !id.is_empty()
+            && !id.contains(['/', '\\', '\0'])
+            && matches!(components.next(), Some(std::path::Component::Normal(_)))
+            && components.next().is_none(),
+        "new session id must be a nonempty filename component, not a path: {id:?}"
+    );
+    Ok(())
+}
+
 /// An exclusively created temporary that only this operation owns; dropped unpublished, it is
 /// removed. Writes go straight to the file (wrap it in a `BufWriter` for small writes).
 pub struct Staged {
@@ -80,11 +94,7 @@ impl Staged {
 
     /// [`Self::create`] in `destination`'s directory, so publication never crosses a filesystem.
     pub fn beside(destination: &Path, tag: &str, mode: u32) -> Result<Self> {
-        let dir = destination
-            .parent()
-            .filter(|p| !p.as_os_str().is_empty())
-            .unwrap_or(Path::new("."));
-        Self::create(dir, tag, mode)
+        Self::create(parent_dir(destination), tag, mode)
     }
 
     /// The temporary's own name, valid until publication.
@@ -115,7 +125,8 @@ impl Staged {
             Claim::Replace => std::fs::rename(&self.path, destination),
             Claim::New => match link(&self.path, destination) {
                 Ok(()) => {
-                    // The destination now names the inode; the temporary name is just a second link.
+                    // The destination now names the inode; the temporary name is just a second
+                    // link, so leaving it behind on failure is harmless.
                     let _ = std::fs::remove_file(&self.path);
                     Ok(())
                 }
@@ -224,7 +235,7 @@ fn rename_no_replace_using(
     }
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
-        "filesystem does not support an atomic exclusive rename; destination left untouched",
+        "no atomic exclusive rename here (filesystem or kernel); destination left untouched",
     ))
 }
 
@@ -466,10 +477,7 @@ pub struct StagedDir {
 
 impl StagedDir {
     pub fn beside(destination: &Path, tag: &str) -> Result<Self> {
-        let dir = destination
-            .parent()
-            .filter(|p| !p.as_os_str().is_empty())
-            .unwrap_or(Path::new("."));
+        let dir = parent_dir(destination);
         let path = dir.join(format!(".cv-{tag}-{}.tmp", uuid::Uuid::new_v4()));
         std::fs::create_dir(&path).with_context(|| format!("creating a temporary in {}", dir.display()))?;
         Ok(Self { path })
@@ -601,16 +609,20 @@ fn exchange(
 fn sync_parent(path: &Path) {
     #[cfg(unix)]
     {
-        let dir = path
-            .parent()
-            .filter(|p| !p.as_os_str().is_empty())
-            .unwrap_or(Path::new("."));
+        let dir = parent_dir(path);
         if let Ok(dir) = File::open(dir) {
             let _ = dir.sync_all();
         }
     }
     #[cfg(not(unix))]
     let _ = path;
+}
+
+/// The directory holding `path` itself: its parent, or `.` for a bare name.
+fn parent_dir(path: &Path) -> &Path {
+    path.parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."))
 }
 
 /// Permission bits for an output derived from `source`: no more exposed than what it copies.

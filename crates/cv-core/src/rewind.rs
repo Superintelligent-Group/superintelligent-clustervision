@@ -586,7 +586,7 @@ fn rewind_session_after_scan(
         "rewind --thinking supports native or portable"
     );
     if let Some(id) = &opts.new_id {
-        crate::restamp::validate_output_id(id)?;
+        crate::publish::validate_output_id(id)?;
     }
     // Only an adapter that declares derived copies (Claude's) says what a rewound copy rewrites.
     let identity = crate::derive::identity(r.harness).map_err(|_| {

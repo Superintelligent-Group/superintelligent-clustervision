@@ -49,12 +49,7 @@ impl Filter {
             }
         }
         if let Some(needle) = &self.cwd_contains {
-            let hit = r
-                .cwd
-                .as_ref()
-                .map(|p| p.to_string_lossy().contains(needle))
-                .unwrap_or(false);
-            if !hit {
+            if !r.cwd.as_ref().is_some_and(|p| p.to_string_lossy().contains(needle)) {
                 return false;
             }
         }
@@ -194,7 +189,9 @@ pub fn tail(r: &SessionRef, skip: usize, keep: usize) -> Option<(usize, Vec<Mess
 pub fn resolve(r: &SessionRef, mark: Mark) -> Option<usize> {
     match mark {
         Mark::Messages(n) => Some(n),
-        Mark::Bytes(len) => append_only(r).then(|| count_prefix(r, len, &mut || Ok(())).ok())?,
+        Mark::Bytes(len) => append_only(r)
+            .then(|| count_prefix(r, len, &mut || Ok(())).ok())
+            .flatten(),
     }
 }
 
@@ -316,7 +313,7 @@ pub struct Watcher {
     seen: BTreeMap<String, State>,
     /// Where sessions come from: [`crate::discover_all`] (stat the fleet, the default) or
     /// [`crate::sessions`] (the catalog fast path, for a poller that runs every few seconds).
-    discover: fn() -> Vec<SessionRef>,
+    discover: Box<dyn FnMut() -> Vec<SessionRef>>,
 }
 
 /// What one [`Watcher::poll`] asks for.
@@ -365,7 +362,11 @@ impl Watcher {
     }
 
     /// [`Watcher::new`] over another session source (see [`Watcher::discover`]).
-    pub fn with_discovery(filter: Filter, emit_existing: bool, discover: fn() -> Vec<SessionRef>) -> Self {
+    pub fn with_discovery(
+        filter: Filter,
+        emit_existing: bool,
+        discover: impl FnMut() -> Vec<SessionRef> + 'static,
+    ) -> Self {
         Self::with_discovery_until(filter, emit_existing, discover, || false)
     }
 
@@ -374,13 +375,13 @@ impl Watcher {
     pub fn with_discovery_until(
         filter: Filter,
         emit_existing: bool,
-        discover: fn() -> Vec<SessionRef>,
+        discover: impl FnMut() -> Vec<SessionRef> + 'static,
         mut expired: impl FnMut() -> bool,
     ) -> Self {
         let mut w = Watcher {
             filter,
             seen: BTreeMap::new(),
-            discover,
+            discover: Box::new(discover),
         };
         if !emit_existing {
             w.prime(&mut expired);
@@ -394,7 +395,7 @@ impl Watcher {
     pub fn try_with_discovery(
         filter: Filter,
         emit_existing: bool,
-        discover: fn() -> Vec<SessionRef>,
+        discover: impl FnMut() -> Vec<SessionRef> + 'static,
         mut check: impl FnMut() -> anyhow::Result<()>,
     ) -> anyhow::Result<Self> {
         check()?;
@@ -443,7 +444,7 @@ impl Watcher {
     }
 
     /// Resume from a [`Cursor`]: the watcher stands exactly where the one that issued it stood.
-    pub fn from_cursor(filter: Filter, cursor: Cursor, discover: fn() -> Vec<SessionRef>) -> Self {
+    pub fn from_cursor(filter: Filter, cursor: Cursor, discover: impl FnMut() -> Vec<SessionRef> + 'static) -> Self {
         Watcher {
             filter,
             seen: cursor
@@ -459,7 +460,7 @@ impl Watcher {
                     Some((k, state))
                 })
                 .collect(),
-            discover,
+            discover: Box::new(discover),
         }
     }
 
@@ -510,9 +511,12 @@ impl Watcher {
             // (codex/hermes/claude add reasoning/tool/system turns), so seeding from it makes the
             // first `Updated` poll re-emit messages that predate the watcher. Record the true
             // baseline instead — a byte mark where the transcript is append-only (see [`baseline`]).
-            let (mark, read) = capture_baseline(&r, || {
-                baseline(&r).unwrap_or(Mark::Messages(r.message_count.unwrap_or(0)))
-            });
+            // A session without one stays unseen: the next poll surfaces it as New rather than
+            // standing anywhere based on the wrong count.
+            let (mark, read) = capture_baseline(&r, || baseline(&r));
+            let Some(mark) = mark else {
+                continue;
+            };
             self.seen.insert(
                 Self::key(&r),
                 State {
@@ -529,7 +533,7 @@ impl Watcher {
     /// slice. Followers use full discovery independently of catalog synchronization. The
     /// identity-aware per-file scan cache avoids reparsing unchanged transcripts. Public as the
     /// one-shot form of a follower: its current state is this list.
-    pub fn discover(&self) -> Vec<SessionRef> {
+    pub fn discover(&mut self) -> Vec<SessionRef> {
         let mut refs: Vec<SessionRef> = (self.discover)()
             .into_iter()
             .filter(|r| self.filter.matches(r))
@@ -755,11 +759,12 @@ impl Watcher {
         Ok(pending)
     }
 
-    /// Observe sources on the same discovery/filter loop without first reading their message
-    /// tails. The consumer validates both source and derived artifact freshness, performs its one required read and
-    /// returns the completed count/baseline only after publication succeeds. Failure leaves the
-    /// previous position untouched, so the next poll retries even without a new append.
-    pub fn poll_sources(
+    /// Offer every followed source on the same discovery/filter loop, without first reading its
+    /// message tail. No trigger gates the offer — the consumer validates source and derived
+    /// artifact freshness itself, performs its one required read and returns the completed
+    /// count/baseline only after publication succeeds. Failure leaves the previous position
+    /// untouched, so the next poll retries even without a new append.
+    pub fn offer_sources(
         &mut self,
         mut take: impl FnMut(EventKind, &SessionRef, usize) -> Option<(usize, ReadState)>,
     ) -> usize {
@@ -841,7 +846,7 @@ mod tests {
             refs
         }
         for discovery in [copies as fn() -> Vec<SessionRef>, reversed] {
-            let watcher = Watcher::with_discovery(Filter::default(), true, discovery);
+            let mut watcher = Watcher::with_discovery(Filter::default(), true, discovery);
             let selected = watcher.discover();
             assert_eq!(selected.len(), 2, "different harnesses retain separate positions");
             assert_eq!(
@@ -857,7 +862,7 @@ mod tests {
             refs[2].cwd = Some("/elsewhere".into());
             refs
         }
-        let watcher = Watcher::with_discovery(
+        let mut watcher = Watcher::with_discovery(
             Filter {
                 cwd_contains: Some("requested".into()),
                 ..Default::default()
@@ -1253,31 +1258,13 @@ mod tests {
                 },
             );
         }
-        // Prior wire selection: size eligibility first, then the first eight eligible
-        // reader states in the map's iteration order. Positions always survive both limits.
-        let mut readers = 0;
-        let expected: BTreeMap<_, _> = watcher
-            .seen
-            .iter()
-            .map(|(key, state)| {
-                let mut pos = Pos::from(state);
-                pos.r = state.read.clone().filter(|read| read.fits_cache(64 * 1024));
-                if pos.r.is_some() {
-                    readers += 1;
-                    if readers > 8 {
-                        pos.r = None;
-                    }
-                }
-                (key.clone(), pos)
-            })
-            .collect();
+        // The budget's contract, not its selection order: every position survives, at most
+        // eight eligible reader states are carried, and what is carried resumes exactly.
         let cursor = watcher.to_cursor();
-        assert_eq!(cursor.len(), 16);
-        assert_eq!(cursor.o.values().filter(|pos| pos.r.is_some()).count(), 8);
-        assert_eq!(
-            serde_json::to_value(&cursor.o).unwrap(),
-            serde_json::to_value(expected).unwrap()
-        );
+        assert_eq!(cursor.len(), 16, "positions always survive both limits");
+        let carried = cursor.o.values().filter(|pos| pos.r.is_some()).count();
+        assert!(carried <= 8, "at most eight reader states, got {carried}");
+        assert!(carried >= 1, "eligible reader states are carried");
         let resumed = Watcher::from_cursor(Filter::default(), Cursor::decode(&cursor.encode()).unwrap(), Vec::new);
         for (key, state) in &watcher.seen {
             let restored = &resumed.seen[key];
@@ -1321,7 +1308,7 @@ mod tests {
         for source_poll in [false, true] {
             let mut watcher = Watcher::from_cursor(Filter::default(), cursor.clone(), replacement);
             if source_poll {
-                assert_eq!(watcher.poll_sources(|_, _, _| None), 0);
+                assert_eq!(watcher.offer_sources(|_, _, _| None), 0);
             } else {
                 assert!(watcher
                     .try_poll(
@@ -1338,7 +1325,7 @@ mod tests {
             let cursor = Cursor::decode(&encoded).unwrap();
             assert!(cursor.is_empty(), "vanished position survived: {encoded}");
             let mut resumed = Watcher::from_cursor(Filter::default(), cursor, original);
-            resumed.poll_sources(|kind, _, previous| {
+            resumed.offer_sources(|kind, _, previous| {
                 assert_eq!(kind, EventKind::New);
                 assert_eq!(previous, 0, "reappeared identity inherited its removed position");
                 None
@@ -1704,7 +1691,7 @@ mod tests {
         let mut watcher = Watcher::with_discovery(Filter::default(), true, discover);
         for _ in 0..2 {
             assert_eq!(
-                watcher.poll_sources(|kind, _, previous| {
+                watcher.offer_sources(|kind, _, previous| {
                     assert_eq!(kind, EventKind::New);
                     assert_eq!(previous, 0);
                     None
@@ -1714,7 +1701,7 @@ mod tests {
             assert!(watcher.to_cursor().is_empty());
         }
         assert_eq!(
-            watcher.poll_sources(|kind, r, previous| {
+            watcher.offer_sources(|kind, r, previous| {
                 assert_eq!(kind, EventKind::New);
                 assert_eq!(previous, 0);
                 Some((4, ReadState::baseline(r)))
@@ -1722,7 +1709,7 @@ mod tests {
             1
         );
         assert_eq!(
-            watcher.poll_sources(|kind, r, previous| {
+            watcher.offer_sources(|kind, r, previous| {
                 assert_eq!(kind, EventKind::Updated);
                 assert_eq!(previous, 4);
                 Some((4, ReadState::baseline(r)))

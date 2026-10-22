@@ -344,7 +344,7 @@ pub(crate) fn cmd_watch(archive: &Archive, interval: f64, harness: Option<String
     // ownership of `archive` and reads identically.
     loop {
         let mut fatal = None;
-        watcher.poll_sources(|kind, r, previous| match archive_event(archive, r, kind, previous) {
+        watcher.offer_sources(|kind, r, previous| match archive_event(archive, r, kind, previous) {
             Ok(pass) => pass,
             Err(error) => {
                 fatal = Some(error);

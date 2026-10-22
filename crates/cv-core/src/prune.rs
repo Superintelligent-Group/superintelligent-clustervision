@@ -436,7 +436,7 @@ fn prune_session_after_stage(
     after_stage: impl FnOnce() -> Result<()>,
 ) -> Result<PruneResult> {
     if let Some(id) = &opts.new_id {
-        crate::restamp::validate_output_id(id)?;
+        crate::publish::validate_output_id(id)?;
     }
     let reference = crate::ir::SessionRef::from_path(src_path, harness);
     let subagent = crate::rewind::is_subagent(&reference);
