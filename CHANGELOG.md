@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.18.0-rc.1 — 2026-10-22 — the release an agent can trust
 
 **Breaking: commands, MCP, HTTP and JSON.** A removed name exits 2 with a pointer to its replacement; a changed shape is named here.
 - An uncounted session's `message_count` was `0`; `ls --json`, `/api/sessions` and search rows now emit `null`.
