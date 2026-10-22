@@ -51,7 +51,8 @@ or rewritten. Paths are relative to `crates/`.
 | `agent-…` lookup, workflow by name | O(n) catalog rows + a sidecar readdir per session | same | same | `lib.rs` `workflow_sessions` |
 | distill | O(s) | — | — | `distill.rs` (commit set) |
 | prune / rewind / emit / dataset | O(s) per session | — | — | linear passes, hashed sets |
-| Task log, per command | O(E) replay | O(E) | O(E) | `task/store.rs` (open, below) |
+| Task log, model readers (hook, mutations, list) | O(E) | O(state) fold load | O(state) + the appended events | `task/store.rs` `Fold` |
+| Task log, event listers (`events`, `show`, inbox) | O(E) | O(E) | O(E) | `task/store.rs` `replay` |
 
 ## Open (structural, not yet fixed)
 
@@ -59,9 +60,6 @@ or rewritten. Paths are relative to `crates/`.
   switch. Past it every conversation read re-parses its whole archive, O(n_a·S_a). Owned by the
   open-cliffs lane (the exports offset index), as are that lane's other items.
 
-- **Task log replay**: every command, prompt hook and API request replays all E events.
-  E appends cost O(E²) in total. Needs a persisted reducer snapshot plus a suffix fold
-  (about 150 lines).
 - **`agent-…` lookups** read the catalog, not a rediscovery, but still list each session's
   sidecar dir. A by-id index cannot replace that: the scan cache holds an agent only after its
   forest was read and flushed, and an agent written since (or a copy) is in no record.

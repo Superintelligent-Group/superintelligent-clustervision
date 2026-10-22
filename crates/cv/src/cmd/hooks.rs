@@ -1155,7 +1155,8 @@ fn ago(t: Option<chrono::DateTime<chrono::Utc>>) -> String {
 /// owes nothing, so it never costs the start pack its sessions.
 fn owed_decisions(hook: HookName) -> Option<(String, usize)> {
     let who = cv_core::task::actor(None, "cv");
-    let outcome = match cv_core::task::replay() {
+    // Every prompt asks: the stored fold and the events appended since, never the whole log.
+    let outcome = match cv_core::task::fold() {
         Ok(outcome) => outcome,
         Err(e) => {
             eprintln!("cv hook {}: {e:#}", hook.as_str());

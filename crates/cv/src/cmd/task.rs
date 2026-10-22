@@ -560,15 +560,25 @@ fn replay_loud() -> Result<cv_core::task::ReplayOutcome> {
     Ok(outcome)
 }
 
+/// [`replay_loud`] for a command that reads only the model: the stored fold and the events
+/// appended since ([`cv_core::task::fold`]), with the same warnings, printed the same way.
+fn fold_loud() -> Result<cv_core::task::Folded> {
+    let folded = task::fold()?;
+    for w in &folded.warnings {
+        eprintln!("⚠ {}", sanitize_line(w));
+    }
+    Ok(folded)
+}
+
 /// Resolve one mutation target after reporting replay warnings.
 fn resolve_target(id: &str) -> Result<String> {
-    let outcome = replay_loud()?;
+    let outcome = fold_loud()?;
     Ok(resolve(&outcome.model, id)?.to_string())
 }
 
 /// Resolve a mutation target and the task it names, after reporting replay warnings.
 fn resolve_target_and(id: &str, other: &str) -> Result<(String, String)> {
-    let outcome = replay_loud()?;
+    let outcome = fold_loud()?;
     let id = resolve(&outcome.model, id)?.to_string();
     let other = resolve(&outcome.model, other)?.to_string();
     Ok((id, other))
@@ -732,7 +742,7 @@ pub(crate) fn cmd_task(action: TaskCmd) -> Result<()> {
             let (blocked_by, blocks) = if blocked_by.is_empty() && blocks.is_empty() {
                 (blocked_by, blocks)
             } else {
-                let outcome = replay_loud()?;
+                let outcome = fold_loud()?;
                 let res = |ids: Vec<String>| -> Result<Vec<String>> {
                     ids.iter()
                         .map(|p| resolve(&outcome.model, p).map(str::to_string))
@@ -793,7 +803,7 @@ pub(crate) fn cmd_task(action: TaskCmd) -> Result<()> {
                      blockers and body line per task; `list --tsv` has the blockers for scripts",
                 );
             }
-            let outcome = replay_loud()?;
+            let outcome = fold_loud()?;
             let now = Utc::now();
             let touched_since = scope_window(all, since.as_deref(), now)?;
             let caller = task::default_endpoint();
@@ -1048,7 +1058,7 @@ pub(crate) fn cmd_task(action: TaskCmd) -> Result<()> {
             let blocks = if blocks.is_empty() {
                 blocks
             } else {
-                let outcome = replay_loud()?;
+                let outcome = fold_loud()?;
                 blocks
                     .iter()
                     .map(|p| resolve(&outcome.model, p).map(str::to_string))
@@ -1114,7 +1124,7 @@ pub(crate) fn cmd_task(action: TaskCmd) -> Result<()> {
         } => {
             refuse_token(token)?;
             let note = note_arg(note, note_file)?;
-            let outcome = replay_loud()?;
+            let outcome = fold_loud()?;
             let id = resolve(&outcome.model, &id)?.to_string();
             let t = &outcome.model.tasks[&id];
             // The resolver is the fact that matters; never guessed. The error names the cure
@@ -1820,7 +1830,7 @@ fn cmd_sweep(repo: &Path, main: Option<String>, json: bool) -> Result<()> {
         ),
     };
     let merged = merged_branches(&repo, &main)?;
-    let outcome = replay_loud()?;
+    let outcome = fold_loud()?;
     let mut rows: Vec<SweepRow<'_>> = Vec::new();
     for t in outcome.model.tasks.values() {
         if t.state.is_terminal() || t.repo.as_deref().is_some_and(|r| r != repo) {

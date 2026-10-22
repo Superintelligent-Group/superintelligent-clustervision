@@ -169,12 +169,21 @@ fn with_tasks(f: impl FnOnce(&crate::task::ReplayOutcome) -> (u16, Value)) -> (u
     }
 }
 
+/// [`with_tasks`] for a route that reads only the model: the log's stored fold and the events
+/// appended since ([`crate::task::fold`]), with the same warnings.
+fn with_folded(f: impl FnOnce(&crate::task::Folded) -> (u16, Value)) -> (u16, Value) {
+    match crate::task::fold() {
+        Ok(folded) => f(&folded),
+        Err(e) => err(500, &e.to_string()),
+    }
+}
+
 /// `GET /api/tasks?state=&assignee=&repo=&tag=&all=&detail=` — task projections, oldest first;
 /// `detail=1` adds the backlog columns (`opened_by`, `issue`, `body`, `notes`, `decision`, `blocked`).
 fn tasks(query: &str) -> (u16, Value) {
     let params = Query::parse(query);
     let detail = params.flag("detail");
-    with_tasks(|outcome| {
+    with_folded(|outcome| {
         let filter = crate::task::TaskFilter {
             state: params.get("state"),
             assignee: params.get("assignee"),

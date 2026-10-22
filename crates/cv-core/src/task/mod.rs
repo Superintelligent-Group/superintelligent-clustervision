@@ -39,7 +39,7 @@ pub use project::{
     DECISION_TAG, DISCUSS_TAG, STATE_VOCABULARY,
 };
 pub use reduce::{Decision, Note, PinnedStatus, ReduceError, Resolution, TaskProjection, TaskReadModel, TaskReducer};
-pub use store::{new_event, replay, ReplayOutcome, TaskStore};
+pub use store::{fold, new_event, replay, Folded, ReplayOutcome, TaskStore};
 pub use views::TaskRow;
 
 /// The tests' `Opened` kernel: a titled plain task with no repo, issue, channel and no assignee
