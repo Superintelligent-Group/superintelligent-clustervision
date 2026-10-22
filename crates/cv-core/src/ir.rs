@@ -430,6 +430,33 @@ pub enum Role {
     Tool,
 }
 
+impl Role {
+    /// Every role, in declaration order: a new variant must be listed here (the array length
+    /// forces it) before the schema can publish it.
+    pub const ALL: [Role; 4] = [Role::System, Role::User, Role::Assistant, Role::Tool];
+
+    /// The canonical lowercase name (what `--json` prints); the same spelling serde derives.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Role::System => "system",
+            Role::User => "user",
+            Role::Assistant => "assistant",
+            Role::Tool => "tool",
+        }
+    }
+}
+
+/// Every role as serde spells it, beside the enum: the vocabulary `cv schema --json` publishes.
+pub const ROLE_NAMES: [&str; Role::ALL.len()] = {
+    let mut names = [""; Role::ALL.len()];
+    let mut i = 0;
+    while i < Role::ALL.len() {
+        names[i] = Role::ALL[i].as_str();
+        i += 1;
+    }
+    names
+};
+
 /// What a message IS — every adapter sets it, every emitter reads it (`docs/INTERFACE-V2.md` §4).
 /// `Role` says who speaks; `MessageKind` says what the turn is; `Origin` says where it came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -469,6 +496,25 @@ pub enum MessageKind {
 }
 
 impl MessageKind {
+    /// Every kind, in declaration order: a new variant must be listed here (the array length
+    /// forces it) before the schema can publish it.
+    pub const ALL: [MessageKind; 14] = [
+        MessageKind::Prompt,
+        MessageKind::Reply,
+        MessageKind::ToolResult,
+        MessageKind::InjectedContext,
+        MessageKind::SystemPrompt,
+        MessageKind::Notice,
+        MessageKind::CompactionBoundary,
+        MessageKind::CompactionSummary,
+        MessageKind::ModelChange,
+        MessageKind::Error,
+        MessageKind::SubagentSpawn,
+        MessageKind::SubagentReturn,
+        MessageKind::Branch,
+        MessageKind::Carrier,
+    ];
+
     /// The kind a bare role implies when an adapter has not said otherwise: User→Prompt,
     /// Assistant→Reply, Tool→ToolResult, System→Notice. Adapters MUST set the precise kind; this
     /// exists for `Message::new` and for legacy IR JSON that predates `kind`.
@@ -482,7 +528,7 @@ impl MessageKind {
     }
 
     /// The canonical snake_case name (what `--json` prints).
-    pub fn as_str(self) -> &'static str {
+    pub const fn as_str(self) -> &'static str {
         match self {
             MessageKind::Prompt => "prompt",
             MessageKind::Reply => "reply",
@@ -533,6 +579,17 @@ impl MessageKind {
     }
 }
 
+/// Every kind as serde spells it, beside the enum: the vocabulary `cv schema --json` publishes.
+pub const MESSAGE_KIND_NAMES: [&str; MessageKind::ALL.len()] = {
+    let mut names = [""; MessageKind::ALL.len()];
+    let mut i = 0;
+    while i < MessageKind::ALL.len() {
+        names[i] = MessageKind::ALL[i].as_str();
+        i += 1;
+    }
+    names
+};
+
 /// Where a message came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -557,6 +614,33 @@ pub enum Origin {
 }
 
 impl Origin {
+    /// Every origin, in declaration order: a new variant must be listed here (the array length
+    /// forces it) before the schema can publish it.
+    pub const ALL: [Origin; 8] = [
+        Origin::Human,
+        Origin::Model,
+        Origin::Harness,
+        Origin::Hook,
+        Origin::Scheduler,
+        Origin::Subagent,
+        Origin::Import,
+        Origin::Unknown,
+    ];
+
+    /// The canonical snake_case name (what `--json` prints); the same spelling serde derives.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Origin::Human => "human",
+            Origin::Model => "model",
+            Origin::Harness => "harness",
+            Origin::Hook => "hook",
+            Origin::Scheduler => "scheduler",
+            Origin::Subagent => "subagent",
+            Origin::Import => "import",
+            Origin::Unknown => "unknown",
+        }
+    }
+
     /// The origin a bare role implies: User→Human, Assistant→Model, Tool→Harness (the harness ran
     /// the tool), System→Harness. Adapters override when the store says otherwise.
     pub fn for_role(role: Role) -> Self {
@@ -567,6 +651,17 @@ impl Origin {
         }
     }
 }
+
+/// Every origin as serde spells it, beside the enum: the vocabulary `cv schema --json` publishes.
+pub const ORIGIN_NAMES: [&str; Origin::ALL.len()] = {
+    let mut names = [""; Origin::ALL.len()];
+    let mut i = 0;
+    while i < Origin::ALL.len() {
+        names[i] = Origin::ALL[i].as_str();
+        i += 1;
+    }
+    names
+};
 
 /// One message/turn in a conversation.
 #[derive(Debug, Clone)]
