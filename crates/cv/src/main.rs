@@ -38,6 +38,21 @@ use util::{usage, UsageError, WindowArgs};
 /// binary in your PATH is checkable against source.
 const BUILD_VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), " (", env!("CV_BUILD_SHA"), ")");
 
+/// The clap tree is well-formed (debug asserts: conflicting ids, bad defaults, …).
+/// Building the clap tree is deep: `Cli::command()` for every command with its args is a
+/// large stack frame in a debug build, and the default 2 MB test-thread stack overflows on
+/// it (the binary's main thread has 8 MB and is fine). Run the tree-building tests on a
+/// thread sized like main.
+#[cfg(test)]
+pub(crate) fn on_main_sized_stack(f: impl FnOnce() + Send + 'static) {
+    std::thread::Builder::new()
+        .stack_size(16 * 1024 * 1024)
+        .spawn(f)
+        .expect("spawn")
+        .join()
+        .expect("test thread panicked");
+}
+
 /// The command groups `cv --help` prints and `cv schema --commands` reports. clap renders
 /// subcommands as one flat list (its `next_help_heading` tags *arguments*), so the grouping lives
 /// here; `groups_cover_every_visible_command` keeps this table and the `Cmd` enum in lockstep.
@@ -1715,23 +1730,9 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// The clap tree is well-formed (debug asserts: conflicting ids, bad defaults, …).
-    /// Building the clap tree is deep: `Cli::command()` for every command with its args is a
-    /// large stack frame in a debug build, and the default 2 MB test-thread stack overflows on
-    /// it (the binary's main thread has 8 MB and is fine). Run the tree-building tests on a
-    /// thread sized like main.
-    fn on_main_sized_stack(f: impl FnOnce() + Send + 'static) {
-        std::thread::Builder::new()
-            .stack_size(16 * 1024 * 1024)
-            .spawn(f)
-            .expect("spawn")
-            .join()
-            .expect("test thread panicked");
-    }
-
     #[test]
     fn mcp_reuses_one_parsed_tree_with_exact_schema_and_releases_parser_owners() {
-        on_main_sized_stack(|| {
+        crate::on_main_sized_stack(|| {
             use std::sync::Arc;
             #[derive(Clone)]
             struct Owner(Arc<()>);
@@ -1795,14 +1796,14 @@ mod tests {
 
     #[test]
     fn clap_tree_is_valid() {
-        on_main_sized_stack(|| build_cli().debug_assert());
+        crate::on_main_sized_stack(|| build_cli().debug_assert());
     }
 
     /// Every visible command sits in exactly one group, and every grouped name is a real
     /// command — the table and the enum cannot drift apart.
     #[test]
     fn groups_cover_every_visible_command() {
-        on_main_sized_stack(groups_cover_every_visible_command_body);
+        crate::on_main_sized_stack(groups_cover_every_visible_command_body);
     }
 
     fn groups_cover_every_visible_command_body() {
@@ -1850,7 +1851,7 @@ mod tests {
     /// `cv --help` lists the groups and ends with the recipes pointer.
     #[test]
     fn help_is_grouped_and_ends_with_recipes() {
-        on_main_sized_stack(help_is_grouped_and_ends_with_recipes_body);
+        crate::on_main_sized_stack(help_is_grouped_and_ends_with_recipes_body);
     }
 
     fn help_is_grouped_and_ends_with_recipes_body() {

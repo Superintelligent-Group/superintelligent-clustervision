@@ -425,9 +425,12 @@ fn json_type(a: &ArgSpec) -> &'static str {
 
 fn default_value(a: &ArgSpec, raw: &str) -> Value {
     match json_type(a) {
-        "integer" => raw.parse::<i64>().map(Value::from).unwrap_or_else(|_| json!(raw)),
-        "number" => raw.parse::<f64>().map(Value::from).unwrap_or_else(|_| json!(raw)),
-        "boolean" => raw.parse::<bool>().map(Value::from).unwrap_or_else(|_| json!(raw)),
+        // The spec is extracted from the same clap tree that parses the arguments, so a typed
+        // argument's default parses as that type. No raw-string fallback: the schema's default
+        // must always be a valid value for the type the schema advertises.
+        "integer" => Value::from(raw.parse::<i64>().expect("integer argument's default parses")),
+        "number" => Value::from(raw.parse::<f64>().expect("number argument's default parses")),
+        "boolean" => Value::from(raw.parse::<bool>().expect("boolean argument's default parses")),
         _ => json!(raw),
     }
 }
@@ -612,12 +615,11 @@ fn invalid(msg: String) -> anyhow::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::on_main_sized_stack;
 
     #[test]
     fn skills_policy_uses_the_same_name_in_mcp_and_cli() {
-        std::thread::Builder::new()
-            .stack_size(16 * 1024 * 1024)
-            .spawn(|| {
+        on_main_sized_stack(|| {
                 let tree = crate::build_cli();
                 let tools = CliTools::from_tree(&tree).unwrap();
                 for name in ["prune", "rewind", "port"] {
@@ -741,16 +743,11 @@ mod tests {
 
     #[test]
     fn hook_is_no_tool_but_its_installer_is() {
-        std::thread::Builder::new()
-            .stack_size(16 * 1024 * 1024) // a debug clap tree overflows the 2 MB test stack
-            .spawn(|| {
-                let tools = CliTools::from_tree(&crate::build_cli()).unwrap();
-                assert!(tools.find("hook").is_none());
-                assert!(tools.find("hooks_install").is_some());
-            })
-            .unwrap()
-            .join()
-            .unwrap();
+        on_main_sized_stack(|| {
+            let tools = CliTools::from_tree(&crate::build_cli()).unwrap();
+            assert!(tools.find("hook").is_none());
+            assert!(tools.find("hooks_install").is_some());
+        });
     }
 
     #[test]
@@ -787,68 +784,63 @@ mod tests {
 
     #[test]
     fn generated_task_flags_and_repeatable_arguments_round_trip_through_clap() {
-        std::thread::Builder::new()
-            .stack_size(16 * 1024 * 1024)
-            .spawn(|| {
-                let tree = crate::build_cli();
-                let tools = CliTools::from_tree(&tree).unwrap();
-                for (name, args, expected) in [
-                    (
-                        "task_block",
-                        json!({"id":"a", "by_task":"b"}),
-                        vec!["task", "block", "a", "--by", "b"],
-                    ),
-                    (
-                        "task_supersede",
-                        json!({"id":"a", "by_task":"b"}),
-                        vec!["task", "supersede", "a", "--by", "b"],
-                    ),
-                    (
-                        "task_decide",
-                        json!({"title":"question", "for_who":"ember", "default":"a", "options":["b", "c"]}),
-                        vec![
-                            "task",
-                            "decide",
-                            "question",
-                            "--for",
-                            "ember",
-                            "--default",
-                            "a",
-                            "--option",
-                            "b",
-                            "--option",
-                            "c",
-                        ],
-                    ),
-                    (
-                        "splice",
-                        json!({"specs":["a:..2", "b:2.."]}),
-                        vec!["splice", "a:..2", "b:2..", "--json"],
-                    ),
-                ] {
-                    let cmd = tools.find(name).unwrap();
-                    let argv = build_argv(cmd, &args).unwrap();
-                    assert_eq!(argv, expected);
-                    tree.clone()
-                        .try_get_matches_from(std::iter::once("cv".to_owned()).chain(argv))
-                        .unwrap();
-                }
-                for (tool, arg) in [
-                    ("task_decide", "options"),
-                    ("task_open", "blocked_by"),
-                    ("splice", "specs"),
-                    ("adopt", "agents"),
-                    ("distill", "with"),
-                ] {
-                    let descriptor = tool_descriptor(tools.find(tool).unwrap());
-                    let property = &descriptor["inputSchema"]["properties"][arg];
-                    assert_eq!(property["type"], "array");
-                    assert_eq!(property["items"]["type"], "string");
-                }
-            })
-            .unwrap()
-            .join()
-            .unwrap();
+        on_main_sized_stack(|| {
+            let tree = crate::build_cli();
+            let tools = CliTools::from_tree(&tree).unwrap();
+            for (name, args, expected) in [
+                (
+                    "task_block",
+                    json!({"id":"a", "by_task":"b"}),
+                    vec!["task", "block", "a", "--by", "b"],
+                ),
+                (
+                    "task_supersede",
+                    json!({"id":"a", "by_task":"b"}),
+                    vec!["task", "supersede", "a", "--by", "b"],
+                ),
+                (
+                    "task_decide",
+                    json!({"title":"question", "for_who":"ember", "default":"a", "options":["b", "c"]}),
+                    vec![
+                        "task",
+                        "decide",
+                        "question",
+                        "--for",
+                        "ember",
+                        "--default",
+                        "a",
+                        "--option",
+                        "b",
+                        "--option",
+                        "c",
+                    ],
+                ),
+                (
+                    "splice",
+                    json!({"specs":["a:..2", "b:2.."]}),
+                    vec!["splice", "a:..2", "b:2..", "--json"],
+                ),
+            ] {
+                let cmd = tools.find(name).unwrap();
+                let argv = build_argv(cmd, &args).unwrap();
+                assert_eq!(argv, expected);
+                tree.clone()
+                    .try_get_matches_from(std::iter::once("cv".to_owned()).chain(argv))
+                    .unwrap();
+            }
+            for (tool, arg) in [
+                ("task_decide", "options"),
+                ("task_open", "blocked_by"),
+                ("splice", "specs"),
+                ("adopt", "agents"),
+                ("distill", "with"),
+            ] {
+                let descriptor = tool_descriptor(tools.find(tool).unwrap());
+                let property = &descriptor["inputSchema"]["properties"][arg];
+                assert_eq!(property["type"], "array");
+                assert_eq!(property["items"]["type"], "string");
+            }
+        });
     }
 
     #[test]
@@ -943,23 +935,18 @@ mod tests {
 
     #[test]
     fn removed_properties_name_the_replacement() {
-        std::thread::Builder::new()
-            .stack_size(16 * 1024 * 1024)
-            .spawn(|| {
-                for (name, old, replacement) in [
-                    ("pack", "to", "harness"),
-                    ("dataset", "out", "file"),
-                    ("deferrals", "since", "at"),
-                ] {
-                    let commands = CliTools::from_tree(&crate::build_cli()).unwrap();
-                    let command = commands.commands().iter().find(|cmd| cmd.name == name).unwrap();
-                    let error = build_argv(command, &json!({old: "value"})).unwrap_err().to_string();
-                    assert!(error.contains(&format!("use `{replacement}`")), "{error}");
-                }
-            })
-            .unwrap()
-            .join()
-            .unwrap();
+        on_main_sized_stack(|| {
+            for (name, old, replacement) in [
+                ("pack", "to", "harness"),
+                ("dataset", "out", "file"),
+                ("deferrals", "since", "at"),
+            ] {
+                let commands = CliTools::from_tree(&crate::build_cli()).unwrap();
+                let command = commands.commands().iter().find(|cmd| cmd.name == name).unwrap();
+                let error = build_argv(command, &json!({old: "value"})).unwrap_err().to_string();
+                assert!(error.contains(&format!("use `{replacement}`")), "{error}");
+            }
+        });
     }
 
     #[test]
