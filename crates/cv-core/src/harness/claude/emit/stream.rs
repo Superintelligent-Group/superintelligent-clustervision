@@ -619,7 +619,7 @@ fn record<'a>(
 pub fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<EmitResult> {
     crate::emit::validate_native_source(session, Harness::Claude, opts.thinking)?;
     let (session_id, agent) = match &opts.sidechain_of {
-        Some((root, agent)) => (root.clone(), Some(agent.clone())),
+        Some(of) => (of.root.clone(), Some(of.agent.clone())),
         None => (opts.new_id.clone().unwrap_or_else(|| Uuid::new_v4().to_string()), None),
     };
     let new_id = agent.clone().unwrap_or_else(|| session_id.clone());

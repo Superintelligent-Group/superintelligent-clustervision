@@ -64,7 +64,7 @@ pub mod tools;
 pub(crate) mod utf8;
 pub mod watch;
 
-pub use emit::{emit, EmitOptions};
+pub use emit::{emit, EmitOptions, SidechainOf};
 pub use harness::{Adapter, Discovered, EmitResult, Skipped};
 pub use ir::*;
 pub use json::{Json, JsonRange, JsonView};
