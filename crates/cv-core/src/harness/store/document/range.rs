@@ -327,6 +327,8 @@ pub(crate) fn scoped<T>(
     }
     #[cfg(not(feature = "mmap"))]
     {
+        // The range needs no pre-scoped source here: a positioned RangeSource addresses the
+        // whole capture by absolute offset, and every view applies its own extent to it.
         let _ = range;
         let source = match decoded {
             Some(bytes) => RangeSource::decoded(captured.clone(), bytes)?,
