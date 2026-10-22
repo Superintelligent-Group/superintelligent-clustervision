@@ -5556,6 +5556,51 @@ mod tests {
         assert_eq!(refresh(), 0);
     }
 
+    /// Continue rewrites `sessions.json` on every save of any session; a session's listing facts
+    /// come from its own entry there, which certifies it: an entry that changed rereads its
+    /// session, a rewrite that changed no session's entry rereads none.
+    #[test]
+    fn a_continue_index_rewrite_rereads_only_the_session_whose_entry_moved() {
+        let _home = IsolatedHome::new();
+        let (dir, sdir) = (tmpdir(), tmpdir());
+        let ids = ["c-one", "c-two", "c-three"];
+        let refs: Vec<_> = ids
+            .iter()
+            .map(|id| {
+                let path = sdir.join(format!("{id}.json"));
+                std::fs::write(
+                    &path,
+                    serde_json::json!({"sessionId":id,"title":"t","workspaceDirectory":"/w",
+                        "history":[{"message":{"role":"user","content":format!("zqcontinue {id}")}}]})
+                    .to_string(),
+                )
+                .unwrap();
+                cv_core::SessionRef::new(*id, cv_core::Harness::Continue, path)
+            })
+            .collect();
+        let index = |titles: [&str; 3], count: u64| {
+            let entries: Vec<_> = ids
+                .iter()
+                .zip(titles)
+                .map(|(id, title)| {
+                    serde_json::json!({"sessionId":id,"title":title,"dateCreated":"1791750876345",
+                        "workspaceDirectory":"/w","messageCount":count})
+                })
+                .collect();
+            std::fs::write(sdir.join("sessions.json"), serde_json::to_string(&entries).unwrap()).unwrap();
+        };
+        index(["a", "b", "c"], 1);
+        let refresh = || sweep(&dir, refs.clone(), false, false).unwrap().changed;
+        assert_eq!(refresh(), 3);
+        assert_eq!(refresh(), 0);
+        // A save elsewhere rewrites the index: no listing fact moved.
+        index(["a", "b", "c"], 2);
+        assert_eq!(refresh(), 0);
+        index(["a", "renamed", "c"], 2);
+        assert_eq!(refresh(), 1);
+        assert_eq!(refresh(), 0);
+    }
+
     /// The core invariant of `ChunkSink`: a body larger than [`CHUNK_BYTES`] is flushed into several
     /// tantivy docs that all share the session id. Search must (a) still find a term living only in a
     /// late chunk, and (b) dedup a term present in *every* chunk back to a single row per id.

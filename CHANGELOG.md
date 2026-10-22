@@ -40,6 +40,8 @@
 
 - A write to the Cline SDK side databases rereads only the lead sessions whose schedule, cron or team rows changed.
 
+- Cline, Roo, Continue and OpenSession discovery rescan only files that changed; a Roo count reads `ui_messages.json` once; Continue sessions are certified by their index entry.
+
 - Search staleness counts the preferred copy of each session, avoiding false drift from older duplicates.
 
 - `cv search`, `/api/search` and `-q text:` read what the index has not seen live, from its resume mark, within `--live-bytes` (256 MiB); `--frozen` reads none.

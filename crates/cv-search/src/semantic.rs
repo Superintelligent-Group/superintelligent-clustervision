@@ -498,13 +498,20 @@ fn refresh(
         let snapshot = before.snapshot(r);
         let reusable = lookup.get(&(r.harness.as_str(), r.id.as_str())).copied().filter(|&i| {
             let m = &old.meta[i];
-            compatible && m.session == *r && m.source.as_ref().is_some_and(|old| old.fresh(&snapshot, &mut before))
+            // A session of a shared store whose own rows certify unchanged keeps its row.
+            compatible
+                && m.session == *r
+                && m.source
+                    .as_ref()
+                    .is_some_and(|old| old.fresh(&snapshot, &mut before) || old.rows_fresh(r, &snapshot, &mut before))
         });
         if let Some(i) = reusable {
             keep[i] = true;
         }
         if reusable.is_none() {
-            changed.push((r, snapshot));
+            // A shared store's certificate as of this snapshot, before the read.
+            let rows = before.rows(r);
+            changed.push((r, cv_core::source::Baseline { rows, ..snapshot }));
         }
     }
     drop(lookup);
@@ -565,9 +572,10 @@ fn refresh(
             .get(&(r.harness.as_str(), r.id.as_str()))
             .context("semantic session missing after refresh")?;
         anyhow::ensure!(
-            row.source
-                .as_ref()
-                .is_some_and(|s| s.fresh(&after.snapshot(r), &mut after)),
+            row.source.as_ref().is_some_and(|s| {
+                let now = after.snapshot(r);
+                s.fresh(&now, &mut after) || s.rows_fresh(r, &now, &mut after)
+            }),
             "semantic source changed during refresh: {}",
             r.id
         );

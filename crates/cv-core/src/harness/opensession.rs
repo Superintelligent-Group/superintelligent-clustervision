@@ -192,7 +192,10 @@ fn discover_documents(roots: Vec<PathBuf>) -> crate::Discovered {
     let paths = super::export::files_under(roots, is_document_file, &mut out.skipped);
     let mut seen = std::collections::HashSet::new();
     for path in paths {
-        if let Some(r) = out.keep(&path, doc_ref(&path)) {
+        // A document's ref is its own bytes': rescanned only when the file moves.
+        let scanned = crate::discover_cache::cached_scan_checked(&path, || doc_ref(&path).map(Some))
+            .and_then(|r| r.context("a document scan names its session"));
+        if let Some(r) = out.keep(&path, scanned) {
             if seen.insert(r.id.clone()) {
                 out.refs.push(r);
             }
@@ -224,7 +227,12 @@ fn is_document_file(p: &Path) -> bool {
 /// A lightweight [`SessionRef`] for one document: metadata only, counting conversational turns
 /// (user + assistant, the cross-harness contract) straight off the raw records. A document with
 /// no `id` is not a session cv can name: an error, as is one that cannot be read or decoded.
+#[cfg(test)]
+static SCANNED: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
+
 fn doc_ref(path: &Path) -> Result<SessionRef> {
+    #[cfg(test)]
+    SCANNED.lock().unwrap().push(path.to_path_buf());
     JsonSource::capture(path)?.read(ReadInput::Document, Validation::Value, |view| {
         let record = Fields::parse(view, &["id", "cwd", "title", "created_at", "updated_at", "messages"])?
             .context("document object")?;

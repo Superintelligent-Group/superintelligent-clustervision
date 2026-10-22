@@ -271,7 +271,14 @@ pub fn discover_in(roots: &[PathBuf], harness: Harness) -> crate::Discovered {
             let Some(id) = dir.file_name().and_then(|n| n.to_str()).map(str::to_string) else {
                 continue;
             };
-            if let Some(found) = crate::Skipped::listed(&history, scan(&dir, &id, harness).map(Some)) {
+            // The scan reads the history, the metadata file's cwd and the three files' mtimes:
+            // cached under those files' identities, rescanned only when one moves.
+            let mut reads = crate::source::ReadSet::default();
+            reads.record(&dir.join("ui_messages.json"));
+            reads.record(&dir.join("task_metadata.json"));
+            let scanned =
+                crate::discover_cache::cached_scan_with_reads(&history, reads, || scan(&dir, &id, harness).map(Some));
+            if let Some(found) = crate::Skipped::listed(&history, scanned) {
                 out.push(found);
             }
         }
@@ -307,8 +314,13 @@ fn is_turn(role: &str, record: &Fields<'_>) -> Result<bool> {
     Ok(!only_results)
 }
 
+#[cfg(test)]
+static SCANNED: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
+
 /// Cheap metadata-only scan of one task dir into a `SessionRef`.
 fn scan(dir: &Path, id: &str, harness: Harness) -> Result<SessionRef> {
+    #[cfg(test)]
+    SCANNED.lock().unwrap().push(dir.to_path_buf());
     let history = dir.join("api_conversation_history.json");
     let source = JsonSource::capture(&history)?;
     let (mut cwd, title, message_count) = source.read(ReadInput::Document, Validation::Value, |view| {
@@ -410,7 +422,15 @@ pub fn stream_task_dir(
     session.created_at = task_id_to_time(id);
     session.updated_at = newest_mtime(dir).or(session.created_at);
     // ui_messages.json gives the most precise created/updated and the first user turn's timestamp.
-    let (ui_created, ui_updated, first_user_ts) = ui_message_times(dir)?;
+    // Roo also takes its store affordances from this file: one read serves both.
+    let roo = match harness {
+        Harness::Roo => super::roo::ui_times(dir),
+        _ => None,
+    };
+    let (ui_created, ui_updated, first_user_ts) = match roo {
+        Some(times) => times,
+        None => ui_message_times(dir)?,
+    };
     if let Some(c) = ui_created {
         session.created_at = Some(c);
     }
@@ -1015,7 +1035,7 @@ fn optional_document<T>(path: &Path, visit: impl for<'a> FnOnce(JsonView<'a>) ->
 /// - `first_user_ts`: same first `ts`, which the streaming core stamps onto the first user turn.
 ///
 /// The three timestamp hints extracted from a task's `ui_messages.json`.
-type UiTimes = (Option<DateTime<Utc>>, Option<DateTime<Utc>>, Option<DateTime<Utc>>);
+pub(super) type UiTimes = (Option<DateTime<Utc>>, Option<DateTime<Utc>>, Option<DateTime<Utc>>);
 
 /// Reduce timestamps while skipping UI text payloads under the original whole-Value boundary.
 fn ui_message_times(dir: &Path) -> Result<UiTimes> {
@@ -1051,6 +1071,42 @@ mod tests {
     use super::*;
     use crate::harness::Parse;
     use crate::stream::CollectSink;
+
+    /// Discovery rescans a task only when one of the files its scan reads moves.
+    #[test]
+    fn discovery_rescans_only_a_task_whose_files_moved() {
+        let world = crate::test_world("cline-discovery-cache");
+        let context = crate::discover_cache::read::Context::current();
+        let _scope = context.enter();
+        let root = world.base.join("tasks");
+        for id in ["1717000000001", "1717000000002", "1717000000003"] {
+            let dir = root.join(id);
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(
+                dir.join("api_conversation_history.json"),
+                r#"[{"role":"user","content":[{"type":"text","text":"<task>hi</task>"}]}]"#,
+            )
+            .unwrap();
+        }
+        let scanned = || {
+            let mut all = SCANNED.lock().unwrap();
+            let mut mine: Vec<PathBuf> = all.iter().filter(|p| p.starts_with(&root)).cloned().collect();
+            all.retain(|p| !p.starts_with(&root));
+            mine.sort();
+            mine
+        };
+        let first = discover_in(std::slice::from_ref(&root), Harness::Cline).refs;
+        assert_eq!(scanned().len(), 3);
+        let again = discover_in(std::slice::from_ref(&root), Harness::Cline).refs;
+        assert!(scanned().is_empty());
+        assert_eq!(format!("{first:?}"), format!("{again:?}"));
+        let moved = root.join("1717000000002");
+        fs::write(moved.join("task_metadata.json"), r#"{"cwd":"/meta"}"#).unwrap();
+        let refs = discover_in(std::slice::from_ref(&root), Harness::Cline).refs;
+        assert_eq!(scanned(), vec![moved.clone()]);
+        let r = refs.iter().find(|r| r.path == moved).unwrap();
+        assert_eq!(r.cwd.as_deref(), Some(Path::new("/meta")));
+    }
 
     #[test]
     fn editor_roots_do_not_repeat_default_xdg_stores() {

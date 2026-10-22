@@ -85,6 +85,27 @@ impl Adapter for Continue {
         self.sessions.clone().into_iter().collect()
     }
 
+    /// A session's listing title, cwd and creation time come from its `sessions.json` entry,
+    /// which Continue rewrites on every save of any session: it is certified by its own entry
+    /// ([`index_rows`]).
+    fn dependencies(
+        &self,
+        r: &SessionRef,
+        _probe: &mut crate::source::Probe,
+        deps: &mut crate::source::Dependencies,
+    ) -> Option<()> {
+        deps.files.extend(self.rows_store(r));
+        Some(())
+    }
+
+    fn rows_store(&self, r: &SessionRef) -> Option<PathBuf> {
+        Some(r.path.parent()?.join("sessions.json"))
+    }
+
+    fn rows(&self, store: &Path) -> Option<std::collections::HashMap<String, crate::source::Rows>> {
+        Some(index_rows(store))
+    }
+
     fn discover(&self) -> Result<crate::Discovered> {
         let Some(sessions) = &self.sessions else {
             return Ok(Default::default());
@@ -131,17 +152,25 @@ impl Adapter for Continue {
                 if seen.contains(&id) {
                     continue;
                 }
-                let Some(scan) = out.keep(&p, scan_session(&p)) else {
+                // An unindexed session's listing facts are its own file's: rescanned only when it
+                // moves. Uncounted, as the scan leaves it (no catalog count is filled in here).
+                let scanned = crate::discover_cache::cached_scan_checked(&p, || {
+                    let scan = scan_session(&p)?;
+                    let (title, cwd) = scan.map_or((None, None), |s| (s.title, s.cwd));
+                    let meta = IndexMeta {
+                        session_id: id,
+                        title,
+                        cwd,
+                        created_at: None,
+                    };
+                    Ok(Some(ref_from(&meta, &p)))
+                })
+                .and_then(|r| anyhow::Context::context(r, "a session scan lists its session"));
+                let Some(mut r) = out.keep(&p, scanned) else {
                     continue;
                 };
-                let (title, cwd) = scan.map_or((None, None), |s| (s.title, s.cwd));
-                let meta = IndexMeta {
-                    session_id: id,
-                    title,
-                    cwd,
-                    created_at: None,
-                };
-                out.refs.push(ref_from(&meta, &p));
+                r.message_count = None;
+                out.refs.push(r);
             }
         }
 
@@ -411,6 +440,43 @@ fn read_index(path: &Path) -> Result<Vec<IndexMeta>> {
         }
         Ok(out)
     })
+}
+
+/// Every session's certificate in the index at `store`: what discovery takes from its first entry
+/// there (`title`, `workspaceDirectory`, `dateCreated`), or that it has none (an unreadable or
+/// undecodable index is no entry, as discovery reads it), for every `<id>.json` beside it.
+fn index_rows(store: &Path) -> std::collections::HashMap<String, crate::source::Rows> {
+    use crate::source::Rows;
+    let index = read_index(store).unwrap_or_default();
+    let unindexed = Rows {
+        count: 0,
+        high: 0,
+        digest: Rows::SEED,
+    };
+    let mut rows: std::collections::HashMap<String, Rows> = std::collections::HashMap::new();
+    if let Some(dir) = store.parent().and_then(|dir| fs::read_dir(dir).ok()) {
+        for name in dir.flatten().filter_map(|e| e.file_name().into_string().ok()) {
+            if name != "sessions.json" && name.ends_with(".json") {
+                rows.insert(name.trim_end_matches(".json").to_string(), unindexed);
+            }
+        }
+    }
+    let mut seen = std::collections::HashSet::new();
+    for meta in &index {
+        if !seen.insert(meta.session_id.as_str()) {
+            continue;
+        }
+        let entry = serde_json::json!([meta.title, meta.cwd, meta.created_at]);
+        rows.insert(
+            meta.session_id.clone(),
+            Rows {
+                count: 1,
+                high: 0,
+                digest: Rows::fold(Rows::SEED, &serde_json::to_vec(&entry).unwrap_or_default()),
+            },
+        );
+    }
+    rows
 }
 
 /// Build a `SessionRef` from index metadata + the on-disk transcript path.

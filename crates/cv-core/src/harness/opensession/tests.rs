@@ -930,3 +930,39 @@ fn an_undecodable_document_is_a_reported_skip() {
     assert_eq!(skipped, ["anonymous.opensession.json", "torn.opensession.json"]);
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+/// Discovery rescans a document only when its file moves.
+#[test]
+fn discovery_rescans_only_a_document_that_moved() {
+    let world = crate::test_world("opensession-discovery-cache");
+    let context = crate::discover_cache::read::Context::current();
+    let _scope = context.enter();
+    let dir = world.base.join("exports");
+    std::fs::create_dir_all(&dir).unwrap();
+    let write = |id: &str, title: &str| {
+        let mut s = Session::new(id, Harness::Claude);
+        s.title = Some(title.into());
+        let path = dir.join(format!("{id}.opensession.json"));
+        std::fs::write(&path, serde_json::to_vec(&document(&s)).unwrap()).unwrap();
+        path
+    };
+    let paths: Vec<PathBuf> = ["one", "two", "three"].iter().map(|id| write(id, "first")).collect();
+    let scanned = || {
+        let mut all = SCANNED.lock().unwrap();
+        let mine: Vec<PathBuf> = all.iter().filter(|p| p.starts_with(&dir)).cloned().collect();
+        all.retain(|p| !p.starts_with(&dir));
+        mine
+    };
+    let adapter = OpenSession::with_roots(vec![dir.clone()]);
+    assert_eq!(adapter.discover().unwrap().refs.len(), 3);
+    assert_eq!(scanned().len(), 3);
+    assert_eq!(adapter.discover().unwrap().refs.len(), 3);
+    assert!(scanned().is_empty());
+    write("two", "second");
+    let refs = adapter.discover().unwrap().refs;
+    assert_eq!(scanned(), vec![paths[1].clone()]);
+    assert_eq!(
+        refs.iter().find(|r| r.id == "two").unwrap().title.as_deref(),
+        Some("second")
+    );
+}
