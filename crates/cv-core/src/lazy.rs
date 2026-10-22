@@ -133,7 +133,7 @@ impl Text {
         self.inline_str().map(|text| text == other)
     }
 
-    /// The span, if this is lazy content.
+    /// The span, when this is one (`Text::Source` is lazy with no span).
     pub fn as_span(&self) -> Option<&Span> {
         match self {
             Text::Span(sp) => Some(sp),

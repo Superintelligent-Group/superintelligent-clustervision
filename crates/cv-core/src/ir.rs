@@ -591,8 +591,7 @@ pub struct Message {
     /// `Block::ToolResult::details`). See `docs/INTERFACE-V2.md` §4.
     pub extra: serde_json::Map<String, serde_json::Value>,
     /// Checked complete native backing; serializes through `extra._record`, never as a new field.
-    #[doc(hidden)]
-    pub complete_record: Option<std::sync::Arc<CompleteRecord>>,
+    pub(crate) complete_record: Option<std::sync::Arc<CompleteRecord>>,
 }
 
 /// serde by derive over the fields themselves. The destructuring is exhaustive, so a new field is
@@ -710,6 +709,10 @@ fn bag_mut<'a>(
     let slot = extra
         .entry(name)
         .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+    debug_assert!(
+        slot.is_object(),
+        "extra[{name}] held {slot}: a non-object bag can only be a bug"
+    );
     if !slot.is_object() {
         *slot = serde_json::Value::Object(serde_json::Map::new());
     }
