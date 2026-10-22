@@ -63,6 +63,14 @@ const HEADER_LINE: &str = r#"{"format":"cv-task-log","v":1}"#;
 /// where the line number keys quarantine warnings back to the physical file.
 type NumberedEvents = Vec<(usize, TaskEvent)>;
 
+/// What one pass over the log file yields: the parseable events with their line numbers, loud
+/// warnings about interior garbage, and the physical EOF framing.
+struct RawRead {
+    events: NumberedEvents,
+    warnings: Vec<String>,
+    tail: LogTail,
+}
+
 /// Physical EOF framing, separate from events admitted by replay. Readers do not modify it.
 #[derive(Clone, Copy)]
 enum LogTail {
@@ -134,17 +142,17 @@ impl TaskStore {
     /// reason) and counted, so one poisoned interior line degrades the model instead of bricking
     /// the CLI, `cv serve`, and every append at once.
     pub fn replay(&self) -> Result<ReplayOutcome> {
-        let (raw, mut warnings, _) = self.read_events()?;
+        let mut read = self.read_events()?;
         let path = self.events_path();
         let mut reducer = TaskReducer::new();
-        let mut events = Vec::with_capacity(raw.len());
+        let mut events = Vec::with_capacity(read.events.len());
         let mut quarantined = 0usize;
-        for (line_no, ev) in raw {
+        for (line_no, ev) in read.events {
             match reducer.apply(&ev) {
                 Ok(()) => events.push(ev),
                 Err(e) => {
                     quarantined += 1;
-                    warnings.push(format!(
+                    read.warnings.push(format!(
                         "task log {}: line {line_no} quarantined — the reducer refused it ({e}); \
                          event skipped, model is best-effort",
                         path.display()
@@ -155,7 +163,7 @@ impl TaskStore {
         Ok(ReplayOutcome {
             model: reducer.into_model(),
             events,
-            warnings,
+            warnings: read.warnings,
             quarantined,
         })
     }
@@ -197,7 +205,8 @@ impl TaskStore {
 
         // Replay under the lock: the candidate is validated against the exact state it will
         // land after.
-        let (raw, warnings, tail) = self.read_events()?;
+        let read = self.read_events()?;
+        let tail = read.tail;
         if let LogTail::Unrecognized { line_no } = tail {
             bail!(
                 "refusing to append: task log {} line {line_no} is an unrecognized final record \
@@ -205,16 +214,16 @@ impl TaskStore {
                 self.events_path().display()
             );
         }
-        if let Some(first) = warnings.first() {
+        if let Some(first) = read.warnings.first() {
             bail!(
                 "refusing to append: task log {} is degraded ({} warning(s); first: {first}) — \
                  repair the log or upgrade cv before writing",
                 self.events_path().display(),
-                warnings.len()
+                read.warnings.len()
             );
         }
         let mut reducer = TaskReducer::new();
-        for (line_no, ev) in raw {
+        for (line_no, ev) in read.events {
             reducer.apply(&ev).map_err(|e| {
                 anyhow::anyhow!(
                     "refusing to append: task log {} line {line_no} fails replay ({e}) — an \
@@ -268,17 +277,21 @@ impl TaskStore {
         })
     }
 
-    /// Read raw events as `(1-based line number, event)` pairs. Interior unparseable lines are
-    /// collected as warnings, including complete malformed rows without a final newline.
+    /// Read raw events as [`RawRead`]. Interior unparseable lines are collected as warnings,
+    /// including complete malformed rows without a final newline.
     /// A syntactically incomplete EOF prefix is tolerated silently. Syntax-incomplete tails carry a byte boundary for locked recovery;
     /// other unrecognized final rows refuse append. Valid unterminated records need a newline.
     /// A format header is skipped when current, and refused loudly for a newer format version.
-    fn read_events(&self) -> Result<(NumberedEvents, Vec<String>, LogTail)> {
+    fn read_events(&self) -> Result<RawRead> {
         let path = self.events_path();
         let file = match File::open(&path) {
             Ok(f) => f,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                return Ok((Vec::new(), Vec::new(), LogTail::Terminated))
+                return Ok(RawRead {
+                    events: Vec::new(),
+                    warnings: Vec::new(),
+                    tail: LogTail::Terminated,
+                })
             }
             Err(e) => return Err(e).with_context(|| format!("opening task log {}", path.display())),
         };
@@ -366,7 +379,11 @@ impl TaskStore {
                 )
             })
             .collect();
-        Ok((events, warnings, tail))
+        Ok(RawRead {
+            events,
+            warnings,
+            tail,
+        })
     }
 }
 
@@ -388,11 +405,6 @@ pub fn new_event(task_id: Option<&str>, by: &str, kind: TaskEventKind) -> TaskEv
         by: by.to_string(),
         kind,
     }
-}
-
-/// Convenience: agent-facing append to the default store.
-pub fn append_agent_event(task_id: Option<&str>, by: &str, kind: TaskEventKind) -> Result<TaskEvent> {
-    TaskStore::default_store().append_agent_event(new_event(task_id, by, kind))
 }
 
 /// Convenience: replay the default store.

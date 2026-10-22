@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **Breaking (library):** `task::store::append_agent_event` (the free function) is removed; it was an uncalled shadow of the `TaskStore` method of the same name.
+
 - OpenCode JSON-file reads avoid retaining duplicate part inventories while preserving source-change checks and bounded dataset selection heap.
 
 - Desktop ZIP imports report transcript decoding errors instead of attempting to serialize an ingestion result.
