@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Compaction scans report a failed summary read with its full cause chain instead of a flattened one-line copy.
 - OpenCode JSON-file reads avoid retaining duplicate part inventories while preserving source-change checks and bounded dataset selection heap.
 
 - Desktop ZIP imports report transcript decoding errors instead of attempting to serialize an ingestion result.

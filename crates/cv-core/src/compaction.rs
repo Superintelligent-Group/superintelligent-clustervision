@@ -80,7 +80,11 @@ pub struct CompactionSink {
     /// Resolver for a lazily-spanned summary body (set on the streaming path; `None` for the
     /// already-materialized in-session path). A compaction summary can exceed the inline threshold.
     resolver: Option<crate::lazy::Resolver>,
+    /// The scan's first failure, kept whole until someone is handed it: `try_message` returns it
+    /// to the driver, `message` (which cannot) leaves it for `into_boundaries`.
     error: Option<anyhow::Error>,
+    /// The scan failed, whether or not `error` has been handed out yet; every later call refuses.
+    failed: bool,
 }
 
 impl CompactionSink {
@@ -94,6 +98,7 @@ impl CompactionSink {
             unpaired: std::collections::BTreeSet::new(),
             resolver: None,
             error: None,
+            failed: false,
         }
     }
 
@@ -105,9 +110,12 @@ impl CompactionSink {
 
     /// Finish a scan, rejecting partial results when a demanded summary failed.
     pub fn into_boundaries(self) -> anyhow::Result<Vec<Compaction>> {
-        match self.error {
-            Some(error) => Err(error),
-            None => Ok(self.boundaries),
+        match (self.error, self.failed) {
+            (Some(error), _) => Err(error),
+            (None, true) => Err(anyhow::anyhow!(
+                "compaction scan failed (its error was returned to the stream)"
+            )),
+            (None, false) => Ok(self.boundaries),
         }
     }
 }
@@ -123,17 +131,24 @@ fn bag_value<'a>(m: &'a Message, key: &str) -> Option<&'a Value> {
 
 impl MessageSink for CompactionSink {
     fn message(&mut self, m: Message) -> Flow {
-        self.try_message(m).unwrap_or(Flow::Stop)
+        if self.failed {
+            return Flow::Stop;
+        }
+        self.observe(m).unwrap_or_else(|error| {
+            self.failed = true;
+            self.error = Some(error);
+            Flow::Stop
+        })
     }
 
     fn try_message(&mut self, m: Message) -> anyhow::Result<Flow> {
-        if self.error.is_none() {
-            match self.observe(m) {
-                Ok(flow) => return Ok(flow),
-                Err(error) => self.error = Some(error),
-            }
+        if !self.failed {
+            return self.observe(m).inspect_err(|_| self.failed = true);
         }
-        Err(anyhow::anyhow!("{:#}", self.error.as_ref().unwrap()))
+        Err(self
+            .error
+            .take()
+            .unwrap_or_else(|| anyhow::anyhow!("compaction scan has already failed")))
     }
 }
 
@@ -476,6 +491,7 @@ mod tests {
         let mut sink = CompactionSink::new(true);
         sink.try_message(session.messages[0].clone()).unwrap();
         assert!(sink.try_message(message).is_err());
+        assert!(sink.try_message(plain_user("after failure")).is_err());
         assert!(sink.into_boundaries().is_err());
         let missing = crate::lazy::Text::Span(crate::lazy::Span {
             source: Some(world.base.join("missing")),
@@ -494,6 +510,24 @@ mod tests {
         );
         assert!(detect_in_session(&session, true).is_err());
         assert_eq!(detect_in_session(&session, false).unwrap().len(), 1);
+        // The driver is handed the failure itself (here an io::Error under context), not a
+        // flattened copy that has lost its cause.
+        if let Block::Text { text } = &mut session.messages[1].content[0] {
+            *text = crate::lazy::Text::Span(crate::lazy::Span {
+                source: Some(world.base.join("missing")),
+                offset: 1,
+                len: 8192,
+                escaped: true,
+            });
+        }
+        let mut sink = CompactionSink::new(true);
+        sink.try_message(session.messages[0].clone()).unwrap();
+        let streamed = sink.try_message(session.messages[1].clone()).unwrap_err();
+        assert!(
+            streamed.root_cause().downcast_ref::<std::io::Error>().is_some(),
+            "{streamed:?}"
+        );
+        assert!(sink.into_boundaries().is_err());
     }
 
     #[test]
