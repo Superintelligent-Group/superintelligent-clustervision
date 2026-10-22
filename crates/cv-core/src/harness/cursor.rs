@@ -215,6 +215,21 @@ impl Adapter for Cursor {
         Ok(out)
     }
 
+    /// Every composer's and legacy tab's certificate in a `state.vscdb` ([`rows_conn`]); a CLI
+    /// chat's `store.db` holds one session and certifies none.
+    fn rows(&self, store: &Path) -> Option<HashMap<String, crate::source::Rows>> {
+        open_ro(store).ok()?.read(|conn, _| rows_conn(conn)).ok()
+    }
+
+    /// Every legacy tab of a workspace database reads the one `chatdata` value: they share its
+    /// certificate.
+    fn rows_key<'a>(&self, r: &'a SessionRef) -> &'a str {
+        match r.id.split_once(':') {
+            Some(("legacy", _)) => "legacy",
+            _ => &r.id,
+        }
+    }
+
     /// Cursor writes its session databases in place.
     fn watch_policy(&self, _r: &SessionRef) -> super::WatchPolicy {
         super::WatchPolicy::Database
@@ -340,6 +355,51 @@ const COMPOSER_ROWS: &str = "SELECT key FROM cursorDiskKV \
     WHERE key >= 'composerData:' AND key < 'composerData;' ORDER BY rowid";
 const COMPOSER_ROWS_WITHOUT_ROWID: &str = "SELECT key FROM cursorDiskKV \
     WHERE key >= 'composerData:' AND key < 'composerData;'";
+
+/// Every session's [`Rows`](crate::source::Rows) certificate in a `state.vscdb`: for a composer its
+/// `composerData:<id>` row and every `bubbleId:<id>:*` row, in key order, each by its key, rowid
+/// (`key UNIQUE ON CONFLICT REPLACE`: a rewritten value takes a new rowid) and the byte length of
+/// its value from the record header; for the legacy tabs (key `legacy`, [`Cursor::rows_key`]) the
+/// one `ItemTable` value they all live in. The key ranges run on the key index; no value is read.
+fn rows_conn(conn: &Connection) -> Result<HashMap<String, crate::source::Rows>> {
+    let _snapshot = super::store::sqlite::snapshot(conn)?;
+    let mut certificates = super::store::sqlite::Certificates::default();
+    let rowid = |table: &str| {
+        if conn.prepare(&format!("SELECT rowid FROM {table} LIMIT 0")).is_ok() {
+            "rowid"
+        } else {
+            "NULL"
+        }
+    };
+    if super::store::sqlite::table_exists(conn, "cursorDiskKV") {
+        let rowid = rowid("cursorDiskKV");
+        certificates.rows(
+            conn,
+            &format!(
+                "SELECT substr(key, 14), {rowid}, octet_length(value) FROM cursorDiskKV \
+                 WHERE key >= 'composerData:' AND key < 'composerData;' ORDER BY key"
+            ),
+        )?;
+        certificates.rows(
+            conn,
+            &format!(
+                "SELECT substr(key, 10, instr(substr(key, 10), ':') - 1), {rowid}, key, octet_length(value) \
+                 FROM cursorDiskKV WHERE key >= 'bubbleId:' AND key < 'bubbleId;' ORDER BY key"
+            ),
+        )?;
+    }
+    if super::store::sqlite::table_exists(conn, "ItemTable") {
+        certificates.rows(
+            conn,
+            &format!(
+                "SELECT 'legacy', {}, octet_length(value) FROM ItemTable WHERE key = '{}'",
+                rowid("ItemTable"),
+                legacy::CHAT_KEY
+            ),
+        )?;
+    }
+    Ok(certificates.0)
+}
 
 fn discover_global(conn: &Connection, db: &Path, cwd_map: &HashMap<String, PathBuf>, out: &mut Vec<SessionRef>) {
     // Bail quietly if this DB has no cursorDiskKV table (older layout).
@@ -650,6 +710,42 @@ mod tests {
         assert_eq!(keys, old_keys);
         // The bounded prefix must run on the key index, never as a full table scan.
         assert_eq!(bounded.get_status(StatementStatus::FullscanStep), 0);
+    }
+
+    /// The corpus global store with its composer copied under a second id: rewriting one
+    /// composer's value (a new rowid, as Cursor's `ON CONFLICT REPLACE` writes it) moves its
+    /// certificate alone, and the other composer reads exactly as before.
+    #[test]
+    fn corpus_rows_certify_each_session_and_move_only_with_its_rows() {
+        let world = crate::test_world("cursor-corpus-rows");
+        let corpus = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/corpus/cursor/3.24.12-ide/Cursor/User");
+        let user = world.base.join("User");
+        for entry in walkdir::WalkDir::new(&corpus) {
+            let entry = entry.unwrap();
+            let to = user.join(entry.path().strip_prefix(&corpus).unwrap());
+            if entry.file_type().is_dir() {
+                std::fs::create_dir_all(&to).unwrap();
+            } else {
+                std::fs::copy(entry.path(), &to).unwrap();
+            }
+        }
+        let db = user.join("globalStorage/state.vscdb");
+        let leaf = "4850be27-a5fd-4c24-b25b-7786285ccbea";
+        Connection::open(&db)
+            .unwrap()
+            .execute_batch(&format!(
+                "INSERT INTO cursorDiskKV SELECT replace(key, '{leaf}', 'copied-composer'), value FROM cursorDiskKV \
+                 WHERE key LIKE 'composerData:{leaf}' OR key LIKE 'bubbleId:{leaf}:%';"
+            ))
+            .unwrap();
+        let adapter = Cursor::with_user_dir(&user);
+        super::super::store::sqlite::assert_rows_move_alone(&adapter, &db, leaf, |c| {
+            c.execute(
+                "INSERT INTO cursorDiskKV SELECT key, value FROM cursorDiskKV WHERE key = ?1",
+                [format!("composerData:{leaf}")],
+            )
+            .unwrap();
+        });
     }
 
     #[test]
