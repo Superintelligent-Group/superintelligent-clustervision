@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- **Breaking (library):** `formats::FindingKind::ManifestInvalid` reports a manifest that does not parse, previously tagged `source_file_missing`.
 - Compaction scans report a failed summary read with its full cause chain instead of a flattened one-line copy.
 - OpenCode JSON-file reads avoid retaining duplicate part inventories while preserving source-change checks and bounded dataset selection heap.
 
