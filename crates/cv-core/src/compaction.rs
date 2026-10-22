@@ -80,9 +80,7 @@ pub struct CompactionSink {
     /// Resolver for a lazily-spanned summary body (set on the streaming path; `None` for the
     /// already-materialized in-session path). A compaction summary can exceed the inline threshold.
     resolver: Option<crate::lazy::Resolver>,
-    /// The scan's first failure, handed out once (`error`); `failed` keeps refusing after that.
     error: Option<anyhow::Error>,
-    failed: bool,
 }
 
 impl CompactionSink {
@@ -96,7 +94,6 @@ impl CompactionSink {
             unpaired: std::collections::BTreeSet::new(),
             resolver: None,
             error: None,
-            failed: false,
         }
     }
 
@@ -130,19 +127,13 @@ impl MessageSink for CompactionSink {
     }
 
     fn try_message(&mut self, m: Message) -> anyhow::Result<Flow> {
-        if !self.failed {
+        if self.error.is_none() {
             match self.observe(m) {
                 Ok(flow) => return Ok(flow),
-                Err(error) => {
-                    self.failed = true;
-                    self.error = Some(error);
-                }
+                Err(error) => self.error = Some(error),
             }
         }
-        Err(self
-            .error
-            .take()
-            .unwrap_or_else(|| anyhow::anyhow!("compaction scan has already failed")))
+        Err(anyhow::anyhow!("{:#}", self.error.as_ref().unwrap()))
     }
 }
 
