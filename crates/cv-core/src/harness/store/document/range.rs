@@ -126,7 +126,7 @@ impl<'a> RangeSource<'a> {
         std::str::from_utf8(body).map_err(|_| crate::json::InvalidJson.into())
     }
     fn of_bytes(captured: Option<crate::json::JsonSource>, bytes: &'a ByteSource, original: bool) -> Result<Self> {
-        let len = bytes.len()?;
+        let len = bytes.byte_len()?;
         let backing = match bytes.memory_bytes() {
             Some(memory) => Backing::Bytes(memory, 0, false),
             None => Backing::File(bytes.file()?),

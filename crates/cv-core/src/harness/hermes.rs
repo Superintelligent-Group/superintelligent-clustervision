@@ -920,7 +920,7 @@ fn stream_conn_with_reads(
     #[cfg(test)]
     ARENA_WRITE_OBSERVER.with(|observer| -> Result<()> {
         if let Some(bytes) = observer.borrow_mut().as_mut() {
-            bytes.push(cells.out().1.len()?);
+            bytes.push(cells.out().1.byte_len()?);
         }
         Ok(())
     })?;
