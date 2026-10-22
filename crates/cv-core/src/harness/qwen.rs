@@ -1058,8 +1058,7 @@ mod tests {
     /// when it was created; sub-agent transcripts take none.
     #[test]
     fn scheduled_tasks_go_to_their_owner_or_the_live_session() {
-        let home = std::env::temp_dir().join(format!("cv-qwen-cron-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&home);
+        let home = cv_testkit::temp_dir("qwen-cron");
         let tmp = home.join("tmp").join(crate::digest::sha256_hex(b"/p"));
         fs::create_dir_all(&tmp).unwrap();
         fs::write(
@@ -1205,7 +1204,7 @@ mod tests {
         // The native streaming path (shared Gemini machinery) must re-tag the session as Qwen and
         // emit the same messages the pure parser materializes.
         let text = fixture("session_modern.jsonl");
-        let dir = std::env::temp_dir().join(format!("cv-qwen-stream-{}", std::process::id()));
+        let dir = cv_testkit::temp_dir("qwen-stream");
         // `chats/` in the path is how the shared machinery recognizes a chat recording.
         let chats = dir.join("chats");
         fs::create_dir_all(&chats).unwrap();
@@ -1237,8 +1236,7 @@ mod tests {
         // which gave every checkpoint the generic id "checkpoint" — colliding across files and
         // disagreeing with the streaming path's "checkpoint-<tag>".)
         let text = fixture("checkpoint.json");
-        let dir = std::env::temp_dir().join(format!("cv-qwen-ckpt-{}", uuid::Uuid::new_v4()));
-        fs::create_dir_all(&dir).unwrap();
+        let dir = cv_testkit::temp_dir("qwen-ckpt");
         let p1 = dir.join("checkpoint-alpha.json");
         let p2 = dir.join("checkpoint-beta%20tag.json");
         fs::write(&p1, &text).unwrap();
@@ -1281,7 +1279,7 @@ mod tests {
     /// through `tool_call`, its sub-agent transcript, a compression, a goal, telemetry, a fork.
     #[test]
     fn reads_session_jsonl_and_subagent_transcripts() {
-        let home = std::env::temp_dir().join(format!("cv-qwen-modern-{}", uuid::Uuid::new_v4()));
+        let home = cv_testkit::temp_dir("qwen-modern");
         let proj = home.join("projects").join("-home-corpus-project");
         fs::create_dir_all(proj.join("chats")).unwrap();
         fs::create_dir_all(proj.join("subagents").join("s1")).unwrap();

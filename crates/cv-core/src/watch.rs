@@ -1253,36 +1253,37 @@ mod tests {
                 },
             );
         }
-        // Prior wire selection: size eligibility first, then the first eight eligible
-        // reader states in the map's iteration order. Positions always survive both limits.
-        let mut readers = 0;
-        let expected: BTreeMap<_, _> = watcher
-            .seen
-            .iter()
-            .map(|(key, state)| {
-                let mut pos = Pos::from(state);
-                pos.r = state.read.clone().filter(|read| read.fits_cache(64 * 1024));
-                if pos.r.is_some() {
-                    readers += 1;
-                    if readers > 8 {
-                        pos.r = None;
-                    }
-                }
-                (key.clone(), pos)
-            })
-            .collect();
+        // The contract: every position survives; at most eight reader states ride the wire,
+        // and only ones that fit the reader cache — oversized states drop whole, never truncated.
         let cursor = watcher.to_cursor();
         assert_eq!(cursor.len(), 16);
         assert_eq!(cursor.o.values().filter(|pos| pos.r.is_some()).count(), 8);
-        assert_eq!(
-            serde_json::to_value(&cursor.o).unwrap(),
-            serde_json::to_value(expected).unwrap()
-        );
+        for (key, state) in &watcher.seen {
+            let pos = &cursor.o[key];
+            let expected = Pos::from(state);
+            assert_eq!(pos.t, expected.t, "{key}: trigger must survive intact");
+            assert_eq!(pos.n, expected.n, "{key}: message mark must survive intact");
+            assert_eq!(pos.b, expected.b, "{key}: byte mark must survive intact");
+            assert_eq!(pos.more, expected.more, "{key}: pending must survive intact");
+            if let Some(read) = &pos.r {
+                assert_eq!(
+                    serde_json::to_value(read).unwrap(),
+                    serde_json::to_value(state.read.as_ref().unwrap()).unwrap(),
+                    "{key}: wire states ride whole"
+                );
+                assert!(read.fits_cache(64 * 1024), "{key}: wire states fit the cache");
+            }
+        }
         let resumed = Watcher::from_cursor(Filter::default(), Cursor::decode(&cursor.encode()).unwrap(), Vec::new);
         for (key, state) in &watcher.seen {
             let restored = &resumed.seen[key];
             assert_eq!(restored.mark, state.mark);
             assert_eq!(restored.pending, state.pending);
+            assert_eq!(
+                restored.read.is_some(),
+                cursor.o[key].r.is_some(),
+                "{key}: wire selection survives the round-trip"
+            );
         }
     }
 

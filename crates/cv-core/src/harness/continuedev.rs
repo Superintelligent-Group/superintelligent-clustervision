@@ -756,9 +756,7 @@ mod tests {
 
     #[test]
     fn cn_tool_call_states_become_tool_results_and_usage_is_read() {
-        let dir = std::env::temp_dir().join(format!("cv-continue-cn-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
+        let dir = cv_testkit::temp_dir("continue-cn");
         let path = dir.join("s.json");
         fs::write(&path, r#"{"sessionId":"s","history":[
             {"message":{"role":"user","content":"read a"},"contextItems":[]},
@@ -944,9 +942,6 @@ mod tests {
     fn parses_fixture_session() {
         let dir = fixtures();
         let path = dir.join("11111111-1111-1111-1111-111111111111.json");
-        if !path.exists() {
-            return;
-        }
         let r = SessionRef::new("11111111-1111-1111-1111-111111111111", Harness::Continue, path.clone());
         let s = Continue { sessions: None }.parse(&r).unwrap();
         crate::harness::assert_no_flat_keys(&s);
@@ -966,11 +961,7 @@ mod tests {
 
     #[test]
     fn emit_round_trips() {
-        use std::sync::atomic::{AtomicU32, Ordering};
-        static COUNTER: AtomicU32 = AtomicU32::new(0);
-        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!("cv-continue-emit-{}-{}", std::process::id(), n));
-        let _ = fs::remove_dir_all(&dir);
+        let dir = cv_testkit::temp_dir("continue-emit");
 
         // Build a small session: user, assistant w/ a tool call, a tool result.
         let mut session = Session {
@@ -1071,13 +1062,7 @@ mod tests {
     #[test]
     fn stream_is_incremental_and_honors_stop() {
         use crate::stream::{Flow, MessageSink};
-        use std::sync::atomic::{AtomicU32, Ordering};
-        static COUNTER: AtomicU32 = AtomicU32::new(0);
-
-        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!("cv-continue-stream-{}-{}", std::process::id(), n));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
+        let dir = cv_testkit::temp_dir("continue-stream");
         let path = dir.join("s.json");
         fs::write(
             &path,
@@ -1117,8 +1102,7 @@ mod tests {
     #[test]
     fn discovery_scan_matches_whole_value_metadata() {
         let _world = crate::test_world("continue-scan");
-        let dir = std::env::temp_dir().join(format!("cv-continue-scan-{}", uuid::Uuid::new_v4()));
-        fs::create_dir_all(&dir).unwrap();
+        let dir = cv_testkit::temp_dir("continue-scan");
         let path = dir.join("s.json");
         let mut cases = vec![
             r#"{"title":"escaped\n\uD834\uDD1E","workspaceDirectory":"file:///p","history":[null,{},42,{"message":{"role":"tool"}}]}"#.to_owned(),
@@ -1175,8 +1159,7 @@ mod tests {
     #[test]
     fn discovery_scan_preserves_index_precedence_and_unindexed_fallback() {
         let _world = crate::test_world("continue-scan-index");
-        let dir = std::env::temp_dir().join(format!("cv-continue-index-{}", uuid::Uuid::new_v4()));
-        fs::create_dir_all(&dir).unwrap();
+        let dir = cv_testkit::temp_dir("continue-index");
         fs::write(
             dir.join("sessions.json"),
             r#"[

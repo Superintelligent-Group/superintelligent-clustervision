@@ -1862,8 +1862,7 @@ mod tests {
             "payload": { "type": "function_call_output", "call_id": "c1", "output": body }
         })
         .to_string();
-        let dir = std::env::temp_dir().join(format!("cv-codex-span-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = cv_testkit::temp_dir("codex-span");
         let path = dir.join("rollout-x.jsonl");
         {
             let mut f = std::fs::File::create(&path).unwrap();
@@ -1911,8 +1910,7 @@ mod tests {
 
     #[cfg(feature = "mmap")]
     fn assert_giant_modes_match(text: &str) {
-        let dir = std::env::temp_dir().join(format!("cv-codex-giant-parity-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = cv_testkit::temp_dir("codex-giant-parity");
         let path = dir.join("rollout-parity.jsonl");
         std::fs::write(&path, text).unwrap();
         let mut lazy = whole(
@@ -2653,8 +2651,7 @@ mod tests {
         let output = serde_json::json!({"timestamp":"2026-01-01T00:00:01Z","type":"response_item",
             "payload":{"type":"function_call_output","call_id":"c1","output":body}});
         let line = format!("{meta}\n{output}");
-        let dir = std::env::temp_dir().join(format!("cv-codex-err-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = cv_testkit::temp_dir("codex-err");
         let path = dir.join("rollout-2026-01-01T00-00-00-err.jsonl");
         std::fs::File::create(&path)
             .unwrap()
@@ -2708,7 +2705,7 @@ mod tests {
         let lines = fixture_lines("zstd_compressed_rollouts_are_discovered_scanned_and_parsed.jsonl");
         let raw = lines.join("\n") + "\n";
         let zst = zstd::encode_all(raw.as_bytes(), 1).unwrap();
-        let root = std::env::temp_dir().join(format!("cv-codex-zst-{}", uuid::Uuid::new_v4()));
+        let root = cv_testkit::temp_dir("codex-zst");
         let day = root.join("sessions").join("2026").join("08").join("01");
         std::fs::create_dir_all(&day).unwrap();
         let path = day.join("rollout-2026-08-01T10-00-00-cold-1.jsonl.zst");
@@ -2746,7 +2743,7 @@ mod tests {
     fn discovery_hands_decoded_rollouts_to_the_reads_of_the_same_source() {
         let _world = crate::test_world("codex-handoff");
         let raw = fixture_lines("zstd_compressed_rollouts_are_discovered_scanned_and_parsed.jsonl").join("\n") + "\n";
-        let root = std::env::temp_dir().join(format!("cv-codex-handoff-{}", uuid::Uuid::new_v4()));
+        let root = cv_testkit::temp_dir("codex-handoff");
         let day = root.join("sessions").join("2026").join("08").join("01");
         std::fs::create_dir_all(&day).unwrap();
         let cold = day.join("rollout-2026-08-01T10-00-00-cold-1.jsonl.zst");
@@ -2799,8 +2796,7 @@ mod tests {
     #[test]
     fn scan_titles_a_subagent_by_its_own_task_not_the_parents_prompt() {
         let lines = fixture_lines("scan_titles_a_subagent_by_its_own_task_not_the_parents_prompt.jsonl");
-        let dir = std::env::temp_dir().join(format!("cv-codex-scan-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = cv_testkit::temp_dir("codex-scan");
         let path = dir.join("rollout-2026-09-19T14-12-43-child-1.jsonl");
         std::fs::write(&path, lines.join("\n") + "\n").unwrap();
         let r = scan(&path).unwrap();
@@ -2861,8 +2857,7 @@ mod tests {
             .expect("a subagent rollout");
         // Snapshot each file first: the newest rollout is usually a LIVE session still being
         // appended to, and parse-vs-stream must see identical bytes.
-        let snap = std::env::temp_dir().join(format!("cv-codex-smoke-{}", uuid::Uuid::new_v4()));
-        fs::create_dir_all(&snap).unwrap();
+        let snap = cv_testkit::temp_dir("codex-smoke");
         for src in [newest, subagent] {
             let path = snap.join(src.file_name().unwrap());
             fs::copy(&src, &path).unwrap();

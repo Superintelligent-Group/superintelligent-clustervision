@@ -488,6 +488,11 @@ mod tests {
         );
     ";
 
+    /// The current schema with the table as WITHOUT ROWID — the shape production must also read.
+    fn without_rowid_schema() -> String {
+        SCHEMA.replace("        );", "        ) WITHOUT ROWID;")
+    }
+
     /// A file-backed store (a cell's byte source is a file) that lives as long as the value.
     struct Db {
         conn: Connection,
@@ -923,7 +928,7 @@ mod tests {
     fn metadata_sort_preserves_ties_and_without_rowid_fallback() {
         for schema in [
             SCHEMA.to_string(),
-            SCHEMA.replace("        );", "        ) WITHOUT ROWID;"),
+            without_rowid_schema(),
         ] {
             let c = mk(&schema);
             let data = zstd_blob(&legacy_thread());
@@ -1293,8 +1298,7 @@ mod tests {
         let _world = crate::test_world("zed-stream-parse");
         // The corpus-wide invariant, asserted here on a fixture so it runs without real data:
         // parse() and collect(stream()) are the same bytes.
-        let dir = std::env::temp_dir().join(format!("cv-zed-test-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = cv_testkit::temp_dir("zed-parity");
         let db = dir.join("threads.db");
         {
             let c = Connection::open(&db).unwrap();
@@ -1331,7 +1335,7 @@ mod tests {
         let path = world.base.join("threads.db");
         for without_rowid in [false, true] {
             let schema = if without_rowid {
-                SCHEMA.replace("        );", "        ) WITHOUT ROWID;")
+                without_rowid_schema()
             } else {
                 SCHEMA.to_string()
             };
