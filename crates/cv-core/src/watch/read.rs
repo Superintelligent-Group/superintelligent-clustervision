@@ -6,41 +6,10 @@ use std::path::{Path, PathBuf};
 
 const CONSUMER: &str = "watch-full";
 const CHECKPOINT_EVERY: u64 = 256 * 1024;
-const METADATA_BYTES: usize = 16 * 1024;
 
 /// The state's version: the mark version ([`crate::resume::version`]). Never the cv release.
 fn state_version(adapter: &dyn Adapter) -> String {
     crate::resume::version(adapter, CONSUMER)
-}
-
-/// True when `value` serializes within `limit` bytes.
-fn fits(value: &impl Serialize, limit: usize) -> bool {
-    struct Limited {
-        budget: usize,
-        overflowed: bool,
-    }
-    impl std::io::Write for Limited {
-        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-            if bytes.len() > self.budget {
-                self.overflowed = true;
-                return Err(std::io::Error::other("checkpoint exceeds cache budget"));
-            }
-            self.budget -= bytes.len();
-            Ok(bytes.len())
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-    let mut limited = Limited {
-        budget: limit,
-        overflowed: false,
-    };
-    let result = serde_json::to_writer(&mut limited, value);
-    // Only the budget may decline a checkpoint; a serialization failure is a bug and must not
-    // read as "too big" (loud in test builds, same answer in production).
-    debug_assert!(result.is_ok() || limited.overflowed, "checkpoint failed to serialize");
-    result.is_ok()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -52,14 +21,6 @@ struct Anchor {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Completed {
     session: Session,
-    total: usize,
-}
-
-/// Serialize-only mirror of [`Completed`], field-for-field: [`fits`] measures the wire size
-/// without first cloning the whole session for a value that may be dropped.
-#[derive(Serialize)]
-struct CompletedRef<'a> {
-    session: &'a Session,
     total: usize,
 }
 
@@ -570,15 +531,9 @@ pub(super) fn pass(
         0
     };
     let (session, total, completed) = if complete {
-        // Size before clone: measure the borrow, then own a copy only if it fits.
-        let completed = fits(
-            &CompletedRef {
-                session: &done.session,
-                total: sink.total,
-            },
-            METADATA_BYTES,
-        )
-        .then(|| Completed {
+        // The metadata the read already holds, whatever its size: one per followed session. A
+        // budget here silently sent every later bounded read of a large session to EOF.
+        let completed = Some(Completed {
             session: done.session.clone(),
             total: sink.total,
         });
@@ -941,6 +896,31 @@ mod tests {
             serde_json::to_value(&expected.messages[4096..]).unwrap()
         );
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_session_with_large_metadata_keeps_its_completed_read() {
+        // 0.17 kept a completed read's metadata only under 16 KiB: past it, every bounded read
+        // of the unchanged session went on to EOF.
+        let dir = std::env::temp_dir().join(format!("cv-watch-large-meta-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("meta.jsonl");
+        let mut body =
+            serde_json::json!({"type":"ai-title","sessionId":"meta","aiTitle":"t".repeat(32 * 1024)}).to_string();
+        body.push('\n');
+        for i in 0..512 {
+            body.push_str(&serde_json::json!({"type":"user","uuid":format!("u{i}"),"sessionId":"meta", "message":{"role":"user","content":format!("{i}")}}).to_string());
+            body.push('\n');
+        }
+        std::fs::write(&path, &body).unwrap();
+        let r = SessionRef::new("meta", Harness::Claude, &path);
+        let adapter = harness::for_harness(r.harness).unwrap();
+        let offered = read(adapter.as_ref(), &r, None, 0, 1).unwrap();
+        let pending = read(adapter.as_ref(), &r, Some(&offered.accepted(1)), 1, 1).unwrap();
+        assert_eq!(pending.parsed_messages, 2, "stops after the selection");
+        assert_eq!(pending.total, 512);
+        assert_eq!(pending.session.title.as_deref().map(str::len), Some(32 * 1024));
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

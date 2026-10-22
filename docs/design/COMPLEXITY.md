@@ -98,6 +98,9 @@ Safety caps (they bound memory, and the fallback is bounded too):
 - `catalog/reader.rs` Probe reset at 256 refs: one extra stat per 256 refs.
 
 Removed mode switches:
+- Watch `METADATA_BYTES` 16 KiB: a completed read's session metadata was kept only under it, so
+  every later bounded read of a session with more went on to EOF. It is kept whatever its
+  size, one per followed session, the metadata the read already held.
 - Codex `FULL_SCAN_CAP` 8 MiB: past it a listing took title, cwd and times from 1 MiB head and
   tail samples. Discovery now reads every record once and resumes a grown rollout.
 - API read cache: 32 entries FIFO, 256 KiB per entry and 2 MiB in all, past which a session
