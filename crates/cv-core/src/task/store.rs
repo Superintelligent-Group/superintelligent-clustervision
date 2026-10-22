@@ -413,14 +413,7 @@ mod tests {
     }
 
     fn open_kind() -> TaskEventKind {
-        TaskEventKind::Opened {
-            title: "demo".into(),
-            body: String::new(),
-            repo: None,
-            issue: None,
-            channel: None,
-            assignee: None,
-        }
+        crate::task::opened_kind("demo", None)
     }
 
     fn open_task(store: &TaskStore) -> String {

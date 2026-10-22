@@ -664,14 +664,6 @@ impl<'s> Records<'s> {
                     .map(self.file)?
             };
             #[cfg(test)]
-            // SAFETY: a read-only mapping of the checked descriptor, dropped with this read.
-            let map = unsafe {
-                memmap2::MmapOptions::new()
-                    .offset(at)
-                    .len(usize::try_from(len)?)
-                    .map(self.file)?
-            };
-            #[cfg(test)]
             note_mapped(map.len());
             let text = std::str::from_utf8(&map).map_err(|_| crate::json::InvalidJson)?;
             return self.source.read(ReadInput::Record(at, text, None), validation, f);

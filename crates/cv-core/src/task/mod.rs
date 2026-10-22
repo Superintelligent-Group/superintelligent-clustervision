@@ -42,6 +42,20 @@ pub use reduce::{Decision, Note, PinnedStatus, ReduceError, Resolution, TaskProj
 pub use store::{new_event, replay, ReplayOutcome, TaskStore};
 pub use views::TaskRow;
 
+/// The tests' `Opened` kernel: a titled plain task with no repo, issue, channel and no assignee
+/// unless named.
+#[cfg(test)]
+pub(crate) fn opened_kind(title: &str, assignee: Option<&str>) -> TaskEventKind {
+    TaskEventKind::Opened {
+        title: title.into(),
+        body: String::new(),
+        repo: None,
+        issue: None,
+        channel: None,
+        assignee: assignee.map(str::to_string),
+    }
+}
+
 /// The fleet identity convention (audit G4): the spawner sets `CV_ENDPOINT=agent:<pane>` in each
 /// agent's environment, and cv front-ends derive their default `--from` here — the *bare*
 /// command records the right actor. This is environment, not assertion: nothing verifies the
@@ -175,20 +189,7 @@ mod tests {
         use super::*;
         let world = cv_testkit::World::new("task-committed-reports");
         let store = TaskStore::at(world.base.join("tasks"));
-        let open = |title: &str| {
-            new_event(
-                None,
-                "agent:author",
-                TaskEventKind::Opened {
-                    title: title.into(),
-                    body: String::new(),
-                    repo: None,
-                    issue: None,
-                    channel: None,
-                    assignee: None,
-                },
-            )
-        };
+        let open = |title: &str| new_event(None, "agent:author", opened_kind(title, None));
         let first = open("first");
         let second = open("second");
         let claim = new_event(
