@@ -795,7 +795,7 @@ mod tests {
         assert!(a
             .content
             .iter()
-            .any(|b| matches!(b, Block::Thinking { text, .. } if text == "let me think")));
+            .any(|b| matches!(b, Block::Thinking { text, .. } if text.matches_str("let me think") == Some(true))));
         // text block present
         assert_eq!(a.text().as_deref(), Some("Here is how."));
         // tool use + result

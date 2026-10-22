@@ -229,9 +229,9 @@ fn render_blocks_impl<'a>(
 /// turns are empty; any tool/image/file block, or any span, makes it non-empty).
 fn message_is_empty(m: &Message) -> bool {
     !m.content.iter().any(|b| match b {
-        Block::Text { text } => text.is_span() || text.inline_str().is_some_and(|s| !s.trim().is_empty()),
+        Block::Text { text } => text.is_lazy() || text.inline_str().is_some_and(|s| !s.trim().is_empty()),
         Block::Thinking { text, redacted, .. } => {
-            !*redacted && (text.is_span() || text.inline_str().is_some_and(|s| !s.trim().is_empty()))
+            !*redacted && (text.is_lazy() || text.inline_str().is_some_and(|s| !s.trim().is_empty()))
         }
         _ => true,
     })

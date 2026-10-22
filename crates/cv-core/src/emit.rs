@@ -387,8 +387,8 @@ pub(crate) fn thinking_placeholder(signature: Option<&str>, encrypted: Option<&s
 fn has_unresolved_spans(session: &Session) -> bool {
     session.messages.iter().any(|m| {
         m.content.iter().any(|b| match b {
-            Block::Text { text } | Block::Thinking { text, .. } => text.is_span(),
-            Block::ToolResult { content, .. } => content.is_span(),
+            Block::Text { text } | Block::Thinking { text, .. } => text.is_lazy(),
+            Block::ToolResult { content, .. } => content.is_lazy(),
             Block::ToolUse { input, .. } => matches!(input, crate::Json::Source(_)),
             _ => false,
         })
@@ -1217,7 +1217,7 @@ mod tests {
         assert!(
             rich.content
                 .iter()
-                .any(|b| matches!(b, Block::Text { text } if text == "look at this")),
+                .any(|b| matches!(b, Block::Text { text } if text.matches_str("look at this") == Some(true))),
             "user text block survives"
         );
         assert!(
@@ -1597,7 +1597,7 @@ mod tests {
         let tool_results: Vec<_> = parsed.messages.iter().filter(|m| m.role == Role::Tool).collect();
         assert_eq!(tool_results.len(), 1);
         if let Block::ToolResult { content, is_error, .. } = &tool_results[0].content[0] {
-            assert_eq!(content, "file_a.txt\nfile_b.txt");
+            assert_eq!(content.inline_str(), Some("file_a.txt\nfile_b.txt"));
             assert!(!is_error);
         } else {
             panic!("expected tool result");
@@ -1723,7 +1723,7 @@ mod tests {
             content, tool_use_id, ..
         } = &tool_results[0].content[0]
         {
-            assert_eq!(content, "file_a.txt\nfile_b.txt");
+            assert_eq!(content.inline_str(), Some("file_a.txt\nfile_b.txt"));
             assert_eq!(tool_use_id, "call_1");
         } else {
             panic!("expected tool result");
@@ -1829,7 +1829,7 @@ mod tests {
         let tool_results: Vec<_> = parsed.messages.iter().filter(|m| m.role == Role::Tool).collect();
         assert_eq!(tool_results.len(), 1);
         if let Block::ToolResult { content, .. } = &tool_results[0].content[0] {
-            assert_eq!(content, "file_a.txt\nfile_b.txt");
+            assert_eq!(content.inline_str(), Some("file_a.txt\nfile_b.txt"));
         } else {
             panic!("expected tool result");
         }
@@ -1909,7 +1909,7 @@ mod tests {
         // tool result is retagged to a Tool turn by the reader
         assert!(parsed.messages.iter().any(|m| m.role == Role::Tool
             && m.content.iter().any(|b| matches!(b, Block::ToolResult { content, .. }
-                if content == "file_a.txt\nfile_b.txt"))));
+                if content.matches_str("file_a.txt\nfile_b.txt") == Some(true)))));
         // thinking → thoughts survives
         assert!(parsed
             .messages
@@ -1942,7 +1942,7 @@ mod tests {
         // tool result row → Tool turn
         assert!(parsed.messages.iter().any(|m| m.role == Role::Tool
             && m.content.iter().any(|b| matches!(b, Block::ToolResult { content, .. }
-                if content == "file_a.txt\nfile_b.txt"))));
+                if content.matches_str("file_a.txt\nfile_b.txt") == Some(true)))));
         // reasoning → Thinking
         assert!(parsed
             .messages

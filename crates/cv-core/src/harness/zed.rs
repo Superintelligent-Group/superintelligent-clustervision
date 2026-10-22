@@ -796,8 +796,10 @@ mod tests {
         let a = &s.messages[1];
         assert_eq!(a.role, Role::Assistant);
         assert!(matches!(&a.content[0], Block::Thinking { text, signature, .. }
-            if text == "let me look" && signature.as_deref() == Some("sig1")));
-        assert!(matches!(&a.content[1], Block::Text { text } if text == "Checking the test now."));
+            if text.matches_str("let me look") == Some(true) && signature.as_deref() == Some("sig1")));
+        assert!(
+            matches!(&a.content[1], Block::Text { text } if text.matches_str("Checking the test now.") == Some(true))
+        );
         assert!(matches!(&a.content[2], Block::ToolUse { id, name, input , ..}
             if id == "toolu_1" && name == "read_file"
             && input.resolve().unwrap().get("path").and_then(Value::as_str) == Some("foo.rs")));
@@ -805,7 +807,7 @@ mod tests {
         assert_eq!(t.role, Role::Tool);
         assert!(
             matches!(&t.content[0], Block::ToolResult { tool_use_id, content, is_error, tool_name, details, .. }
-            if tool_use_id == "toolu_1" && content == "fn test_foo() {}" && !is_error
+            if tool_use_id == "toolu_1" && content.matches_str("fn test_foo() {}") == Some(true) && !is_error
             && tool_name.as_deref() == Some("read_file")
             && details.as_ref().and_then(|d| d.get("lines")).and_then(Value::as_i64) == Some(1))
         );
@@ -850,14 +852,16 @@ mod tests {
             if uri == "file:///Users/u/proj/src/lib.rs"));
         let a = &s.messages[1];
         assert_eq!(a.role, Role::Assistant);
-        assert!(matches!(&a.content[0], Block::Thinking { text, .. } if text == "plan the split"));
-        assert!(matches!(&a.content[1], Block::Text { text } if text == "Splitting now."));
+        assert!(
+            matches!(&a.content[0], Block::Thinking { text, .. } if text.matches_str("plan the split") == Some(true))
+        );
+        assert!(matches!(&a.content[1], Block::Text { text } if text.matches_str("Splitting now.") == Some(true)));
         assert!(matches!(&a.content[2], Block::ToolUse { id, name, .. } if id == "toolu_9" && name == "edit_file"));
         let t = &s.messages[2];
         assert_eq!(t.role, Role::Tool);
         assert!(
             matches!(&t.content[0], Block::ToolResult { tool_use_id, content, is_error, tool_name, .. }
-            if tool_use_id == "toolu_9" && content == "permission denied" && *is_error
+            if tool_use_id == "toolu_9" && content.matches_str("permission denied") == Some(true) && *is_error
             && tool_name.as_deref() == Some("edit_file"))
         );
     }
@@ -888,7 +892,7 @@ mod tests {
         assert_eq!(s.messages[1].role, Role::Tool);
         assert!(
             matches!(&s.messages[1].content[0], Block::ToolResult { tool_name, content, .. }
-            if tool_name.as_deref() == Some("shell") && content == "file_a")
+            if tool_name.as_deref() == Some("shell") && content.matches_str("file_a") == Some(true))
         );
     }
 

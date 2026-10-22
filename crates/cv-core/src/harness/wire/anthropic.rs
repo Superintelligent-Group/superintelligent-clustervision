@@ -342,7 +342,9 @@ mod tests {
         assert!(matches!(&b[1], Block::Thinking { signature: Some(s), redacted: false, .. } if s.is_empty()));
         assert!(matches!(&b[2], Block::Thinking { encrypted: Some(e), redacted: true, .. } if e == "BLOB"));
         assert!(matches!(&b[3], Block::ToolUse { name, .. } if name == "Read"));
-        assert!(matches!(&b[4], Block::ToolResult { content, is_error: true, .. } if content == "ok\n[image]"));
+        assert!(
+            matches!(&b[4], Block::ToolResult { content, is_error: true, .. } if content.matches_str("ok\n[image]") == Some(true))
+        );
         assert!(matches!(&b[5], Block::Image { data_ref: Some(r), .. } if r == "file:f9"));
         assert!(
             matches!(&b[6], Block::File { path: Some(p), source: Some(s), .. } if p == "a.pdf" && s == "https://x/a.pdf")
@@ -365,7 +367,7 @@ mod tests {
         let zed = json!([{"type": "text", "text": ""}, {"type": "thinking", "text": "z", "signature": ""}, {"type": "RedactedThinking", "data": "D"}]);
         let b = blocks_from(Some(&zed), &ZED);
         assert_eq!(b.len(), 2, "Zed drops empty text");
-        assert!(matches!(&b[0], Block::Thinking { text, signature: None, .. } if text == "z"));
+        assert!(matches!(&b[0], Block::Thinking { text, signature: None, .. } if text.matches_str("z") == Some(true)));
         assert!(matches!(&b[1], Block::Thinking { redacted: true, .. }));
         let goose = json!([{"type": "redactedThinking", "data": "D"}, {"type": "document", "name": "n.pdf", "mimeType": "application/pdf", "data": "AAAA"}]);
         let b = blocks_from(Some(&goose), &GOOSE);

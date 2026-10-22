@@ -436,7 +436,7 @@ mod tests {
             first.content.push(Block::Text {
                 text: source_text(&source.json(), "text"),
             });
-            assert!(matches!(&first.content[0], Block::Text { text } if text.is_span()));
+            assert!(matches!(&first.content[0], Block::Text { text } if text.is_lazy()));
             session.messages = vec![first, Message::new(Role::Assistant)];
             let mut writer = Mutating {
                 stage: crate::bytes::ByteStage::new(),

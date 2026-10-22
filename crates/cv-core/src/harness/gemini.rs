@@ -1913,7 +1913,7 @@ mod tests {
         assert!(s.messages[2]
             .content
             .iter()
-            .any(|b| matches!(b, Block::ToolResult { content, .. } if content == "4")));
+            .any(|b| matches!(b, Block::ToolResult { content, .. } if content.matches_str("4") == Some(true))));
     }
 
     #[test]
@@ -2063,7 +2063,7 @@ mod tests {
             .messages
             .iter()
             .flat_map(|m| &m.content)
-            .any(|b| matches!(b, Block::Text { text } if text.is_span())));
+            .any(|b| matches!(b, Block::Text { text } if text.is_lazy())));
         s.materialize().unwrap();
         assert_eq!(
             as_json(&s),

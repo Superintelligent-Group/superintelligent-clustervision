@@ -2274,7 +2274,7 @@ mod tests {
             let Block::ToolResult { content, .. } = &tool.content[0] else {
                 panic!("tool result")
             };
-            assert_eq!(content.is_span(), opts.spans);
+            assert_eq!(content.is_lazy(), opts.spans);
             session.materialize().unwrap();
             session.messages.retain(|m| m.kind != MessageKind::Carrier);
             let value = serde_json::to_value(session).unwrap();
@@ -2399,13 +2399,13 @@ mod tests {
                 signature,
                 ..
             } => {
-                assert_eq!(text, "reasoning");
+                assert_eq!(text.inline_str(), Some("reasoning"));
                 assert_eq!(encrypted.as_deref(), Some("BLOB"));
                 assert_eq!(signature.as_deref(), Some("BLOB"));
             }
             o => panic!("expected thinking, got {o:?}"),
         }
-        assert!(matches!(&m.content[1], Block::Text { text } if text == "Let me look."));
+        assert!(matches!(&m.content[1], Block::Text { text } if text.matches_str("Let me look.") == Some(true)));
         match &m.content[2] {
             Block::ToolUse { id, name, input, .. } => {
                 assert_eq!(id, "tool_1");
@@ -2458,7 +2458,7 @@ mod tests {
                 details,
                 ..
             } => {
-                assert_eq!(content, "boom");
+                assert_eq!(content.inline_str(), Some("boom"));
                 assert!(is_error);
                 assert_eq!(status.as_deref(), Some("error"));
                 assert_eq!(details.as_ref().unwrap()["k"], "v");

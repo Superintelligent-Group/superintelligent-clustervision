@@ -909,7 +909,7 @@ mod tests {
                 tool_use_id, content, ..
             } => {
                 assert_eq!(tool_use_id, "call_1");
-                assert_eq!(content, "file contents here");
+                assert_eq!(content.inline_str(), Some("file contents here"));
             }
             _ => panic!("expected tool_result"),
         }
@@ -1032,7 +1032,7 @@ mod tests {
         assert!(parsed.messages[2].content.iter().any(|b| matches!(
             b,
             Block::ToolResult { tool_use_id, content, .. }
-                if tool_use_id == "call_1" && content == "fn main() {}"
+                if tool_use_id == "call_1" && content.matches_str("fn main() {}") == Some(true)
         )));
 
         // The index should also discover it.

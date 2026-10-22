@@ -1225,7 +1225,9 @@ mod tests {
                 MessageKind::CompactionSummary
             ]
         );
-        assert!(matches!(&s.messages[1].content[0], Block::Thinking { text, .. } if *text == "think"));
+        assert!(
+            matches!(&s.messages[1].content[0], Block::Thinking { text, .. } if text.matches_str("think") == Some(true))
+        );
         assert_eq!(
             s.messages[0]
                 .harness_extra(Harness::Roo)
@@ -1408,7 +1410,9 @@ mod tests {
         assert_eq!(parsed.title.as_deref(), Some("Fix the parser bug"));
 
         // Assistant text + tool_use blocks survive.
-        assert!(matches!(&parsed.messages[1].content[0], Block::Text { text } if text == "on it"));
+        assert!(
+            matches!(&parsed.messages[1].content[0], Block::Text { text } if text.matches_str("on it") == Some(true))
+        );
         assert!(matches!(
             &parsed.messages[1].content[1],
             Block::ToolUse { id, name, .. } if id == "toolu_1" && name == "read_file"

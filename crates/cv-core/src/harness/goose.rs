@@ -1092,9 +1092,9 @@ mod tests {
         let a = &s.messages[1];
         assert_eq!(a.role, Role::Assistant);
         assert!(
-            matches!(&a.content[0], Block::Thinking { text, signature, .. } if text == "let me think" && signature.as_deref() == Some("sig"))
+            matches!(&a.content[0], Block::Thinking { text, signature, .. } if text.matches_str("let me think") == Some(true) && signature.as_deref() == Some("sig"))
         );
-        assert!(matches!(&a.content[1], Block::Text { text } if text == "Working on it"));
+        assert!(matches!(&a.content[1], Block::Text { text } if text.matches_str("Working on it") == Some(true)));
         assert!(
             matches!(&a.content[2], Block::ToolUse { name, id, input , ..} if name == "shell" && id == "call_1" && input.resolve().unwrap().get("command").and_then(Value::as_str) == Some("ls"))
         );
@@ -1104,7 +1104,7 @@ mod tests {
         assert_eq!(t.role, Role::Tool);
         assert!(
             matches!(&t.content[0], Block::ToolResult { tool_use_id, content, tool_name, is_error, .. }
-            if tool_use_id == "call_1" && content == "file1\nfile2" && tool_name.as_deref() == Some("shell") && !is_error)
+            if tool_use_id == "call_1" && content.matches_str("file1\nfile2") == Some(true) && tool_name.as_deref() == Some("shell") && !is_error)
         );
     }
 
@@ -1547,7 +1547,7 @@ mod tests {
         assert_eq!(bag(m)["error"]["message"], "Maximum retry attempts (3) exceeded.");
         assert_eq!(m.content.len(), 2, "neither block is dropped");
         assert!(
-            matches!(&m.content[0], Block::Text { text } if text == "[error: contextLengthExceeded] Maximum retry attempts (3) exceeded.")
+            matches!(&m.content[0], Block::Text { text } if text.matches_str("[error: contextLengthExceeded] Maximum retry attempts (3) exceeded.") == Some(true))
         );
         assert!(matches!(&m.content[1], Block::File { mime, path, source }
                 if mime.as_deref() == Some("application/pdf") && path.as_deref() == Some("q3-report.pdf") && source.as_deref() == Some("base64:inline")));
@@ -1631,7 +1631,7 @@ mod tests {
         let s = parse_db(&c, &sref(&c, "s1")).unwrap();
         let m = &s.messages[0];
         assert!(matches!(&m.content[0], Block::ToolResult { content, is_error, .. }
-                if content == "ok\nhello\n[resource: file:///tmp/b.bin]\n[audio: audio/wav]" && !is_error));
+                if content.matches_str("ok\nhello\n[resource: file:///tmp/b.bin]\n[audio: audio/wav]") == Some(true) && !is_error));
         // a millisecond `created_timestamp` is read as milliseconds (Goose's own reader divides it
         // down to whole seconds for display; the IR keeps what the column holds)
         assert_eq!(
@@ -1653,7 +1653,7 @@ mod tests {
         .unwrap();
         let s = parse_db(&c, &sref(&c, "s1")).unwrap();
         assert!(
-            matches!(&s.messages[0].content[0], Block::ToolResult { is_error, content, .. } if *is_error && content == "boom")
+            matches!(&s.messages[0].content[0], Block::ToolResult { is_error, content, .. } if *is_error && content.matches_str("boom") == Some(true))
         );
     }
 
@@ -1673,7 +1673,7 @@ mod tests {
         let Block::ToolResult { details, content, .. } = &s.messages[0].content[0] else {
             panic!("a tool result")
         };
-        assert_eq!(content, "ok");
+        assert_eq!(content.inline_str(), Some("ok"));
         assert_eq!(
             details.as_ref().and_then(|d| d.pointer("/_meta/subagent_session_id")),
             Some(&Value::from("20261011_7"))
@@ -1972,7 +1972,7 @@ mod tests {
         assert_eq!(s.messages[2].role, Role::Tool);
         assert!(
             matches!(&s.messages[2].content[0], Block::ToolResult { tool_name, content, .. }
-            if tool_name.as_deref() == Some("developer__shell") && content == "/home/u/old")
+            if tool_name.as_deref() == Some("developer__shell") && content.matches_str("/home/u/old") == Some(true))
         );
     }
 
@@ -2090,7 +2090,7 @@ mod tests {
         );
         let tool = &full.messages[0].content[2];
         assert!(
-            matches!(tool, Block::ToolResult { content, details: Some(_), .. } if *content == format!("{giant}\n[audio: audio/wav]").as_str())
+            matches!(tool, Block::ToolResult { content, details: Some(_), .. } if content.matches_str(&format!("{giant}\n[audio: audio/wav]")) == Some(true))
         );
         assert_eq!(bag(&full.messages[0])["metadata"]["operations"][0], giant.as_str());
     }

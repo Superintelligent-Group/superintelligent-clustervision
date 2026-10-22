@@ -320,7 +320,7 @@ mod tests {
         assert_eq!(blocks.len(), 3, "expected thinking + tooluse + text");
 
         match &blocks[0] {
-            Block::Thinking { text, .. } => assert_eq!(text, "I should check the weather."),
+            Block::Thinking { text, .. } => assert_eq!(text.inline_str(), Some("I should check the weather.")),
             other => panic!("expected Thinking, got {other:?}"),
         }
         match &blocks[1] {
@@ -332,7 +332,7 @@ mod tests {
             other => panic!("expected ToolUse, got {other:?}"),
         }
         match &blocks[2] {
-            Block::Text { text } => assert_eq!(text, "It is sunny in SF."),
+            Block::Text { text } => assert_eq!(text.inline_str(), Some("It is sunny in SF.")),
             other => panic!("expected Text, got {other:?}"),
         }
     }
@@ -343,7 +343,7 @@ mod tests {
         let blocks = decode(text);
         assert_eq!(blocks.len(), 1);
         match &blocks[0] {
-            Block::Text { text: t } => assert_eq!(t, text),
+            Block::Text { text: t } => assert_eq!(t.inline_str(), Some(text)),
             other => panic!("expected Text, got {other:?}"),
         }
         assert!(!looks_like_harmony(text));
@@ -356,7 +356,7 @@ mod tests {
         let blocks = decode(text);
         assert_eq!(blocks.len(), 1);
         match &blocks[0] {
-            Block::Text { text } => assert_eq!(text, "partial answer with no end token"),
+            Block::Text { text } => assert_eq!(text.inline_str(), Some("partial answer with no end token")),
             other => panic!("expected Text, got {other:?}"),
         }
     }
@@ -405,11 +405,11 @@ mod tests {
         let blocks = decode(text);
         assert_eq!(blocks.len(), 2);
         match &blocks[0] {
-            Block::Text { text } => assert_eq!(text, "Let me work through this."),
+            Block::Text { text } => assert_eq!(text.inline_str(), Some("Let me work through this.")),
             other => panic!("expected Text preamble, got {other:?}"),
         }
         match &blocks[1] {
-            Block::Text { text } => assert_eq!(text, "Done."),
+            Block::Text { text } => assert_eq!(text.inline_str(), Some("Done.")),
             other => panic!("expected final Text, got {other:?}"),
         }
     }
@@ -420,7 +420,7 @@ mod tests {
         let blocks = decode(text);
         assert_eq!(blocks.len(), 1);
         match &blocks[0] {
-            Block::Text { text } => assert_eq!(text, "café 日本語 🎉 emoji"),
+            Block::Text { text } => assert_eq!(text.inline_str(), Some("café 日本語 🎉 emoji")),
             other => panic!("expected Text, got {other:?}"),
         }
     }

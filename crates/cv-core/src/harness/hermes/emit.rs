@@ -729,7 +729,9 @@ mod tests {
             .iter()
             .flat_map(|m| &m.content)
             .all(|b| !matches!(b, Block::Thinking { .. })));
-        assert!(matches!(&replay.messages[0].content[0], Block::Text { text } if text == "public answer"));
+        assert!(
+            matches!(&replay.messages[0].content[0], Block::Text { text } if text.matches_str("public answer") == Some(true))
+        );
         assert!(replay.messages.iter().all(|m| m
             .harness_extra(Harness::Hermes)
             .unwrap()

@@ -813,7 +813,7 @@ impl Message {
                 Block::ToolResult { content, .. } => content,
                 _ => continue,
             };
-            if text.is_span() {
+            if text.is_lazy() {
                 let owned = text.try_resolve(resolver)?.into_owned();
                 *text = crate::lazy::Text::Inline(owned);
             }

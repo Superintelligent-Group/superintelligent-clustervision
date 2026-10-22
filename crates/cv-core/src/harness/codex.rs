@@ -1743,7 +1743,7 @@ mod tests {
         let m = &s.messages[0];
         match &m.content[0] {
             Block::Thinking { text, encrypted, .. } => {
-                assert_eq!(text, "raw thoughts");
+                assert_eq!(text.inline_str(), Some("raw thoughts"));
                 assert_eq!(encrypted.as_deref(), Some("ENC"));
             }
             other => panic!("expected thinking, got {other:?}"),
@@ -1773,7 +1773,7 @@ mod tests {
                 ..
             } => {
                 assert_eq!(tool_use_id, "c1");
-                assert_eq!(content, "boom");
+                assert_eq!(content.inline_str(), Some("boom"));
                 assert!(is_error);
             }
             _ => unreachable!(),
@@ -1829,7 +1829,7 @@ mod tests {
         let s = parse_fixture("tool_search_call_and_output.jsonl");
         assert!(matches!(&s.messages[0].content[0], Block::ToolUse { name, .. } if name == "tool_search"));
         assert!(
-            matches!(&s.messages[1].content[0], Block::ToolResult { tool_use_id, content, .. } if tool_use_id == "t1" && content == "[]")
+            matches!(&s.messages[1].content[0], Block::ToolResult { tool_use_id, content, .. } if tool_use_id == "t1" && content.matches_str("[]") == Some(true))
         );
     }
 
@@ -1837,7 +1837,7 @@ mod tests {
     fn user_message_with_input_image() {
         let s = parse_fixture("user_message_with_input_image.jsonl");
         let m = &s.messages[0];
-        assert!(matches!(&m.content[0], Block::Text { text } if text == "see this"));
+        assert!(matches!(&m.content[0], Block::Text { text } if text.matches_str("see this") == Some(true)));
         match &m.content[1] {
             Block::Image { media_type, data_ref } => {
                 assert_eq!(media_type.as_deref(), Some("image/png"));
@@ -1891,7 +1891,7 @@ mod tests {
                 })
             })
             .expect("tool result present");
-        assert!(content.is_span(), "giant fco output should be a span");
+        assert!(content.is_lazy(), "giant fco output should be a span");
         let resolver = s.resolver();
         assert_eq!(
             content.try_resolve(&resolver).unwrap(),
@@ -2006,7 +2006,7 @@ mod tests {
         assert!(full[3]
             .content
             .iter()
-            .any(|b| matches!(b, Block::ToolResult { content, .. } if content.is_span())));
+            .any(|b| matches!(b, Block::ToolResult { content, .. } if content.is_lazy())));
         let offs: Vec<u64> = full
             .iter()
             .map(|m| {
@@ -2314,7 +2314,7 @@ mod tests {
         assert!(s
             .messages
             .iter()
-            .any(|m| matches!(m.content.first(), Some(Block::ToolResult { content, .. }) if content == "ok")));
+            .any(|m| matches!(m.content.first(), Some(Block::ToolResult { content, .. }) if content.matches_str("ok") == Some(true))));
     }
 
     /// Developer smoke test against the real on-disk corpus (run with `--ignored`). Parses every
@@ -2946,7 +2946,9 @@ mod tests {
     fn structured_output_with_image() {
         let s = parse_fixture("structured_output_with_image.jsonl");
         let m = &s.messages[0];
-        assert!(matches!(&m.content[0], Block::ToolResult { content, .. } if content == "here"));
+        assert!(
+            matches!(&m.content[0], Block::ToolResult { content, .. } if content.matches_str("here") == Some(true))
+        );
         assert!(
             matches!(&m.content[1], Block::Image { media_type, .. } if media_type.as_deref() == Some("image/jpeg"))
         );

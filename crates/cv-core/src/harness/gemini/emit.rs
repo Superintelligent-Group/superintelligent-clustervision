@@ -377,7 +377,7 @@ mod checked_tests {
         assert!(prepared.messages[0]
             .content
             .iter()
-            .any(|block| matches!(block,Block::Text {text} if text.is_span())));
+            .any(|block| matches!(block,Block::Text {text} if text.is_lazy())));
         prepared.materialize()?;
         let full = crate::stream::collect_with(&adapter, &reference, &crate::Demand::RICH)?;
         assert_eq!(serde_json::to_value(&prepared)?, serde_json::to_value(&full)?);
@@ -385,7 +385,7 @@ mod checked_tests {
         assert!(complete.messages[0]
             .content
             .iter()
-            .all(|block| !matches!(block,Block::Text {text} if text.is_span())));
+            .all(|block| !matches!(block,Block::Text {text} if text.is_lazy())));
         // Same-harness Gemini uses the existing complete/owned compatibility path.
         Ok(())
     }

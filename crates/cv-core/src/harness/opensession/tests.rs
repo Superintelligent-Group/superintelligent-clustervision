@@ -449,7 +449,7 @@ fn native_messages_read_back_what_was_written_and_reject_late_invalid_turns() {
                     .messages
                     .iter()
                     .flat_map(|m| &m.content)
-                    .any(|block| matches!(block,Block::Text{text} if text.is_span())),
+                    .any(|block| matches!(block,Block::Text{text} if text.is_lazy())),
                 "selected text must remain lazy before materialization on every backend"
             );
         }

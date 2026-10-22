@@ -429,7 +429,10 @@ fn render_workflow(w: &cv_core::Workflow, show_script: bool) -> Result<()> {
         println!("task: {t}");
     }
     if let Some(a) = &w.args {
-        println!("args: {}", cv_core::projection::Head::of_json(cv_core::JsonView::from(a), 200)?);
+        println!(
+            "args: {}",
+            cv_core::projection::Head::of_json(cv_core::JsonView::from(a), 200)?
+        );
     }
     if let Some(rf) = &w.resume_from {
         println!("resumed from: {rf}");

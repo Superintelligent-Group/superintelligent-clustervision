@@ -612,7 +612,7 @@ mod tests {
         assert_eq!(a[0].model.as_deref(), Some("glm"));
         assert_eq!(a[0].usage.as_ref().unwrap().cost_usd, Some(0.5));
         assert!(
-            matches!(&a[1].content[0], Block::ToolResult { is_error: true, content, .. } if content == "No such file")
+            matches!(&a[1].content[0], Block::ToolResult { is_error: true, content, .. } if content.matches_str("No such file") == Some(true))
         );
 
         let e = one(

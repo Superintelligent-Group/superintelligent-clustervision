@@ -2870,7 +2870,7 @@ mod tests {
         s.messages = sink.messages;
         match &s.messages[0].content[0] {
             Block::Text { text } => {
-                assert!(text.is_span(), "large content should be a span");
+                assert!(text.is_lazy(), "large content should be a span");
                 let resolver = s.resolver();
                 assert_eq!(text.try_resolve(&resolver).unwrap(), big.as_str());
             }
@@ -2880,7 +2880,7 @@ mod tests {
         s.materialize().unwrap();
         match &s.messages[0].content[0] {
             Block::Text { text } => {
-                assert!(!text.is_span());
+                assert!(!text.is_lazy());
                 assert_eq!(text.inline_str(), Some(big.as_str()));
             }
             _ => panic!("expected text block"),

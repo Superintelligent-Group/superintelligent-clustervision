@@ -632,7 +632,7 @@ fn validate_analysis_sources(session: &Session) -> anyhow::Result<()> {
                 Block::ToolResult { content, .. } => Some(content),
                 _ => None,
             };
-            if let Some(text) = text.filter(|text| text.is_span()) {
+            if let Some(text) = text.filter(|text| text.is_lazy()) {
                 text.try_for_each_chunk(&resolver, 64 * 1024, |_| Ok(()))?;
             }
         }

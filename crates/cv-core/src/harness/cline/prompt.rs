@@ -79,7 +79,10 @@ impl FirstLine {
         if self.title.is_some() {
             return;
         }
-        let line = std::mem::replace(&mut self.line, crate::projection::Head::trimmed(crate::projection::Head::TITLE));
+        let line = std::mem::replace(
+            &mut self.line,
+            crate::projection::Head::trimmed(crate::projection::Head::TITLE),
+        );
         if !line.is_blank() {
             self.title = Some(line.finish());
         }

@@ -2782,7 +2782,7 @@ mod tests {
                 ..
             } => {
                 assert_eq!(tool_use_id, "call_1");
-                assert_eq!(content, "file contents");
+                assert_eq!(content.inline_str(), Some("file contents"));
                 assert!(!is_error);
                 assert_eq!(tool_name.as_deref(), Some("read_file"));
             }

@@ -1426,7 +1426,7 @@ mod tests {
         assert!(
             matches!(&a.content[0], Block::Thinking { signature, .. } if signature.as_deref() == Some("sealed.v1.fixture"))
         );
-        assert!(matches!(&a.content[1], Block::Text { text } if text == "I'll check both."));
+        assert!(matches!(&a.content[1], Block::Text { text } if text.matches_str("I'll check both.") == Some(true)));
         let tool_ids: Vec<&str> = a
             .content
             .iter()

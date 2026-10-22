@@ -122,7 +122,7 @@ mod tests {
                 );
             }
             std::fs::write(&path, b"changed")?;
-            if text.is_span() {
+            if text.is_lazy() {
                 assert!(first_character(&text, &resolver, false).is_err());
                 assert!(first_character(&text, &resolver, true).is_err());
             }

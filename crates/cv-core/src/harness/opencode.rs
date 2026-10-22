@@ -1177,12 +1177,12 @@ mod tests {
         // thinking signature preserved
         match &asst.content[0] {
             Block::Thinking { text, signature, .. } => {
-                assert_eq!(text, "thinking...");
+                assert_eq!(text.inline_str(), Some("thinking..."));
                 assert_eq!(signature.as_deref(), Some("SIG"));
             }
             b => panic!("expected thinking, got {b:?}"),
         }
-        assert!(matches!(&asst.content[1], Block::Text { text } if text == "Hello"));
+        assert!(matches!(&asst.content[1], Block::Text { text } if text.matches_str("Hello") == Some(true)));
         assert!(matches!(&asst.content[2], Block::ToolUse { name, .. } if name == "bash"));
         assert_eq!((asst.kind, asst.origin), (MessageKind::Reply, Origin::Model));
         // message-level facts live in the harness bag only
@@ -1213,7 +1213,7 @@ mod tests {
                 status,
                 ..
             } => {
-                assert_eq!(content, "a\nb");
+                assert_eq!(content.inline_str(), Some("a\nb"));
                 assert!(!is_error);
                 assert_eq!(tool_use_id, "c1");
                 assert_eq!(tool_name.as_deref(), Some("bash"));
@@ -1297,7 +1297,7 @@ mod tests {
         assert!(m
             .content
             .iter()
-            .any(|b| matches!(b, Block::Text { text } if text == "@oracle")));
+            .any(|b| matches!(b, Block::Text { text } if text.matches_str("@oracle") == Some(true))));
         assert!(m
             .content
             .iter()
@@ -1315,7 +1315,9 @@ mod tests {
         .unwrap();
         let out = build_messages(&mv, &[]);
         assert_eq!(out.len(), 1);
-        assert!(matches!(&out[0].content[0], Block::Text { text } if text == "Removed debug comments."));
+        assert!(
+            matches!(&out[0].content[0], Block::Text { text } if text.matches_str("Removed debug comments.") == Some(true))
+        );
         assert_eq!((out[0].kind, out[0].origin), (MessageKind::Prompt, Origin::Human));
         // diffs preserved in the bag
         assert!(out[0].extra["opencode"].get("summary_diffs").is_some());
@@ -1353,7 +1355,7 @@ mod tests {
             "the kind says it"
         );
         // the boolean must NOT be rendered as a text body; the real text comes from parts
-        assert!(matches!(&m.content[0], Block::Text { text } if text == "compacted history…"));
+        assert!(matches!(&m.content[0], Block::Text { text } if text.matches_str("compacted history…") == Some(true)));
     }
 
     #[test]
@@ -1446,7 +1448,7 @@ mod tests {
         let Block::ToolResult { content, .. } = &owned[1].content[1] else {
             panic!("structured error result")
         };
-        assert_eq!(content, r#"{"message":"structured"}"#);
+        assert_eq!(content.inline_str(), Some(r#"{"message":"structured"}"#));
         let Block::ToolResult { content, .. } = &owned[1].content[3] else {
             panic!("object output")
         };
@@ -2316,8 +2318,12 @@ mod tests {
             assert!(
                 matches!(&s.messages[1].content[0], Block::Thinking { signature, .. } if signature.as_deref() == Some("SIG"))
             );
-            assert!(matches!(&s.messages[1].content[1], Block::Text { text } if text == "Reverted."));
-            assert!(matches!(&s.messages[2].content[0], Block::ToolResult { content, .. } if content == "a\nb"));
+            assert!(
+                matches!(&s.messages[1].content[1], Block::Text { text } if text.matches_str("Reverted.") == Some(true))
+            );
+            assert!(
+                matches!(&s.messages[2].content[0], Block::ToolResult { content, .. } if content.matches_str("a\nb") == Some(true))
+            );
             assert_eq!(s.messages[1].usage.as_ref().unwrap().cache_read_tokens, Some(20627));
             fs::remove_dir_all(&dir).ok();
         }

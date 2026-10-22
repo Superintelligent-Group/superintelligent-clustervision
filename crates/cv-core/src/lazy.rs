@@ -123,8 +123,14 @@ impl Text {
         }
     }
 
-    pub fn is_span(&self) -> bool {
+    /// Whether reading this text requires a checked source demand.
+    pub fn is_lazy(&self) -> bool {
         matches!(self, Text::Span(_) | Text::Source(_))
+    }
+
+    /// Inline equality without resolving: `None` means a source demand is required.
+    pub fn matches_str(&self, other: &str) -> Option<bool> {
+        self.inline_str().map(|text| text == other)
     }
 
     /// The span, if this is lazy content.
@@ -247,7 +253,7 @@ impl Deref for Text {
         match self {
             Text::Inline(s) => s,
             Text::Span(_) | Text::Source(_) => {
-                panic!("Text::Span read as &str without resolving — call Session::materialize() or Text::resolve(&resolver) first")
+                panic!("Text::Span read as &str without resolving — call Session::materialize() or Text::try_resolve(&resolver) first")
             }
         }
     }
@@ -257,20 +263,9 @@ impl fmt::Display for Text {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Text::Inline(s) => f.write_str(s),
-            // Don't panic in Display; an unmaterialized span renders empty. Materialize for output.
-            Text::Span(_) | Text::Source(_) => Ok(()),
+            // Formatting cannot resolve or report a source error. Refuse an unresolved value.
+            Text::Span(_) | Text::Source(_) => Err(fmt::Error),
         }
-    }
-}
-
-impl PartialEq<str> for Text {
-    fn eq(&self, other: &str) -> bool {
-        self.inline_str() == Some(other)
-    }
-}
-impl PartialEq<&str> for Text {
-    fn eq(&self, other: &&str) -> bool {
-        self.inline_str() == Some(*other)
     }
 }
 
@@ -433,6 +428,24 @@ pub use serde_json::value::RawValue;
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn unresolved_span_display_and_comparison_require_resolution() {
+        use std::fmt::Write;
+        let span = super::Text::Span(super::Span {
+            source: None,
+            offset: 1,
+            len: 3,
+            escaped: false,
+        });
+        assert_eq!(span.matches_str(""), None);
+        assert_eq!(span.matches_str("abc"), None);
+        assert!(write!(String::new(), "{span}").is_err());
+        let inline = super::Text::from("abc");
+        assert_eq!(inline.matches_str("abc"), Some(true));
+        assert_eq!(inline.matches_str(""), Some(false));
+        assert_eq!(inline.to_string(), "abc");
+    }
+
     #[test]
     fn public_span_operations_reject_overflowing_offsets() {
         let text = super::Text::Span(super::Span {
@@ -655,7 +668,7 @@ mod tests {
         };
         std::fs::write(&path, line("A")).unwrap();
         let session = parse();
-        assert!(first_text(&session).is_span());
+        assert!(first_text(&session).is_lazy());
         let replacement = world.base.join("replacement");
         std::fs::write(&replacement, line("B")).unwrap();
         std::fs::rename(&replacement, &path).unwrap();

@@ -1415,7 +1415,7 @@ mod tests {
         match &m.content[0] {
             Block::Thinking { encrypted, text, .. } => {
                 assert_eq!(encrypted.as_deref(), Some("BLOB"));
-                assert_eq!(text, "thinking");
+                assert_eq!(text.inline_str(), Some("thinking"));
             }
             _ => unreachable!(),
         }
@@ -1437,7 +1437,7 @@ mod tests {
                 ..
             } => {
                 assert_eq!(tool_use_id, "call-1");
-                assert_eq!(content, "file contents");
+                assert_eq!(content.inline_str(), Some("file contents"));
                 assert!(!is_error);
             }
             other => panic!("expected tool_result, got {other:?}"),

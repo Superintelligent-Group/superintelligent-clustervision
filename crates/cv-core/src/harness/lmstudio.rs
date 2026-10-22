@@ -982,8 +982,8 @@ mod tests {
         let r = SessionRef::new("lazy", Harness::LmStudio, path.clone());
         let lazy = crate::stream::collect_with(&LmStudio { root: None }, &r, &Demand::LEAN.with_spans()).unwrap();
         assert_eq!(lazy.messages.len(), 1);
-        assert!(matches!(&lazy.messages[0].content[0], Block::Thinking { text, .. } if text.is_span()));
-        assert!(matches!(&lazy.messages[0].content[1], Block::Text { text } if text.is_span()));
+        assert!(matches!(&lazy.messages[0].content[0], Block::Thinking { text, .. } if text.is_lazy()));
+        assert!(matches!(&lazy.messages[0].content[1], Block::Text { text } if text.is_lazy()));
         let full = crate::stream::collect_with(&LmStudio { root: None }, &r, &Demand::RICH).unwrap();
         let mut lazy = lazy;
         lazy.materialize().unwrap();
@@ -1079,7 +1079,7 @@ mod tests {
         assert_eq!(a.role, Role::Assistant);
         assert!(matches!(a.content[0], Block::Thinking { .. }));
         match &a.content[0] {
-            Block::Thinking { text, .. } => assert_eq!(text, "the user said hi"),
+            Block::Thinking { text, .. } => assert_eq!(text.inline_str(), Some("the user said hi")),
             _ => unreachable!(),
         }
         assert_eq!(a.text().as_deref(), Some("Hi! How can I help?"));
@@ -1442,7 +1442,8 @@ mod tests {
                     let expected = if trim { text.trim() } else { &text };
                     assert_eq!(
                         title(head),
-                        (!text.trim().is_empty()).then(|| crate::ir::truncate(expected, crate::projection::Head::TITLE))
+                        (!text.trim().is_empty())
+                            .then(|| crate::ir::truncate(expected, crate::projection::Head::TITLE))
                     );
                 }
             }

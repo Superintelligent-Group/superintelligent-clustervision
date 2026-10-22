@@ -3,6 +3,8 @@
 ## Unreleased
 
 - `prune`, `rewind`, and `port` accept `--skills keep|drop|drop-stale`, including legacy command-file skills; the default preserves restored skills unchanged.
+- **Breaking (library):** unresolved `Text` formatting errors; `matches_str` replaces string equality, and `is_lazy` replaces `is_span`.
+
 - Compressed Codex rollouts use the independent `zstd` feature; disabled decoding errors explicitly instead of reading compressed bytes as JSONL.
 
 - **Breaking (library):** `projection::Head` replaces `ir::Head`; byte prefixes and character labels share one builder with explicit budgets.

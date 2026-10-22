@@ -2555,7 +2555,7 @@ mod tests {
         let s = parse_conn(&conn, &sref(&conn, "s1")).unwrap();
         assert_eq!(s.messages.len(), 1);
         let blocks = &s.messages[0].content;
-        assert!(matches!(&blocks[0], Block::Text { text } if text == "see this"));
+        assert!(matches!(&blocks[0], Block::Text { text } if text.matches_str("see this") == Some(true)));
         assert!(matches!(&blocks[1], Block::Image { data_ref: Some(u), .. } if u.starts_with("data:image/png")));
     }
 
@@ -2572,7 +2572,7 @@ mod tests {
         .unwrap();
         let s = parse_conn(&conn, &sref(&conn, "s1")).unwrap();
         let blocks = &s.messages[0].content;
-        assert!(matches!(&blocks[0], Block::Text { text } if text == "hi"));
+        assert!(matches!(&blocks[0], Block::Text { text } if text.matches_str("hi") == Some(true)));
         assert!(matches!(&blocks[1], Block::Image { data_ref: Some(u), .. } if u.starts_with("data:image/jpeg")));
     }
 
@@ -2656,7 +2656,7 @@ mod tests {
                 _ => None,
             })
             .unwrap();
-        assert_eq!(text, "same");
+        assert_eq!(text.inline_str(), Some("same"));
     }
 
     #[test]
