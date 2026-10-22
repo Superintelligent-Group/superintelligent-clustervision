@@ -28,26 +28,8 @@ impl Server {
     fn spawn(tag: &str) -> Server {
         let world = World::new(tag);
 
-        // Fixture corpus: two tiny claude sessions.
-        let alpha = [
-            json!({"type": "ai-title", "aiTitle": "alpha adventures"}),
-            json!({"type": "user", "uuid": "u1", "timestamp": "2026-01-01T10:00:00Z",
-                   "cwd": "/work/proj",
-                   "message": {"role": "user", "content": "please fix the zebrafish migration"}}),
-            json!({"type": "assistant", "uuid": "a1", "timestamp": "2026-01-02T10:00:00Z",
-                   "message": {"role": "assistant", "content": [
-                       {"type": "text", "text": "done — the migration is fixed"}]}}),
-        ];
-        let beta = [
-            json!({"type": "user", "uuid": "b1", "timestamp": "2026-03-01T09:00:00Z",
-                   "cwd": "/work/proj",
-                   "message": {"role": "user", "content": "how many quokkas in the census"}}),
-            json!({"type": "assistant", "uuid": "b2", "timestamp": "2026-03-01T09:05:00Z",
-                   "message": {"role": "assistant", "content": [
-                       {"type": "text", "text": "seventeen quokkas"}]}}),
-        ];
-        world.write_session("alphasess", &alpha);
-        world.write_session("betasess", &beta);
+        // Fixture corpus: the standard two claude sessions (cv_testkit::corpus::standard).
+        cv_testkit::corpus::standard(&world);
 
         let mut child = world
             .cv_command()
@@ -239,7 +221,7 @@ fn generated_tools_run_the_real_commands() {
     assert!(!is_err, "{text}");
     let v: Value = serde_json::from_str(&text).expect("show returns the IR as JSON");
     assert_eq!(v["id"], "alphasess", "{text}");
-    assert_eq!(v["messages"].as_array().map(Vec::len), Some(2), "{text}");
+    assert_eq!(v["messages"].as_array().map(Vec::len), Some(3), "{text}");
 
     // An explicit window is passed through (a clap id becomes its kebab-case flag).
     let (text, is_err) = s.call_tool(3, "show", json!({"id": "alphasess", "first": 1}));

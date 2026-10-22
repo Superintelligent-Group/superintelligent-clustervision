@@ -13,7 +13,7 @@ use std::process::Command;
 use std::{fs, str};
 
 /// A planted secret that `cv export --redact` must scrub (matches cv_core::redact's sk- recognizer).
-const SECRET: &str = "sk-abcDEF1234567890ghijkl";
+use cv_testkit::corpus::{self, SECRET};
 
 /// A tag-only decision: opened assigned to `who` and tagged `decision`, with nothing posed — the
 /// shape `cv task open --tags decision` wrote before it was refused; it reads as an assigned
@@ -35,52 +35,9 @@ fn assistant_line(uuid: &str, ts: &str, blocks: serde_json::Value) -> serde_json
     )
 }
 
-/// The standard two-session corpus:
-/// - `alphasess`: created 2026-01-01, updated 2026-06-01, 3 messages, title "alpha adventures",
-///   contains "zebrafish", a planted secret, and an Edit on /work/proj/src/widget.rs.
-/// - `betasess`: created 2026-03-01, updated 2026-03-02, 4 messages, no title.
-///
-/// Orderings disagree on purpose: updated → alpha first; created → beta first; messages → beta.
+/// The standard two-session corpus, shared with every suite that plants it (see cv-testkit).
 fn standard_corpus(w: &World) {
-    w.write_session(
-        "alphasess",
-        &[
-            serde_json::json!({"type": "ai-title", "aiTitle": "alpha adventures"}),
-            user_line("alphasess", "u1", "2026-01-01T10:00:00Z", "please fix the zebrafish migration"),
-            assistant_line(
-                "a1",
-                "2026-01-02T10:00:00Z",
-                serde_json::json!([
-                    {"type": "text", "text": format!("on it — found a leaked key {SECRET} in the env")},
-                    {"type": "tool_use", "id": "t1", "name": "Edit",
-                     "input": {"file_path": "/work/proj/src/widget.rs", "old_string": "a", "new_string": "b"}}
-                ]),
-            ),
-            serde_json::json!({
-                "type": "user", "uuid": "u2", "sessionId": "s", "timestamp": "2026-06-01T10:00:00Z",
-                "message": {"role": "user", "content": [
-                    {"type": "tool_result", "tool_use_id": "t1", "content": "edited ok", "is_error": false}
-                ]}
-            }),
-        ],
-    );
-    w.write_session(
-        "betasess",
-        &[
-            user_line("betasess", "b1", "2026-03-01T09:00:00Z", "how many quokkas in the census"),
-            assistant_line(
-                "b2",
-                "2026-03-01T09:05:00Z",
-                serde_json::json!([{"type": "text", "text": "seventeen quokkas"}]),
-            ),
-            user_line("betasess", "b3", "2026-03-02T09:00:00Z", "thanks"),
-            assistant_line(
-                "b4",
-                "2026-03-02T09:01:00Z",
-                serde_json::json!([{"type": "text", "text": "anytime"}]),
-            ),
-        ],
-    );
+    corpus::standard(w);
 }
 
 /// Index of `needle`'s first occurrence, with a labeled panic when missing.
