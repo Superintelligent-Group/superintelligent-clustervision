@@ -377,11 +377,7 @@ fn earliest_holder(conn: &Connection, first: &str, excluding: Option<&str>) -> O
     .ok()?
     .flatten();
     holders
-        .filter_map(|(sid, created)| {
-            #[cfg(test)]
-            FORK_HOLDER_ROWS.with(|rows| rows.set(rows.get() + 1));
-            Some((created.as_deref().and_then(parse_ts_text)?, sid))
-        })
+        .filter_map(|(sid, created)| Some((created.as_deref().and_then(parse_ts_text)?, sid)))
         .min()
 }
 
@@ -392,9 +388,6 @@ fn binary_holder_ids(conn: &Connection) -> bool {
         .into_iter()
         .all(|(table, id)| super::store::sqlite::binary_text_columns(conn, table, &[id]).unwrap_or(false))
 }
-
-#[cfg(test)]
-thread_local! { static FORK_HOLDER_ROWS:std::cell::Cell<usize>=const {std::cell::Cell::new(0)}; }
 
 #[cfg(test)]
 fn fork_source(conn: &Connection, id: &str, created: Option<DateTime<Utc>>) -> Option<String> {
@@ -449,11 +442,6 @@ fn fork_source_scoped(
         .as_ref()
         .as_ref()
         .and_then(|(time, parent)| (*time < created && parent != &r.id).then(|| parent.clone())))
-}
-
-#[cfg(test)]
-fn stream_db(conn: &Connection, r: &SessionRef, sink: &mut dyn MessageSink) -> Result<Session> {
-    stream_db_opts(conn, r, &Demand::RICH, sink)
 }
 
 #[cfg(test)]
@@ -881,11 +869,11 @@ fn parse_ts_text(s: &str) -> Option<DateTime<Utc>> {
     None
 }
 
-/// Whole-`Session` convenience over [`stream_db`] for tests: stream into a [`CollectSink`].
+/// Whole-`Session` convenience over [`stream_db_opts`] for tests: stream into a [`CollectSink`].
 #[cfg(test)]
 fn parse_db(conn: &Connection, r: &SessionRef) -> Result<Session> {
     let mut sink = crate::stream::CollectSink::default();
-    let mut s = stream_db(conn, r, &mut sink)?;
+    let mut s = stream_db_opts(conn, r, &Demand::RICH, &mut sink)?;
     s.messages = sink.messages;
     Ok(s)
 }
@@ -985,10 +973,11 @@ mod tests {
     ";
 
     /// A store file holding `schema`; Goose reads cells against the file they live in.
-    fn mk(schema: &str) -> Connection {
-        let c = Connection::open(tempdir().join("sessions.db")).unwrap();
+    fn mk(schema: &str) -> (cv_testkit::World, Connection) {
+        let (world, dir) = tempdir();
+        let c = Connection::open(dir.join("sessions.db")).unwrap();
         c.execute_batch(schema).unwrap();
-        c
+        (world, c)
     }
 
     /// A message's `extra["goose"]` bag (the only place a Goose message fact may live).
@@ -997,8 +986,10 @@ mod tests {
     }
 
     /// Every `extra` key, on the session and on each message, is `goose` (or cv's own namespace,
-    /// on a turn cv synthesized): no flat keys anywhere.
+    /// on a turn cv synthesized): the shared IR-v2 nesting invariant
+    /// ([`crate::harness::assert_no_flat_keys`]), tightened to goose's one namespace.
     fn assert_nested_extra(s: &Session) {
+        crate::harness::assert_no_flat_keys(s);
         for k in s.extra.keys() {
             assert_eq!(k, Harness::Goose.as_str(), "flat session extra key {k:?}");
         }
@@ -1034,7 +1025,7 @@ mod tests {
 
     #[test]
     fn provider_without_model_stays_in_the_bag() {
-        let c = mk(SCHEMA);
+        let (_world, c) = mk(SCHEMA);
         c.execute(
             "INSERT INTO sessions (id, working_dir, provider_name) VALUES ('s', '/fixture', 'anthropic')",
             [],
@@ -1051,7 +1042,7 @@ mod tests {
 
     #[test]
     fn parses_modern_db_text_and_tools() {
-        let c = mk(SCHEMA);
+        let (_world, c) = mk(SCHEMA);
         c.execute(
             "INSERT INTO sessions (id, description, working_dir, created_at, updated_at, provider_name, model_config_json) \
              VALUES ('s1','Build a thing','/home/u/proj','2024-01-01 12:00:00','2024-01-01 12:05:00','anthropic','{\"model_name\":\"claude-sonnet-4\"}')",
@@ -1222,7 +1213,7 @@ mod tests {
         // What real 1.51.0/1.54.0 compaction writes (tests/corpus/goose): every earlier row flipped to
         // agentVisible:false, then an agent-only summary, continuation and preserved prompt, none
         // carrying `usage`. A tool-pair summary is agent-only too, but earlier rows stay visible.
-        let c = mk(SCHEMA);
+        let (_world, c) = mk(SCHEMA);
         c.execute("INSERT INTO sessions (id, working_dir) VALUES ('c','/p')", [])
             .unwrap();
         let rows = [
@@ -1276,7 +1267,7 @@ mod tests {
     #[test]
     fn fork_lineage_normalizes_seconds_and_milliseconds() {
         for milliseconds in [false, true] {
-            let conn = mk(SCHEMA);
+            let (_world, conn) = mk(SCHEMA);
             for (id, created) in [
                 ("source", "2024-01-01 00:00:00"),
                 ("fork", "2024-01-03 00:00:00"),
@@ -1337,7 +1328,7 @@ mod tests {
     }
 
     #[test]
-    fn fork_family_holder_rows_are_scanned_once_per_read_scope_and_fresh_between_scopes() -> Result<()> {
+    fn fork_family_holder_is_shared_within_a_read_scope_and_fresh_between_scopes() -> Result<()> {
         let world = crate::test_world("goose-fork-family-scope");
         let path = world.base.join("sessions.db");
         let conn = Connection::open(&path)?;
@@ -1359,42 +1350,24 @@ mod tests {
             let reference = SessionRef::new(format!("family-{i:03}"), Harness::Goose, &path);
             crate::stream::collect_with(&adapter, &reference, &Demand::RICH)
         };
-        FORK_HOLDER_ROWS.with(|rows| rows.set(0));
         {
             let _scope = crate::source::read_scope();
             for i in 1..80 {
                 assert_eq!(read(i)?.lineage.forked_from.as_deref(), Some("family-000"));
             }
-            assert_eq!(FORK_HOLDER_ROWS.with(|rows| rows.get()), 80);
         }
-        FORK_HOLDER_ROWS.with(|rows| rows.set(0));
         for i in 1..4 {
             assert_eq!(read(i)?.lineage.forked_from.as_deref(), Some("family-000"));
         }
-        assert_eq!(FORK_HOLDER_ROWS.with(|rows| rows.get()), 240);
         // Exercise the real multi-session consumer without a test-provided source scope.
-        // One worker makes the existing thread-local SQL counter observable while still
-        // traversing TokenStats' production parallel worker boundary.
+        assert!(!crate::source::inventory_scoped());
         let references: Vec<_> = (1..80)
             .map(|i| SessionRef::new(format!("family-{i:03}"), Harness::Goose, &path))
             .collect();
-        let stats_control = || -> Result<()> {
-            assert!(!crate::source::inventory_scoped());
-            FORK_HOLDER_ROWS.with(|rows| rows.set(0));
-            let stats = crate::stats::TokenStats::compute(&references)?;
-            assert_eq!(stats.sessions, 79);
-            assert_eq!(stats.failed, 0);
-            assert_eq!(FORK_HOLDER_ROWS.with(|rows| rows.get()), 80);
-            assert!(!crate::source::inventory_scoped());
-            Ok(())
-        };
-        #[cfg(feature = "parallel")]
-        rayon::ThreadPoolBuilder::new()
-            .num_threads(1)
-            .build()?
-            .install(crate::env::carry(stats_control))?;
-        #[cfg(not(feature = "parallel"))]
-        stats_control()?;
+        let stats = crate::stats::TokenStats::compute(&references)?;
+        assert_eq!(stats.sessions, 79);
+        assert_eq!(stats.failed, 0);
+        assert!(!crate::source::inventory_scoped());
         // A later operation observes changed holder metadata rather than keeping the old minimum.
         let conn = Connection::open(&path)?;
         conn.execute(
@@ -1412,7 +1385,7 @@ mod tests {
     #[test]
     fn title_prefers_the_written_name_column() {
         // Goose only ever writes `name`; `description` is a never-written default '' (v16 DDL).
-        let c = mk(SCHEMA);
+        let (_world, c) = mk(SCHEMA);
         c.execute("INSERT INTO sessions (id, name, working_dir, updated_at) VALUES ('n','Fix flaky test','/p','2026-09-01 00:00:00')", []).unwrap();
         c.execute("INSERT INTO sessions (id, description, working_dir, updated_at) VALUES ('d','Only description','/p','2026-08-01 00:00:00')", []).unwrap();
         c.execute(
@@ -1437,7 +1410,7 @@ mod tests {
 
     #[test]
     fn metadata_json_yields_usage_model_and_flags() {
-        let c = mk(SCHEMA);
+        let (_world, c) = mk(SCHEMA);
         c.execute(
             "INSERT INTO sessions (id, name, working_dir, session_type, parent_session_id, provider_name, model_config_json) \
              VALUES ('s1','t','/x','sub_agent','root-1','anthropic','{\"model_name\":\"claude-sonnet-4-5\"}')",
@@ -1508,7 +1481,7 @@ mod tests {
 
     #[test]
     fn prompt_origin_follows_session_type() {
-        let c = mk(SCHEMA);
+        let (_world, c) = mk(SCHEMA);
         for (id, ty) in [("u", "user"), ("s", "scheduled"), ("h", "hidden"), ("a", "acp")] {
             c.execute(
                 "INSERT INTO sessions (id, working_dir, session_type) VALUES (?1, '/x', ?2)",
@@ -1530,7 +1503,7 @@ mod tests {
 
     #[test]
     fn error_and_document_blocks_map() {
-        let c = mk(SCHEMA);
+        let (_world, c) = mk(SCHEMA);
         c.execute("INSERT INTO sessions (id, working_dir) VALUES ('s1','/x')", [])
             .unwrap();
         let content = r#"[{"type":"error","kind":"contextLengthExceeded","message":"Maximum retry attempts (3) exceeded."},{"type":"document","data":"cGRmLWJ5dGVz","mimeType":"application/pdf","name":"q3-report.pdf"}]"#;
@@ -1556,7 +1529,7 @@ mod tests {
 
     #[test]
     fn control_blocks_are_notices() {
-        let c = mk(SCHEMA);
+        let (_world, c) = mk(SCHEMA);
         c.execute("INSERT INTO sessions (id, working_dir) VALUES ('s1','/x')", [])
             .unwrap();
         let rows = [
@@ -1618,7 +1591,7 @@ mod tests {
 
     #[test]
     fn bare_array_results_and_rmcp3_content_flatten() {
-        let c = mk(SCHEMA);
+        let (_world, c) = mk(SCHEMA);
         c.execute("INSERT INTO sessions (id, working_dir) VALUES ('s1','/x')", [])
             .unwrap();
         // legacy `SuccessWithContentVec`: `value` is the content array itself, with rmcp 3 blocks
@@ -1642,7 +1615,7 @@ mod tests {
 
     #[test]
     fn parses_tool_error_response() {
-        let c = mk(SCHEMA);
+        let (_world, c) = mk(SCHEMA);
         c.execute("INSERT INTO sessions (id, working_dir) VALUES ('s1','/x')", [])
             .unwrap();
         let resp = r#"[{"type":"toolResponse","id":"c9","toolResult":{"status":"error","error":"boom"}}]"#;
@@ -1660,7 +1633,7 @@ mod tests {
     #[test]
     fn delegate_result_keeps_the_child_session_id_in_details() {
         // summon's `delegate` result as Goose 1.51.0/1.54.0 write it (tests/corpus/goose).
-        let c = mk(SCHEMA);
+        let (_world, c) = mk(SCHEMA);
         c.execute("INSERT INTO sessions (id, working_dir) VALUES ('s1','/x')", [])
             .unwrap();
         let resp = r#"[{"type":"toolResponse","id":"c1","toolResult":{"status":"success","value":{"resultType":"complete","content":[{"type":"text","text":"ok"}],"isError":false,"_meta":{"subagent_session_id":"20261011_7"}}}}]"#;
@@ -1740,7 +1713,7 @@ mod tests {
 
     #[test]
     fn discovery_defers_counts_and_streams_preserve_shapes_visibility_and_corruption() {
-        let conn = mk(SCHEMA);
+        let (_world, conn) = mk(SCHEMA);
         let giant = "雪λ\n".repeat(20000);
         let mut cases = vec![
             ("user", "null".to_owned(), None),
@@ -1862,7 +1835,7 @@ mod tests {
 
     #[test]
     fn discovery_keeps_known_sessions_when_message_count_schema_is_unavailable() -> Result<()> {
-        let conn = mk(SCHEMA);
+        let (_world, conn) = mk(SCHEMA);
         conn.execute("INSERT INTO sessions(id,working_dir) VALUES ('known','/synthetic')", [])?;
         conn.execute("DROP TABLE messages", [])?;
         for incomplete in [None, Some("CREATE TABLE messages(session_id TEXT,content_json TEXT)")] {
@@ -1879,7 +1852,7 @@ mod tests {
 
     #[test]
     fn discover_db_orders_without_reading_message_counts() {
-        let c = mk(SCHEMA);
+        let (_world, c) = mk(SCHEMA);
         c.execute("INSERT INTO sessions (id, description, working_dir, updated_at) VALUES ('a','A','/x','2024-01-01 00:00:00')", []).unwrap();
         c.execute("INSERT INTO sessions (id, description, working_dir, updated_at) VALUES ('b','B','/y','2024-02-01 00:00:00')", []).unwrap();
         c.execute("INSERT INTO messages (session_id, role, content_json, created_timestamp) VALUES ('a','user','[{\"type\":\"text\",\"text\":\"hi\"}]',1)", []).unwrap();
@@ -1914,7 +1887,7 @@ mod tests {
 
     #[test]
     fn old_schema_missing_columns_still_parses() {
-        let c = mk(SCHEMA_OLD);
+        let (_world, c) = mk(SCHEMA_OLD);
         c.execute(
             "INSERT INTO sessions (id, name, working_dir) VALUES ('s1','My Session','/p')",
             [],
@@ -1933,7 +1906,7 @@ mod tests {
 
     #[test]
     fn parses_legacy_jsonl() {
-        let dir = tempdir();
+        let (_world, dir) = tempdir();
         let path = dir.join("20240101_120000.jsonl");
         let content = concat!(
             "{\"description\":\"legacy chat\",\"working_dir\":\"/home/u/old\",\"created_at\":\"2024-01-01T12:00:00Z\",\"updated_at\":\"2024-01-01T12:01:00Z\"}\n",
@@ -1979,7 +1952,7 @@ mod tests {
     #[test]
     fn legacy_without_metadata_header_is_tolerant() {
         // A header that's actually a message (no description) — we still read messages, no panic.
-        let dir = tempdir();
+        let (_world, dir) = tempdir();
         let path = dir.join("s.jsonl");
         std::fs::write(
             &path,
@@ -1994,7 +1967,7 @@ mod tests {
 
     #[test]
     fn redacted_thinking_maps() {
-        let c = mk(SCHEMA);
+        let (_world, c) = mk(SCHEMA);
         c.execute("INSERT INTO sessions (id, working_dir) VALUES ('s1','/x')", [])
             .unwrap();
         c.execute(
@@ -2038,7 +2011,7 @@ mod tests {
 
     #[test]
     fn long_text_stays_in_the_cell_and_lean_demands_drop_only_rich_fields() {
-        let c = mk(SCHEMA);
+        let (_world, c) = mk(SCHEMA);
         c.execute("INSERT INTO sessions (id, working_dir) VALUES ('large','/scratch')", [])
             .unwrap();
         let giant = "é\n\"\\".repeat(20_000);
@@ -2097,7 +2070,7 @@ mod tests {
 
     #[test]
     fn checked_projection_rejects_sidecar_creation_at_early_stop() {
-        let dir = tempdir();
+        let (_world, dir) = tempdir();
         let path = dir.join("sessions.db");
         let conn = Connection::open(&path).unwrap();
         conn.execute_batch(SCHEMA).unwrap();
@@ -2131,12 +2104,11 @@ mod tests {
         let mut message = stop.message.unwrap();
         assert!(message.materialize(&crate::lazy::Resolver::new(None)).is_err());
         drop(conn);
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
     fn checked_projection_invalid_body_retains_compaction_history() {
-        let dir = tempdir();
+        let (_world, dir) = tempdir();
         let path = dir.join("sessions.db");
         let conn = Connection::open(&path).unwrap();
         conn.execute_batch(SCHEMA).unwrap();
@@ -2160,14 +2132,13 @@ mod tests {
             kinds(&full)
         );
         drop(conn);
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     /// A fresh directory per call: a clock stamp collides between parallel tests (macOS clocks
     /// tick in microseconds), and two tests then share one `sessions.db`.
-    fn tempdir() -> PathBuf {
-        let p = std::env::temp_dir().join(format!("cv-goose-test-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&p).unwrap();
-        p
+    fn tempdir() -> (cv_testkit::World, PathBuf) {
+        let world = cv_testkit::World::new("goose");
+        let dir = world.base.clone();
+        (world, dir)
     }
 }

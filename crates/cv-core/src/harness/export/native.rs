@@ -254,6 +254,15 @@ const CONVERSATION_FIELDS: &[&str] = &[
     "current_node",
     "default_model_slug",
 ];
+fn role_from_str(s: &str) -> Role {
+    match s {
+        "user" | "human" => Role::User,
+        "assistant" => Role::Assistant,
+        "tool" => Role::Tool,
+        _ => Role::System,
+    }
+}
+
 fn view_ref(kind: Kind, path: &Path, r: &Fields<'_>, id: &str) -> Result<SessionRef> {
     let title = r
         .string(if kind == Kind::ChatGpt { "title" } else { "name" })?
