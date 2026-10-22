@@ -25,7 +25,7 @@ impl std::io::Write for ScratchWriter<'_> {
             .len
             .checked_add(bytes.len())
             .ok_or_else(|| std::io::Error::other("scratch writer length overflow"))?;
-        for part in bytes.chunks(64 * 1024) {
+        for part in bytes.chunks(super::IO_CHUNK) {
             self.scratch.clear();
             self.scratch.reserve(part.len() * if self.quote { 2 } else { 1 });
             if self.quote {
@@ -132,7 +132,7 @@ impl std::io::Write for ByteStage {
                 let capacity = self
                     .memory
                     .capacity()
-                    .max(64 * 1024)
+                    .max(super::IO_CHUNK)
                     .saturating_mul(2)
                     .min(MEMORY_LIMIT)
                     .max(required);
@@ -225,7 +225,7 @@ impl ByteSource {
         // Failed appends remain unreachable; truncating could invalidate mapped views.
         {
             use std::io::Write;
-            let mut writer = std::io::BufWriter::with_capacity(64 * 1024, ScratchWriter::new(&mut file, false));
+            let mut writer = std::io::BufWriter::with_capacity(super::IO_CHUNK, ScratchWriter::new(&mut file, false));
             let produced = f(&mut writer);
             // Flush before observing the published extent. Failed producer output remains an
             // unreachable append, and the producer's error takes precedence over a flush error.
@@ -259,7 +259,7 @@ impl ByteSource {
     pub fn read(mut input: impl std::io::Read) -> std::io::Result<Self> {
         use std::io::Write;
         let mut stage = ByteStage::new();
-        let mut chunk = [0; 64 * 1024];
+        let mut chunk = [0; super::IO_CHUNK];
         loop {
             let n = input.read(&mut chunk)?;
             if n == 0 {

@@ -14,7 +14,7 @@ pub(crate) struct JsonlStage {
 impl JsonlStage {
     pub(crate) fn new() -> Self {
         Self {
-            output: BufWriter::with_capacity(64 * 1024, ByteStage::new()),
+            output: BufWriter::with_capacity(super::IO_CHUNK, ByteStage::new()),
             records: 0,
             failed: false,
         }
@@ -79,7 +79,7 @@ pub(crate) fn publish_stage_checked(
     check: impl FnOnce(&Path) -> Result<()>,
 ) -> Result<()> {
     let source = stage.finish()?;
-    let reader = BufReader::with_capacity(256 * 1024, source.reader()?);
+    let reader = BufReader::with_capacity(super::COPY_CHUNK, source.reader()?);
     let staged = crate::publish::stage_reader(path, "stage", reader, claim)?;
     check(staged.path())?;
     staged.publish(path, claim)?;
@@ -89,7 +89,7 @@ pub(crate) fn publish_stage_checked(
 /// [`publish_stage`] as one member of `set`.
 pub(crate) fn stage_into(set: &mut Set, stage: ByteStage, path: &Path, claim: Claim) -> Result<()> {
     let source = stage.finish()?;
-    let reader = BufReader::with_capacity(256 * 1024, source.reader()?);
+    let reader = BufReader::with_capacity(super::COPY_CHUNK, source.reader()?);
     set.stage(path, "stage", reader, claim)
 }
 

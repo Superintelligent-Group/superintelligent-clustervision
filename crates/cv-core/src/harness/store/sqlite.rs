@@ -380,7 +380,7 @@ pub(crate) fn append_cell(
 ) -> Result<(u64, u64)> {
     if let Ok(mut blob) = conn.blob_open(rusqlite::DatabaseName::Main, table, column, rowid, true) {
         return arena.append(|writer| {
-            let mut buffer = [0u8; 64 * 1024];
+            let mut buffer = [0u8; super::IO_CHUNK];
             loop {
                 let read = std::io::Read::read(&mut blob, &mut buffer)?;
                 if read == 0 {
@@ -490,7 +490,7 @@ impl Cells {
             if blob.is_empty() {
                 return Ok(None);
             }
-            let mut blob = std::io::BufReader::with_capacity(64 * 1024, blob);
+            let mut blob = std::io::BufReader::with_capacity(super::IO_CHUNK, blob);
             self.arena.append(|writer| decode(&mut blob, writer))?
         } else {
             let ValueRef::Blob(mut bytes) = row.get_ref(i)? else {
