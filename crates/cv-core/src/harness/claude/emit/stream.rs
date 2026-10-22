@@ -458,6 +458,17 @@ impl ParentLinks {
         parent
     }
 }
+/// A foreign-session message written as one of Claude Code's special record kinds (a compaction
+/// boundary or summary, an injected-context attachment) rather than an ordinary turn.
+fn special_kind(session: &Session, message: &Message) -> Option<MessageKind> {
+    (session.harness != Harness::Claude
+        && matches!(
+            message.kind,
+            MessageKind::CompactionBoundary | MessageKind::CompactionSummary | MessageKind::InjectedContext
+        ))
+    .then_some(message.kind)
+}
+
 fn record<'a>(
     message: &'a Message,
     c: &Context<'a>,
@@ -478,12 +489,7 @@ fn record<'a>(
             sidecar: None,
         }));
     }
-    let special = (c.session.harness != Harness::Claude
-        && matches!(
-            message.kind,
-            MessageKind::CompactionBoundary | MessageKind::CompactionSummary | MessageKind::InjectedContext
-        ))
-    .then_some(message.kind);
+    let special = special_kind(c.session, message);
     let parent = message
         .parent_id
         .clone()
@@ -645,11 +651,7 @@ pub fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<Emi
         .messages
         .iter()
         .map(|message| {
-            let special = session.harness != Harness::Claude
-                && matches!(
-                    message.kind,
-                    MessageKind::CompactionBoundary | MessageKind::CompactionSummary | MessageKind::InjectedContext
-                );
+            let special = special_kind(session, message).is_some();
             (carrier_record_of(message).is_none() && (special || message.role != Role::System))
                 .then(|| message.id.clone().unwrap_or_else(|| Uuid::new_v4().to_string()))
         })
@@ -671,17 +673,22 @@ pub fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<Emi
     }
     previous = None;
     dropped.clear();
+    // This pass decides every record's survival once; the writing pass goes by its verdicts.
+    let mut verdicts = Vec::with_capacity(session.messages.len());
     for (message, uuid) in session.messages.iter().zip(&uuid) {
+        let mut survives = false;
         if let Some(record) = record(message, &c, uuid.as_deref(), &mut previous, &mut dropped, &resolver)? {
-            record.with_fields(|top, message| {
-                if record.survives(&top, message.as_ref(), &answered, c.agent.as_deref()) {
+            survives = record.with_fields(|top, message| {
+                let survives = record.survives(&top, message.as_ref(), &answered, c.agent.as_deref());
+                if survives {
                     if let Some(id) = top.get("uuid").and_then(Value::as_str) {
                         ids.insert(id.to_owned());
                     }
                 }
-                Ok(())
+                Ok(survives)
             })?;
         }
+        verdicts.push(survives);
     }
     let mut lines = JsonlStage::new();
     let has_title_carrier = session
@@ -731,11 +738,8 @@ pub fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<Emi
     previous = None;
     dropped.clear();
     let mut surviving_previous = None;
-    for (message, uuid) in session.messages.iter().zip(&uuid) {
+    for ((message, uuid), survives) in session.messages.iter().zip(&uuid).zip(&verdicts) {
         if let Some(record) = record(message, &c, uuid.as_deref(), &mut previous, &mut dropped, &resolver)? {
-            let survives = record.with_fields(|top, message| {
-                Ok(record.survives(&top, message.as_ref(), &answered, c.agent.as_deref()))
-            })?;
             if !survives {
                 continue;
             }
