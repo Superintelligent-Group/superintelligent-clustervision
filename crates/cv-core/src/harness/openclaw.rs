@@ -1048,7 +1048,8 @@ fn is_uuid_like(s: &str) -> bool {
         && s.chars().all(|c| c == '-' || c.is_ascii_hexdigit())
 }
 
-/// Is `path` an `openclaw-agent*.sqlite` store (a [`SessionRef::path`] discovery assigned)?
+/// Is `path` a sqlite store? The check is the extension only: every `path` this adapter asks
+/// about is one discovery assigned, and its sqlite stores are all `openclaw-agent*.sqlite`.
 fn is_sqlite_store_path(path: &Path) -> bool {
     path.extension().and_then(|e| e.to_str()) == Some("sqlite")
 }
@@ -3247,7 +3248,6 @@ mod tests {
     #[cfg(feature = "sqlite")]
     #[test]
     fn sqlite_large_window_selection_uses_index_and_matches_native_scan() -> Result<()> {
-        use std::time::Instant;
         let conn = rusqlite::Connection::open_in_memory()?;
         conn.execute_batch("CREATE TABLE session_windows(session_key TEXT,session_id TEXT)")?;
         {
@@ -3259,11 +3259,8 @@ mod tests {
                 ])?;
             }
         }
-        let start = Instant::now();
         let (groups, _) = WindowGroups::load(&conn)?;
-        let build = start.elapsed();
         let mut native_steps = 0;
-        let start = Instant::now();
         let mut expected = Vec::new();
         for i in 0..100 {
             let mut stmt =
@@ -3274,12 +3271,9 @@ mod tests {
             );
             native_steps += stmt.get_status(rusqlite::StatementStatus::FullscanStep);
         }
-        let native = start.elapsed();
-        let start = Instant::now();
         for (i, oracle) in expected.iter().enumerate() {
             assert_eq!(&groups.candidates(&format!("key-{i}"), "self")?, oracle);
         }
-        let indexed = start.elapsed();
         let disk_bytes = groups.0.with(|index| {
             let mut stmt =
                 index.prepare("SELECT session_id FROM windows WHERE key=?1 AND session_id!=?2 ORDER BY ordinal")?;
@@ -3301,37 +3295,27 @@ mod tests {
         let reads = crate::source::ReadSet::default();
         let selector = Path::new("/synthetic/openclaw-query-promotion");
         let _scope = crate::source::read_scope();
-        let start = Instant::now();
         assert_eq!(
             &*sqlite_parent_candidates(&conn, "key-0", "self", selector, &reads)?,
             &expected[0]
         );
-        let first_query = start.elapsed();
         // A repeated identical query is memoized and must not construct a private index.
         assert_eq!(
             &*sqlite_parent_candidates(&conn, "key-0", "self", selector, &reads)?,
             &expected[0]
         );
-        let start = Instant::now();
         for (i, oracle) in expected.iter().enumerate().skip(1) {
             assert_eq!(
                 &*sqlite_parent_candidates(&conn, &format!("key-{i}"), "self", selector, &reads)?,
                 oracle
             );
         }
-        let remaining_queries = start.elapsed();
-        eprintln!("adaptive selection: first={first_query:?} remaining99_including_build={remaining_queries:?}");
         let tiny = rusqlite::Connection::open_in_memory()?;
         tiny.execute_batch("CREATE TABLE session_windows(session_key TEXT,session_id TEXT); INSERT INTO session_windows VALUES ('key','a'),('key','b')")?;
-        let start = Instant::now();
         let (small, _) = WindowGroups::load(&tiny)?;
-        let tiny_build = start.elapsed();
-        let start = Instant::now();
         for _ in 0..1000 {
             assert_eq!(small.candidates("key", "self")?, ["a", "b"]);
         }
-        let tiny_indexed = start.elapsed();
-        let start = Instant::now();
         for _ in 0..1000 {
             let mut stmt =
                 tiny.prepare("SELECT session_id FROM session_windows WHERE session_key=?1 AND session_id!=?2")?;
@@ -3341,9 +3325,6 @@ mod tests {
                 ["a", "b"]
             );
         }
-        let tiny_native = start.elapsed();
-        eprintln!("tiny window selection: rows=2 queries=1000 build={tiny_build:?} native={tiny_native:?} indexed={tiny_indexed:?}");
-        eprintln!("window selection: rows=25000 queries=100 build={build:?} native={native:?} indexed={indexed:?} native_fullscan_steps={native_steps} private_bytes={disk_bytes}");
         Ok(())
     }
 

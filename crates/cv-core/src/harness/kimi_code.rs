@@ -1818,7 +1818,7 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn leftovers_todo_updates_keep_latest_state_and_facts_presence() -> Result<()> {
+    fn todo_updates_keep_latest_state_and_facts_presence() -> Result<()> {
         use crate::affordance::{self, Kind};
         for opts in [
             Demand::RICH,
@@ -1859,7 +1859,7 @@ mod tests {
     }
 
     #[test]
-    fn leftovers_legacy_agent_calls_infer_spawn_and_completed_returns() -> Result<()> {
+    fn legacy_agent_calls_infer_spawn_and_completed_returns() -> Result<()> {
         for status in ["completed", "failed", "running"] {
             let opts = Demand::RICH;
             let mut ctx = Ctx::new(&opts);
@@ -2753,8 +2753,10 @@ mod tests {
 
     /// A store mirroring a real `~/.kimi-code` (protocol 1.5): one session with a main agent + one
     /// sub-agent, a workspaces map, and an index with a tombstone for a second (deleted) session.
-    fn fixture_root() -> PathBuf {
-        let root = std::env::temp_dir().join(format!("cv-kimi-code-{}", uuid::Uuid::new_v4()));
+    /// Returns the world (keep it scoped; dropping it removes the dir) and the home root.
+    fn fixture_root() -> (cv_testkit::World, PathBuf) {
+        let world = cv_testkit::World::new("kimi-code-fixture");
+        let root = world.home.join(".kimi-code");
         let sdir = root
             .join("sessions")
             .join("wd_proj_fd4cb822f4b3")
@@ -2835,7 +2837,7 @@ mod tests {
             sub_lines.join("\n") + "\n",
         )
         .unwrap();
-        root
+        (world, root)
     }
 
     #[test]
@@ -2935,7 +2937,7 @@ mod tests {
 
     #[test]
     fn sub_agent_wire_parses_as_its_own_session_with_lineage() {
-        let root = fixture_root();
+        let (_world, root) = fixture_root();
         let a = KimiCode::with_home(&root);
         let main = a.discover().unwrap().remove(0);
         let subs = subagent_refs(&main).unwrap();
@@ -2978,12 +2980,11 @@ mod tests {
         // the main session knows nothing of the child's lineage
         let m = a.parse(&main).unwrap();
         assert!(m.lineage.is_empty());
-        fs::remove_dir_all(&root).ok();
     }
 
     #[test]
     fn discovers_sessions_from_the_walk_and_honours_tombstones() {
-        let root = fixture_root();
+        let (_world, root) = fixture_root();
         let refs = KimiCode::with_home(&root).discover().unwrap();
         assert_eq!(refs.len(), 1, "the tombstoned session_dead dir is skipped: {refs:?}");
         let r = &refs[0];
@@ -2994,12 +2995,11 @@ mod tests {
         assert_eq!(r.message_count, None, "discovery defers the exact user + step count");
         assert_eq!(r.created_at.map(|t| t.timestamp_millis()), Some(1787509645914));
         assert_eq!(r.updated_at.map(|t| t.timestamp_millis()), Some(1787509891612));
-        fs::remove_dir_all(&root).ok();
     }
 
     #[test]
     fn parses_steps_into_assistant_and_tool_turns() {
-        let root = fixture_root();
+        let (_world, root) = fixture_root();
         let a = KimiCode::with_home(&root);
         let r = a.discover().unwrap().remove(0);
         let s = a.parse(&r).unwrap();
@@ -3135,12 +3135,11 @@ mod tests {
             assert!(m.extra.keys().all(|k| k == "kimi-code"), "{:?}", m.extra);
         }
         assert!(s.lineage.is_empty(), "a top-level session has no lineage");
-        fs::remove_dir_all(&root).ok();
     }
 
     #[test]
     fn complete_mode_carries_bookkeeping_records() {
-        let root = fixture_root();
+        let (_world, root) = fixture_root();
         let a = KimiCode::with_home(&root);
         let r = a.discover().unwrap().remove(0);
         let s = crate::stream::collect_with(&a, &r, &Demand::COMPLETE).unwrap();
@@ -3180,14 +3179,14 @@ mod tests {
             "{:?}",
             s.messages.iter().map(|m| m.role).collect::<Vec<_>>()
         );
-        fs::remove_dir_all(&root).ok();
     }
 
     /// `/undo` (`context.undo{count}`) is a branch: the undone turns stay in the log but leave the
     /// context. A `kimi fork` (2.x) names its source in `state.json.forkedFrom`.
     #[test]
     fn undo_is_a_branch_and_fork_names_its_source() {
-        let root = std::env::temp_dir().join(format!("cv-kimi-code-{}", uuid::Uuid::new_v4()));
+        let world = cv_testkit::World::new("kimi-code-undo-fork");
+        let root = world.home.join(".kimi-code");
         let sdir = root
             .join("sessions")
             .join("wd_p_000000000000")
@@ -3217,14 +3216,14 @@ mod tests {
             s.lineage.forked_from.as_deref(),
             Some("0e0e0e0e-0000-0000-0000-000000000000")
         );
-        fs::remove_dir_all(&root).ok();
     }
 
     /// 2.x writes `subagent.spawned` / `subagent.completed` on the parent's wire inside the
     /// spawning step: they follow the step's reply, and the child's usage is not the parent's.
     #[test]
     fn subagent_records_are_spawn_and_return_after_the_step() {
-        let root = std::env::temp_dir().join(format!("cv-kimi-code-{}", uuid::Uuid::new_v4()));
+        let world = cv_testkit::World::new("kimi-code-subagent-records");
+        let root = world.home.join(".kimi-code");
         let main = root
             .join("sessions")
             .join("wd_p_000000000000")
@@ -3262,7 +3261,6 @@ mod tests {
                 .and_then(|x| x.get("parentToolCallId")),
             Some(&Value::String("t1".into()))
         );
-        fs::remove_dir_all(&root).ok();
     }
 
     #[test]

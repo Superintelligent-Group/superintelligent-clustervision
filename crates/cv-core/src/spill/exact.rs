@@ -946,4 +946,31 @@ mod tests {
         }
         assert!(disk.find(b"key", 1).is_err());
     }
+    #[test]
+    fn many_small_strings_spill_and_keep_membership() {
+        let mut texts = ExactStrings::default();
+        for i in 0..40000 {
+            texts.insert(i.to_string()).unwrap();
+        }
+        assert!(texts.is_spilled(), "small strings still consume entry storage");
+        assert!(texts.contains("0").unwrap());
+        assert!(texts.contains("39999").unwrap());
+    }
+    #[test]
+    fn spilled_strings_keep_exact_equality_and_release_on_clear() {
+        let mut texts = ExactStrings::default();
+        texts.insert("first").unwrap();
+        let large = "x".repeat(1024 * 1024 + 1);
+        texts.insert(large.clone()).unwrap();
+        assert!(texts.contains("first").unwrap());
+        assert!(texts.contains(&large).unwrap());
+        assert!(!texts.contains("FIRST").unwrap());
+        assert!(!texts.contains(&(large.clone() + "x")).unwrap());
+        texts.insert("nul\0suffix").unwrap();
+        assert!(texts.contains("nul\0suffix").unwrap());
+        assert!(!texts.contains("nul").unwrap());
+        texts.clear();
+        assert!(!texts.is_spilled());
+        assert!(!texts.contains("first").unwrap());
+    }
 }

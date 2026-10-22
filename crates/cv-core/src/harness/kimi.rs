@@ -238,11 +238,10 @@ impl Adapter for Kimi {
                 let name = name.to_string_lossy();
                 let (id, transcript, dir): (String, PathBuf, PathBuf) = if p.is_dir() {
                     // Modern: <uuid>/context.jsonl
-                    let ctx = p.join("context.jsonl");
-                    if !ctx.exists() {
+                    if !is_modern(&p) {
                         continue;
                     }
-                    (name.to_string(), ctx, p.clone())
+                    (name.to_string(), p.join("context.jsonl"), p.clone())
                 } else if name.ends_with(".jsonl") {
                     // Legacy: <uuid>.jsonl (flat). source dir is the hash dir.
                     let id = name.trim_end_matches(".jsonl").to_string();
@@ -298,7 +297,7 @@ impl Adapter for Kimi {
     /// The todo list `SetTodoList` keeps in the session dir's `state.json` (`todos: [{title,
     /// status}]`). A legacy flat session (no `context.jsonl` in its dir) has no state file.
     fn store_affordances(&self, r: &SessionRef) -> anyhow::Result<Vec<crate::affordance::Affordance>> {
-        if !r.path.join("context.jsonl").is_file() {
+        if !is_modern(&r.path) {
             return Ok(Vec::new());
         }
         let Some(todos) =
@@ -755,12 +754,23 @@ fn read_custom_title(dir: &Path) -> Option<String> {
         .flatten()
 }
 
+/// The one answer to "is this session dir modern (dir form)": its live `context.jsonl` is a file.
+/// Legacy flat session dirs answer false. (`resume_source` asks the layout by ancestry instead,
+/// deliberately, so a resume path never depends on a mutable `exists()`.)
+fn is_modern(dir: &Path) -> bool {
+    dir.join("context.jsonl").is_file()
+}
+
+/// The wire sidecar of a modern session dir, when present.
+fn wire_sidecar(dir: &Path) -> Option<PathBuf> {
+    let wire = dir.join("wire.jsonl");
+    wire.exists().then_some(wire)
+}
+
 /// Given a `SessionRef.path` and id, find the transcript + optional wire sidecar.
 fn locate_transcript(dir: &Path, id: &str) -> (PathBuf, Option<PathBuf>) {
-    let modern = dir.join("context.jsonl");
-    if modern.exists() {
-        let wire = dir.join("wire.jsonl");
-        return (modern, wire.exists().then_some(wire));
+    if is_modern(dir) {
+        return (dir.join("context.jsonl"), wire_sidecar(dir));
     }
     // Legacy flat: dir is the hash dir, transcript is <id>.jsonl, no wire.
     let flat = dir.join(format!("{id}.jsonl"));
@@ -770,8 +780,7 @@ fn locate_transcript(dir: &Path, id: &str) -> (PathBuf, Option<PathBuf>) {
 /// Locate the wire sidecar for a transcript, if it lives next to it (modern only).
 fn wire_path_for(dir: &Path, transcript: &Path) -> Option<PathBuf> {
     if transcript.file_name().and_then(|n| n.to_str()) == Some("context.jsonl") {
-        let w = dir.join("wire.jsonl");
-        return w.exists().then_some(w);
+        return wire_sidecar(dir);
     }
     None
 }
@@ -2304,7 +2313,7 @@ mod tests {
             {"path":"/Users/ember/elide/breadstuffs","kaos":"local","last_session_id":"x"},
             {"path":"/remote/proj","kaos":"box","last_session_id":null}
         ]}"#;
-        let dir = write_temp("kimi.json", json);
+        let (_world, dir) = write_temp("kimi.json", json);
         let map = load_work_dirs(&dir.join("kimi.json"));
         assert_eq!(
             map.get("a917b40bc491ae8a7f6f508be5446785").unwrap(),
@@ -2313,7 +2322,6 @@ mod tests {
         // non-local KAOS → "<kaos>_<md5>"
         let h = md5_hex(b"/remote/proj");
         assert_eq!(map.get(&format!("box_{h}")).unwrap(), &PathBuf::from("/remote/proj"));
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -2354,12 +2362,11 @@ mod tests {
     #[test]
     fn config_default_model() {
         let toml = "theme = \"dark\"\ndefault_model = \"kimi-code/kimi-for-coding\"\nfoo = 1\n";
-        let dir = write_temp("config.toml", toml);
+        let (_world, dir) = write_temp("config.toml", toml);
         assert_eq!(
             default_model_from_config(&dir.join("config.toml")).as_deref(),
             Some("kimi-code/kimi-for-coding")
         );
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -2550,7 +2557,7 @@ mod tests {
             r#"{"role":"assistant","content":[{"type":"text","text":"Next."}]}"#,
             r#"{"role":"_usage","token_count":1234}"#,
         ];
-        let dir = write_temp(&format!("{id}.jsonl"), &(lines.join("\n") + "\n"));
+        let (_world, dir) = write_temp(&format!("{id}.jsonl"), &(lines.join("\n") + "\n"));
         let r = SessionRef::new(id, Harness::Kimi, dir.clone());
         let adapter = Kimi {
             sessions: None,
@@ -2603,20 +2610,24 @@ mod tests {
         assert_eq!(record_types, ["_checkpoint", "_checkpoint"]);
     }
 
+    /// The committed modern fixture: hash dir `aaaaaaaa…`, session uuid `11111111-…`.
+    const FIXTURE_MODERN_ID: &str = "11111111-1111-1111-1111-111111111111";
+    fn fixture_modern_dir() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/kimi/modern/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+            .join(FIXTURE_MODERN_ID)
+    }
+
     #[test]
     fn stream_matches_parse_on_modern_fixture() {
         // parse() is collect(stream()); the streamed messages must carry the same wire enrichment
         // (StatusUpdate usage/message_id on assistant turns, first wire timestamp on the first user
         // turn) that the full parse reports. This was a real divergence: the positional passes used
         // to run only in parse(), so streaming consumers saw assistant turns without usage.
-        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures/kimi/modern/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/11111111-1111-1111-1111-111111111111");
-        if !dir.exists() {
-            return;
-        }
+        let dir = fixture_modern_dir();
         let r = SessionRef {
             cwd: Some(PathBuf::from("/proj")),
-            ..SessionRef::new("11111111-1111-1111-1111-111111111111", Harness::Kimi, dir.clone())
+            ..SessionRef::new(FIXTURE_MODERN_ID, Harness::Kimi, dir.clone())
         };
         let adapter = Kimi {
             sessions: None,
@@ -2646,14 +2657,10 @@ mod tests {
 
     #[test]
     fn parses_fixture_modern_session() {
-        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures/kimi/modern/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/11111111-1111-1111-1111-111111111111");
-        if !dir.exists() {
-            return;
-        }
+        let dir = fixture_modern_dir();
         let r = SessionRef {
             cwd: Some(PathBuf::from("/proj")),
-            ..SessionRef::new("11111111-1111-1111-1111-111111111111", Harness::Kimi, dir.clone())
+            ..SessionRef::new(FIXTURE_MODERN_ID, Harness::Kimi, dir.clone())
         };
         let s = Kimi {
             sessions: None,
@@ -2713,7 +2720,7 @@ mod tests {
     fn rotated_segments_read_in_order_with_their_boundaries() {
         let sp = r#"{"role":"_system_prompt","content":"You are Kimi."}"#;
         let c0 = r#"{"role":"_checkpoint","id":0}"#;
-        let dir = write_temp(
+        let (_world, dir) = write_temp(
             "context_1.jsonl",
             &[
                 sp,
@@ -2771,7 +2778,6 @@ mod tests {
                 .and_then(|x| x.get("segment")),
             Some(&Value::String("context.jsonl".into()))
         );
-        fs::remove_dir_all(&dir).ok();
     }
 
     /// kimi-cli's `Agent` tool keeps each sub-agent under `<session>/subagents/<agent_id>/` in the
@@ -2831,7 +2837,7 @@ mod tests {
 
     #[test]
     fn subagent_dirs_parse_with_lineage() {
-        let dir = write_temp("context.jsonl", r#"{"role":"user","content":"parent"}"#);
+        let (_world, dir) = write_temp("context.jsonl", r#"{"role":"user","content":"parent"}"#);
         let sub = dir.join("subagents").join("a1b2");
         fs::create_dir_all(&sub).unwrap();
         fs::write(sub.join("context.jsonl"), r#"{"role":"user","content":"child task"}"#).unwrap();
@@ -2864,21 +2870,14 @@ mod tests {
                 .and_then(|x| x.get("subagent").and_then(|a| a.get("subagent_type"))),
             Some(&Value::String("coder".into()))
         );
-        fs::remove_dir_all(&dir).ok();
     }
 
-    fn write_temp(name: &str, contents: &str) -> PathBuf {
-        let mut d = std::env::temp_dir();
-        d.push(format!(
-            "cv-kimi-test-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        fs::create_dir_all(&d).unwrap();
-        fs::write(d.join(name), contents).unwrap();
-        d
+    /// Write `name`→`contents` into a fresh hermetic world dir, return the dir. The caller keeps
+    /// the world scoped; dropping it removes the dir.
+    fn write_temp(name: &str, contents: &str) -> (cv_testkit::InProcess<crate::env::Scope>, PathBuf) {
+        let world = crate::test_world("kimi-write-temp");
+        fs::write(world.base.join(name), contents).unwrap();
+        let dir = world.base.clone();
+        (world, dir)
     }
 }

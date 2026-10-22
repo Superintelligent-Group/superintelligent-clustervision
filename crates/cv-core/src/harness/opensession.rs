@@ -260,12 +260,17 @@ fn doc_ref(path: &Path) -> Result<SessionRef> {
 
 // ── Reading a document ────────────────────────────────────────────────────────
 
-/// Read one OpenSession document into the IR. The inverse of [`document`].
-pub fn read_document(path: &Path) -> Result<Session> {
+/// One whole rich read, collected into a `Session`.
+fn collect(read: impl FnOnce(&mut dyn MessageSink) -> Result<Session>) -> Result<Session> {
     let mut sink = crate::stream::CollectSink::default();
-    let mut session = stream_document(path, &Demand::RICH, &mut sink)?;
+    let mut session = read(&mut sink)?;
     session.messages = sink.messages;
     Ok(session)
+}
+
+/// Read one OpenSession document into the IR. The inverse of [`document`].
+pub fn read_document(path: &Path) -> Result<Session> {
+    collect(|sink| stream_document(path, &Demand::RICH, sink))
 }
 
 /// Traverse the document's IR messages without retaining a complete Session.
@@ -287,45 +292,43 @@ fn read(
     opts: &Demand,
     sink: &mut dyn MessageSink,
 ) -> Result<Session> {
-    {
-        let keys = SESSION_FIELDS
-            .iter()
-            .copied()
-            .chain(["git", "lineage", "messages"])
-            .collect::<Vec<_>>();
-        let record = Fields::parse(view, &keys)?.context("an OpenSession document is a JSON object")?;
-        let mut meta = record.project(SESSION_FIELDS)?;
-        project_object(&record, &mut meta, "git", GIT_FIELDS)?;
-        project_object(&record, &mut meta, "lineage", LINEAGE_FIELDS)?;
-        meta.insert("messages".into(), Value::Array(Vec::new()));
-        let mut session = from_object(meta)?;
-        let messages = record
-            .get("messages")
-            .context("not an OpenSession 0.3 document: messages must be an array")?;
-        anyhow::ensure!(
-            messages.is_array()?,
-            "not an OpenSession 0.3 document: messages must be an array"
-        );
-        session.source_path = file.map(|(path, _)| path.to_path_buf());
-        // Validate and discard one turn at a time before publishing even metadata. Keep payloads
-        // lazy in this pass regardless of delivery demand; only their shape needs validation.
-        for view in messages.array()?.unwrap() {
-            ir_message(view?, true)?;
-        }
-        sink.meta(&session);
-        for view in messages.array()?.unwrap() {
-            let message = ir_message(view?, opts.spans)?;
-            let started = std::time::Instant::now();
-            let flow = sink.try_message(message)?;
-            if let Some((_, source)) = file {
-                source.check_after(started)?;
-            }
-            if flow == Flow::Stop {
-                break;
-            }
-        }
-        Ok(session)
+    let keys = SESSION_FIELDS
+        .iter()
+        .copied()
+        .chain(["git", "lineage", "messages"])
+        .collect::<Vec<_>>();
+    let record = Fields::parse(view, &keys)?.context("an OpenSession document is a JSON object")?;
+    let mut meta = record.project(SESSION_FIELDS)?;
+    project_object(&record, &mut meta, "git", GIT_FIELDS)?;
+    project_object(&record, &mut meta, "lineage", LINEAGE_FIELDS)?;
+    meta.insert("messages".into(), Value::Array(Vec::new()));
+    let mut session = from_object(meta)?;
+    let messages = record
+        .get("messages")
+        .context("not an OpenSession 0.3 document: messages must be an array")?;
+    anyhow::ensure!(
+        messages.is_array()?,
+        "not an OpenSession 0.3 document: messages must be an array"
+    );
+    session.source_path = file.map(|(path, _)| path.to_path_buf());
+    // Validate and discard one turn at a time before publishing even metadata. Keep payloads
+    // lazy in this pass regardless of delivery demand; only their shape needs validation.
+    for view in messages.array()?.unwrap() {
+        ir_message(view?, true)?;
     }
+    sink.meta(&session);
+    for view in messages.array()?.unwrap() {
+        let message = ir_message(view?, opts.spans)?;
+        let started = std::time::Instant::now();
+        let flow = sink.try_message(message)?;
+        if let Some((_, source)) = file {
+            source.check_after(started)?;
+        }
+        if flow == Flow::Stop {
+            break;
+        }
+    }
+    Ok(session)
 }
 
 fn ir_message(view: JsonView<'_>, spans: bool) -> Result<Message> {
@@ -424,10 +427,7 @@ fn ir_block(view: JsonView<'_>, spans: bool) -> Result<Block> {
 /// other than [`VERSION`] is an error that names the version and where the renames are documented.
 pub fn from_str(text: &str) -> Result<Session> {
     let v: Value = serde_json::from_str(text).context("not JSON")?;
-    let mut sink = crate::stream::CollectSink::default();
-    let mut session = read((&v).into(), None, &Demand::RICH, &mut sink)?;
-    session.messages = sink.messages;
-    Ok(session)
+    collect(|sink| read((&v).into(), None, &Demand::RICH, sink))
 }
 
 fn from_object(mut o: serde_json::Map<String, Value>) -> Result<Session> {

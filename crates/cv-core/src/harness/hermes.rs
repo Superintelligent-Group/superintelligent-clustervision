@@ -178,14 +178,14 @@ pub struct Hermes {
     dbs: Vec<PathBuf>,
 }
 
-/// This adapter with no roots: it discovers nothing and answers every fact that does not depend on
-/// where the store lives ([`super::rootless`]).
 /// Hermes's deferred-tool wrapper: `tool_call{name, arguments}`.
 pub(crate) const DEFERRED_WRAPPER: crate::affordance::DeferredWrapper = crate::affordance::DeferredWrapper {
     name_key: "name",
     args_key: "arguments",
 };
 
+/// This adapter with no roots: it discovers nothing and answers every fact that does not depend on
+/// where the store lives ([`super::rootless`]).
 pub(crate) static ROOTLESS: Hermes = Hermes { dbs: Vec::new() };
 
 impl Hermes {
@@ -364,7 +364,7 @@ fn latest_of(stamps: [Option<f64>; 3]) -> Option<DateTime<Utc>> {
     stamps
         .into_iter()
         .flatten()
-        .fold(None, |acc: Option<f64>, t| Some(acc.map_or(t, |a| a.max(t))))
+        .reduce(f64::max)
         .and_then(ts_from_epoch)
 }
 
@@ -392,8 +392,9 @@ fn discover_conn(conn: &Connection, path: &Path) -> Result<Vec<SessionRef>> {
 pub fn subagent_refs(parent: &SessionRef) -> Result<Vec<SessionRef>> {
     let conn = open_ro(&parent.path)?;
     conn.read(|conn, _| {
-        let chain: HashSet<String> = if Select::of(conn, "sessions").has("parent_session_id") {
-            session_lineage_root_to_tip(conn, &parent.id).into_iter().collect()
+        let probe = Select::of(conn, "sessions");
+        let chain: HashSet<String> = if probe.has("parent_session_id") {
+            session_lineage_root_to_tip(conn, &parent.id, &probe).into_iter().collect()
         } else {
             HashSet::from([parent.id.clone()])
         };
@@ -453,7 +454,7 @@ fn refs_conn(conn: &Connection, path: &Path, delegates_of: Option<&HashSet<Strin
         }
         let title = title.filter(|t| !t.is_empty()).or_else(|| {
             has_parent
-                .then(|| inherited_title(conn, &session_lineage_root_to_tip(conn, &id)))
+                .then(|| inherited_title(conn, &session_lineage_root_to_tip(conn, &id, &select)))
                 .flatten()
         });
         out.push(SessionRef {
@@ -764,7 +765,7 @@ fn stream_conn_with_reads(
     // Walk the compression lineage root→tip so a compressed-and-continued conversation reads as a
     // single transcript (mirrors `_resume_lineage_ids`); branches/resets/delegates stand alone.
     let chain = if has_parent {
-        session_lineage_root_to_tip(conn, &r.id)
+        session_lineage_root_to_tip(conn, &r.id, &select)
     } else {
         vec![r.id.clone()]
     };
@@ -927,7 +928,8 @@ fn stream_conn_with_reads(
     Ok(s)
 }
 
-/// Streaming equivalent of [`is_duplicate_replayed_user_message`]: tracks only the trailing run of
+/// Streams the replayed-user-message dedup Hermes's reader does whole-Vec
+/// (`SessionDB._is_duplicate_replayed_user_message`): tracks only the trailing run of
 /// user single-texts since the last substantive assistant turn (the exact look-back window the
 /// whole-Vec scan uses), so the streaming path stays byte-identical without retaining the session.
 #[derive(Default)]
@@ -971,12 +973,12 @@ impl ReplayDedup {
 /// `_session_lineage_root_to_tip`, `_COMPRESSION_CHILD_SQL`). A `/branch` copy (`_branched_from`)
 /// owns a copied transcript and stands alone; reset (`_reset_from`) and delegate (`_delegate_from`)
 /// children are separate conversations that only record their lineage; a parent that ended for any
-/// reason other than compression is not a continuation either. Bounded + cycle-guarded.
-fn session_lineage_root_to_tip(conn: &Connection, session_id: &str) -> Vec<String> {
+/// reason other than compression is not a continuation either. Bounded + cycle-guarded. `probe` is
+/// the caller's `sessions` schema probe (column presence only; the caller reuses its own).
+fn session_lineage_root_to_tip(conn: &Connection, session_id: &str, probe: &Select) -> Vec<String> {
     if session_id.is_empty() {
         return vec![session_id.to_string()];
     }
-    let probe = Select::of(conn, "sessions");
     let has_end_reason = probe.has("end_reason");
     let has_model_config = probe.has("model_config");
     let str_col = |col: &str, id: &str| -> Option<String> {
@@ -1021,10 +1023,6 @@ fn session_lineage_root_to_tip(conn: &Connection, session_id: &str) -> Vec<Strin
     }
 }
 
-/// Mirrors `SessionDB._is_duplicate_replayed_user_message`: a compression continuation re-injects
-/// the boundary's last user message as its first message; suppress that duplicate when merging.
-/// The streaming equivalent is [`ReplayDedup`] (a bounded look-back over the trailing user run).
-///
 /// Plain text of a message iff it is exactly one Text block (the shape Hermes replays as a string).
 fn single_text(m: &Message) -> Option<&crate::Text> {
     match m.content.as_slice() {
@@ -2435,14 +2433,9 @@ mod tests {
     }
 
     #[test]
-    fn replay_text_memory_budget_includes_tiny_entry_slots() {
-        let mut texts = crate::spill::ExactStrings::default();
-        for i in 0..40000 {
-            texts.insert(i.to_string()).unwrap();
-        }
-        assert!(texts.is_spilled(), "small strings still consume entry storage");
-        assert!(texts.contains("0").unwrap());
-        assert!(texts.contains("39999").unwrap());
+    fn replay_dedup_tiny_prompts_stay_off_disk() {
+        // The dedup's look-back budget must absorb a long run of empty prompts without spilling:
+        // the generic spill budgets this tests against live in `crate::spill`'s own suite.
         let mut dedup = ReplayDedup::default();
         let mut message = Message::new(Role::User);
         message.content.push(Block::Text { text: "".into() });
@@ -2451,24 +2444,6 @@ mod tests {
         }
         assert!(!dedup.recent_user_texts.contains("").unwrap());
         assert!(!dedup.recent_user_texts.is_spilled());
-    }
-
-    #[test]
-    fn replay_text_spill_keeps_exact_equality_and_releases_on_clear() {
-        let mut texts = crate::spill::ExactStrings::default();
-        texts.insert("first").unwrap();
-        let large = "x".repeat(1024 * 1024 + 1);
-        texts.insert(large.clone()).unwrap();
-        assert!(texts.contains("first").unwrap());
-        assert!(texts.contains(&large).unwrap());
-        assert!(!texts.contains("FIRST").unwrap());
-        assert!(!texts.contains(&(large.clone() + "x")).unwrap());
-        texts.insert("nul\0suffix").unwrap();
-        assert!(texts.contains("nul\0suffix").unwrap());
-        assert!(!texts.contains("nul").unwrap());
-        texts.clear();
-        assert!(!texts.is_spilled());
-        assert!(!texts.contains("first").unwrap());
     }
 
     fn bag(m: &Message) -> &serde_json::Map<String, Value> {
@@ -3560,12 +3535,12 @@ mod tests {
             )
             .unwrap();
         }
-        assert_eq!(session_lineage_root_to_tip(&conn, "s149").len(), 150);
+        assert_eq!(session_lineage_root_to_tip(&conn, "s149", &Select::of(&conn, "sessions")).len(), 150);
         let reference = SessionRef::new("s149", Harness::Hermes, at(&conn));
         assert_eq!(parse_conn(&conn, &reference).unwrap().messages.len(), 150);
         conn.execute("UPDATE sessions SET parent_session_id='s149' WHERE id='s0'", [])
             .unwrap();
-        assert_eq!(session_lineage_root_to_tip(&conn, "s149").len(), 150);
+        assert_eq!(session_lineage_root_to_tip(&conn, "s149", &Select::of(&conn, "sessions")).len(), 150);
     }
 
     #[test]

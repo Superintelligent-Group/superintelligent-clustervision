@@ -2088,8 +2088,8 @@ mod tests {
     #[test]
     fn reading_a_live_wal_store_writes_nothing_in_it() {
         use crate::harness::store::sqlite::{live_store, store_state};
-        let dir = std::env::temp_dir().join(format!("cv-opencode-live-{}", uuid::Uuid::new_v4()));
-        fs::create_dir(&dir).unwrap();
+        let world = cv_testkit::World::new("opencode-live-wal");
+        let dir = world.base.clone();
         let db = dir.join("opencode.db");
         drop(make_db(&db, true));
         let writer = live_store(&db, "SELECT 1");
@@ -2114,7 +2114,7 @@ mod tests {
             assert_eq!(store_state(&dir), before, "checkpointed: {checkpointed}");
         }
         drop(writer);
-        fs::remove_dir_all(dir).ok();
+        
     }
 
     /// A `session_message` cell that is not TEXT, empty, not UTF-8 or not exactly one JSON value
@@ -2153,11 +2153,10 @@ mod tests {
     }
 
     #[cfg(feature = "sqlite")]
-    #[cfg(feature = "sqlite")]
     #[test]
     fn sqlite_v1_discovery_counts_follow_readable_final_roles() {
-        let dir = std::env::temp_dir().join(format!("cv-opencode-role-count-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir(&dir).unwrap();
+        let world = cv_testkit::World::new("opencode-role-count");
+        let dir = world.base.clone();
         let path = dir.join("opencode.db");
         let connection = rusqlite::Connection::open(&path).unwrap();
         connection.execute_batch("CREATE TABLE session(id TEXT PRIMARY KEY,directory TEXT,title TEXT,time_created INTEGER,time_updated INTEGER); CREATE TABLE message(id TEXT PRIMARY KEY,session_id TEXT,time_created INTEGER,data TEXT); CREATE TABLE part(id TEXT PRIMARY KEY,message_id TEXT,data TEXT);").unwrap();
@@ -2214,14 +2213,14 @@ mod tests {
             );
         }
         drop(connection);
-        std::fs::remove_dir_all(dir).unwrap();
+        
     }
 
     #[cfg(feature = "sqlite")]
     #[test]
     fn cold_wal_selected_text_keeps_original_guard_without_creating_sidecars() {
-        let dir = std::env::temp_dir().join(format!("cv-opencode-cold-{}", uuid::Uuid::new_v4()));
-        fs::create_dir(&dir).unwrap();
+        let world = cv_testkit::World::new("opencode-cold-wal");
+        let dir = world.base.clone();
         let db = dir.join("opencode.db");
         let writer = make_db(&db, false);
         writer
@@ -2266,14 +2265,14 @@ mod tests {
             "copied payload must validate original WAL"
         );
         drop(writer);
-        fs::remove_dir_all(dir).unwrap();
+        
     }
 
     #[cfg(feature = "sqlite")]
     #[test]
     fn sqlite_snapshot_rejects_wal_mutation_even_after_sink_failure() {
-        let dir = std::env::temp_dir().join(format!("cv-opencode-wal-{}", uuid::Uuid::new_v4()));
-        fs::create_dir(&dir).unwrap();
+        let world = cv_testkit::World::new("opencode-wal-guard");
+        let dir = world.base.clone();
         let db = dir.join("opencode.db");
         let writer = make_db(&db, false);
         writer.execute_batch("PRAGMA journal_mode=WAL;").unwrap();
@@ -2292,7 +2291,6 @@ mod tests {
         assert!(format!("{error:#}").contains("changed"), "{error:#}");
         assert!(!format!("{error:#}").contains("consumer cap"));
         drop(writer);
-        fs::remove_dir_all(dir).unwrap();
     }
 
     #[cfg(feature = "sqlite")]
@@ -2310,8 +2308,8 @@ mod tests {
     #[test]
     fn db_store_discover_and_parse() {
         for with_metadata in [false, true] {
-            let dir = std::env::temp_dir().join(format!("cv-opencode-db-{}", uuid::Uuid::new_v4()));
-            fs::create_dir_all(&dir).unwrap();
+            let world = cv_testkit::World::new("opencode-db-store");
+            let dir = world.base.clone();
             let db = dir.join("opencode.db");
             let conn = make_db(&db, with_metadata);
             seed_session(&conn, "ses_DB01", with_metadata);
@@ -2389,7 +2387,7 @@ mod tests {
                 matches!(&s.messages[2].content[0], Block::ToolResult { content, .. } if content.matches_str("a\nb") == Some(true))
             );
             assert_eq!(s.messages[1].usage.as_ref().unwrap().cache_read_tokens, Some(20627));
-            fs::remove_dir_all(&dir).ok();
+            
         }
     }
 
@@ -2399,8 +2397,8 @@ mod tests {
         // The JSON fixture holds ses_FIX01; a database holding the same id (the import left both)
         // must yield ONE ref, the db-backed one — while a JSON-only session is still discovered.
         let base = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/opencode/parts_gen");
-        let dir = std::env::temp_dir().join(format!("cv-opencode-dedupe-{}", uuid::Uuid::new_v4()));
-        fs::create_dir_all(&dir).unwrap();
+        let world = cv_testkit::World::new("opencode-dedupe");
+        let dir = world.base.clone();
         let db = dir.join("opencode.db");
         let conn = make_db(&db, false);
         seed_session(&conn, "ses_FIX01", false);
@@ -2420,7 +2418,7 @@ mod tests {
             skipped: Vec::new(),
         };
         assert_eq!(oc_json_only.discover().unwrap().len(), 1);
-        fs::remove_dir_all(&dir).ok();
+        
     }
 
     /// A `reasoning` part whose text is empty but which carries a provider signature is the WHOLE
