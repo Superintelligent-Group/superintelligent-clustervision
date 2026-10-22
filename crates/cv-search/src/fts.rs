@@ -3378,40 +3378,45 @@ mod tests {
 
     #[test]
     fn source_admission_selects_fitting_work_without_losing_largest_first_order() {
-        let mut small = ingest_job(cv_core::SessionRef::new("small", cv_core::Harness::Claude, "/missing"));
-        small.size = (IN_FLIGHT_BYTES / 8) as i64;
-        let mut medium = ingest_job(cv_core::SessionRef::new("medium", cv_core::Harness::Claude, "/missing"));
-        medium.size = (IN_FLIGHT_BYTES / 2) as i64;
-        let mut large = ingest_job(cv_core::SessionRef::new("large", cv_core::Harness::Claude, "/missing"));
-        large.size = (3 * IN_FLIGHT_BYTES / 4) as i64;
-        let mut queue = Queue {
-            groups: vec![vec![small], vec![medium], vec![large]],
-            in_flight: 0,
-            draining: false,
-            stopped: false,
-            closed: true,
+        let job = |id: &str, size: u64| {
+            let mut job = ingest_job(cv_core::SessionRef::new(id, cv_core::Harness::Claude, "/missing"));
+            job.size = size as i64;
+            job
         };
-        assert_eq!(queue.next_fitting(), Some(2));
-        let large = queue.groups.pop().unwrap();
-        queue.in_flight = job_cost(&large);
+        let mut queue = Queue::new();
+        queue.closed = true;
+        queue.push(vec![job("small", IN_FLIGHT_BYTES / 8)]);
+        queue.push(vec![job("large", 3 * IN_FLIGHT_BYTES / 4)]);
+        queue.push(vec![job("medium", IN_FLIGHT_BYTES / 2)]);
+        let id = |(_, group): (u64, Vec<Job>)| group[0].r.id.clone();
+        assert_eq!(queue.take_fitting().map(id).as_deref(), Some("large"));
         assert_eq!(
-            queue.next_fitting(),
-            Some(0),
+            queue.take_fitting().map(id).as_deref(),
+            Some("small"),
             "do not leave a worker idle behind the medium group"
         );
-        let small = queue.groups.remove(0);
-        queue.in_flight += job_cost(&small);
         assert_eq!(queue.next_fitting(), None);
         queue.in_flight = 0;
-        assert_eq!(queue.next_fitting(), Some(0), "the waiting medium group now runs");
+        assert_eq!(
+            queue.next_fitting(),
+            Some((IN_FLIGHT_BYTES / 2, 2)),
+            "the waiting medium group now runs"
+        );
         queue.draining = true;
         assert_eq!(queue.next_fitting(), None);
         queue.draining = false;
         queue.stopped = true;
         assert_eq!(queue.next_fitting(), None);
 
-        let mut group = small;
-        group.extend(large);
+        // Equal charges: the latest arrival first, as the stable sort this replaced popped them.
+        let mut queue = Queue::new();
+        for n in 0..4 {
+            queue.push(vec![job(&format!("tie{n}"), 1)]);
+        }
+        let order: Vec<_> = std::iter::from_fn(|| queue.take_fitting().map(id)).collect();
+        assert_eq!(order, ["tie3", "tie2", "tie1", "tie0"]);
+
+        let mut group = vec![job("small", IN_FLIGHT_BYTES / 8), job("large", 3 * IN_FLIGHT_BYTES / 4)];
         assert_eq!(job_cost(&group), 7 * IN_FLIGHT_BYTES / 8);
         group[0].r.path = "/missing.jsonl.zst".into();
         assert_eq!(
@@ -3423,7 +3428,7 @@ mod tests {
         for job in &mut group {
             job.size = i64::MAX;
         }
-        group.extend(queue.groups.pop().unwrap());
+        group.push(job("medium", IN_FLIGHT_BYTES / 2));
         assert_eq!(job_cost(&group), IN_FLIGHT_BYTES, "aggregate source sizes saturate");
     }
 

@@ -12,7 +12,11 @@ pub(super) const DECODED_WINDOW: u64 = 2 << 30;
 /// The worker queue admits logical-session groups, largest first. Planning chooses one
 /// preferred copy per ID; group reservations bound concurrent source bytes.
 pub(super) struct Queue {
-    pub(super) groups: Vec<Vec<Job>>,
+    /// Waiting groups keyed by (charge, arrival): the largest charge that fits is one ordered
+    /// lookup, and among equal charges the latest arrival goes first. A sorted `Vec` re-sorted on
+    /// every push made a backlog of Z groups fed one batch at a time O(Z²).
+    groups: std::collections::BTreeMap<(u64, u64), Vec<Job>>,
+    arrived: u64,
     pub(super) in_flight: u64,
     pub(super) draining: bool,
     pub(super) stopped: bool,
@@ -20,19 +24,45 @@ pub(super) struct Queue {
     pub(super) closed: bool,
 }
 
-/// Return the largest waiting group that fits. The workload is finite, so a large waiting
-/// group cannot starve: after fitting work completes it is admitted alone when the guard empties.
+/// The largest waiting group that fits. The workload is finite, so a large waiting group cannot
+/// starve: after fitting work completes it is admitted alone when the guard empties.
 impl Queue {
-    pub(super) fn next_fitting(&self) -> Option<usize> {
+    pub(super) fn new() -> Self {
+        Queue {
+            groups: Default::default(),
+            arrived: 0,
+            in_flight: 0,
+            draining: false,
+            stopped: false,
+            closed: false,
+        }
+    }
+    /// Queue one group under its charge ([`job_cost`], taken once here).
+    pub(super) fn push(&mut self, group: Vec<Job>) {
+        self.groups.insert((job_cost(&group), self.arrived), group);
+        self.arrived += 1;
+    }
+    pub(super) fn is_empty(&self) -> bool {
+        self.groups.is_empty()
+    }
+    fn clear(&mut self) {
+        self.groups.clear();
+    }
+    /// The key of the group [`Self::take_fitting`] would take.
+    pub(super) fn next_fitting(&self) -> Option<(u64, u64)> {
         if self.stopped || self.draining {
             return None;
         }
-        if self.in_flight == 0 {
-            return self.groups.len().checked_sub(1);
-        }
-        self.groups
-            .iter()
-            .rposition(|group| job_cost(group) <= IN_FLIGHT_BYTES.saturating_sub(self.in_flight))
+        let room = IN_FLIGHT_BYTES.saturating_sub(self.in_flight);
+        let fits = if self.in_flight == 0 { u64::MAX } else { room };
+        self.groups.range(..=(fits, u64::MAX)).next_back().map(|(key, _)| *key)
+    }
+    /// Take the largest waiting group that fits, charging its reservation to `in_flight`.
+    pub(super) fn take_fitting(&mut self) -> Option<(u64, Vec<Job>)> {
+        let key = self.next_fitting()?;
+        let group = self.groups.remove(&key)?;
+        self.in_flight += key.0;
+        Some((key.0, group))
     }
 }
 
@@ -62,7 +92,7 @@ impl Shutdown<'_> {
         let mut q = self.queue.lock().unwrap();
         q.stopped = true;
         // Waiting jobs may hold decoded sources discovery is waiting to see freed.
-        q.groups.clear();
+        q.clear();
         drop(q);
         self.admission.close();
         self.wake.notify_all();
@@ -165,9 +195,9 @@ impl Feed<'_> {
         }
         let mut q = self.queue.lock().unwrap();
         anyhow::ensure!(!q.stopped, "index sweep stopped");
-        q.groups.extend(groups);
-        // Smallest last, since workers pop from the end: the largest sessions start first.
-        q.groups.sort_by_key(|g| job_cost(g));
+        for group in groups {
+            q.push(group);
+        }
         drop(q);
         self.wake.notify_all();
         Ok(())
@@ -184,13 +214,7 @@ pub(super) fn run_fed(
     feed: impl FnOnce(&Feed) -> Result<()> + Send,
 ) -> Result<Ran> {
     use std::sync::{mpsc, Condvar, Mutex};
-    let queue = Mutex::new(Queue {
-        groups: Vec::new(),
-        in_flight: 0,
-        draining: false,
-        stopped: false,
-        closed: false,
-    });
+    let queue = Mutex::new(Queue::new());
     let wake = Condvar::new();
     let (tx, rx) = mpsc::sync_channel::<Out>(2 * workers);
     let admission = std::sync::Arc::clone(&writer.admission);
@@ -217,23 +241,17 @@ pub(super) fn run_fed(
                     let group = {
                         let mut q = queue.lock().unwrap();
                         loop {
-                            if q.stopped || (q.closed && q.groups.is_empty()) {
+                            if q.stopped || (q.closed && q.is_empty()) {
                                 break None;
                             }
-                            if let Some(at) = q.next_fitting() {
-                                let group = q.groups.remove(at);
-                                q.in_flight += job_cost(&group);
-                                break Some(group);
+                            if let Some(taken) = q.take_fitting() {
+                                break Some(taken);
                             }
                             q = wake.wait(q).unwrap();
                         }
                     };
-                    let Some(group) = group else { return };
-                    let _reservation = GroupReservation {
-                        queue,
-                        wake,
-                        bytes: job_cost(&group),
-                    };
+                    let Some((bytes, group)) = group else { return };
+                    let _reservation = GroupReservation { queue, wake, bytes };
                     for job in group {
                         if !run_job(job, f, &tx, admission, &marks) {
                             return; // the writer is gone
