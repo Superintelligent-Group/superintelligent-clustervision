@@ -292,6 +292,7 @@
 
 **After upgrading, once.**
 - The first listing rediscovers the fleet (announced on stderr; `cv index` does it ahead): a catalog stamped with another `source::VERSION` is dropped and rebuilt.
+- The full-text index's schema names `source::VERSION`: the first `cv index` rebuilds it whole, and `cv search` asks for that until then.
 - Every store, mark, checkpoint and watch state invalidates once: `source::VERSION` 6 is the one version all check; nothing expires per release.
 
 ## 0.17.0 — 2026-10-17 — stream, never materialize

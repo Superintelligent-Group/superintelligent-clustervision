@@ -102,7 +102,15 @@ fn build_schema() -> Schema {
     b.add_text_field("parent_id", STRING | STORED); // fielded: `parent_id:<id>` scopes to a forest
     b.add_text_field("agent_id", STRING | STORED); // stored attribution
     b.add_text_field("workflow", STRING | STORED); // stored attribution
+    b.add_bool_field(&format_field(), tantivy::schema::NumericOptions::default());
     b.build()
+}
+
+/// The schema's format stamp: a field that holds nothing, named by [`cv_core::source::VERSION`].
+/// An index built under another version lacks it, so [`schema_current`] refuses it: the indexing
+/// path rebuilds it whole, a query asks for `cv index`. No document of an older layout is read.
+fn format_field() -> String {
+    format!("cv_format_v{}", cv_core::source::VERSION)
 }
 
 fn fields_of(schema: &Schema) -> Result<Fields> {
@@ -129,10 +137,14 @@ fn fields_of(schema: &Schema) -> Result<Fields> {
     })
 }
 
-/// Whether an on-disk index carries every field of the current schema. A miss means it was built
-/// by an older `cv` (pre-`path`/`mtime`/`preview`, pre-subagent-provenance, pre-`size`/discovery-metadata guard, or one doc
-/// kind for everything) and must be rebuilt fresh — one-time on upgrade, from the indexing path only.
+/// Whether an on-disk index carries every field of the current schema and its format stamp
+/// ([`format_field`]). A miss means it was built by another `cv` and must be rebuilt fresh —
+/// one-time on upgrade, from the indexing path only.
 fn schema_current(schema: &Schema) -> bool {
+    schema.get_field(&format_field()).is_ok() && fields_current(schema)
+}
+
+fn fields_current(schema: &Schema) -> bool {
     [
         "kind",
         "first_msg",
@@ -996,8 +1008,7 @@ fn sig(primary: Option<cv_core::source::FileId>) -> (i64, i64) {
 
 /// The search index's source record payload: its documents live in the index, keyed per index
 /// (`fts:<cv-index-id>`), so the record carries nothing else. The shared `source::VERSION`
-/// invalidates both skip and append admission: pre-version-6 duplicate rows are replaced by
-/// the ordinary whole-session delete/write, with no separate index version or repair pass.
+/// invalidates both skip and append admission, and stamps the index's schema ([`format_field`]).
 #[derive(Default, serde::Serialize, serde::Deserialize)]
 struct InIndex;
 
@@ -2162,7 +2173,7 @@ fn kind_query(f: &Fields, kind: &str) -> tantivy::query::TermQuery {
     )
 }
 
-/// Session `id`'s metadata: absence allows a body fallback; failed lookup or decoding does not.
+/// Session `id`'s metadata document, if the index holds one.
 fn meta_doc(searcher: &tantivy::Searcher, f: &Fields, id: &str) -> Result<Option<TantivyDocument>> {
     meta_addr(searcher, f, id)?
         .map(|address| searcher.doc(address))
@@ -2185,14 +2196,18 @@ fn meta_addr(searcher: &tantivy::Searcher, f: &Fields, id: &str) -> Result<Optio
     Ok(top.into_iter().next().map(|(_, addr)| addr))
 }
 
+/// Every committed session of a current index has its metadata document: the writer commits
+/// only between whole sessions. A body without one is an unusable index, not a session to guess.
+fn missing_meta(id: &str) -> tantivy::TantivyError {
+    tantivy::TantivyError::InternalError(format!(
+        "search index holds session {id} without its metadata; rebuild it with `cv index --rebuild`"
+    ))
+}
+
 #[derive(Clone, Copy)]
-enum MetadataDecision {
-    Present {
-        address: tantivy::DocAddress,
-        accepted: bool,
-    },
-    Missing,
-    Unavailable,
+struct MetadataDecision {
+    address: tantivy::DocAddress,
+    accepted: bool,
 }
 
 /// Query-local predicate decisions and addresses. Retain no metadata strings/documents: only
@@ -2218,7 +2233,7 @@ impl MetadataDecisions {
             observed: Default::default(),
         }
     }
-    fn resolve(&self, id: &str) -> MetadataDecision {
+    fn resolve(&self, id: &str) -> tantivy::Result<MetadataDecision> {
         let cached = self
             .cache
             .lock()
@@ -2226,34 +2241,28 @@ impl MetadataDecisions {
             .get(id)
             .copied();
         if let Some(decision) = cached {
-            return decision;
+            return Ok(decision);
         }
-        // Errors remain retryable and keep the existing per-body fallback. A definite missing
-        // meta doc is stable in this searcher's snapshot, but its body filter is segment-local.
+        // A failed lookup is the query's error and is not cached.
         #[cfg(test)]
         self.observed.queries.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let decision = match meta_addr(&self.searcher, &self.fields, id) {
-            Ok(Some(address)) => {
-                #[cfg(test)]
-                self.observed
-                    .stored_reads
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                match self.searcher.doc::<TantivyDocument>(address) {
-                    Ok(doc) => MetadataDecision::Present {
-                        address,
-                        accepted: metadata_matches(&doc, &self.fields, self.harness.as_deref(), self.cwd.as_deref()),
-                    },
-                    Err(_) => return MetadataDecision::Unavailable,
-                }
-            }
-            Ok(None) => MetadataDecision::Missing,
-            Err(_) => return MetadataDecision::Unavailable,
+        let address = meta_addr(&self.searcher, &self.fields, id)
+            .map_err(|error| tantivy::TantivyError::InternalError(format!("{error:#}")))?
+            .ok_or_else(|| missing_meta(id))?;
+        #[cfg(test)]
+        self.observed
+            .stored_reads
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let doc = self.searcher.doc::<TantivyDocument>(address)?;
+        let decision = MetadataDecision {
+            address,
+            accepted: metadata_matches(&doc, &self.fields, self.harness.as_deref(), self.cwd.as_deref()),
         };
         self.cache
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .insert(id.to_owned(), decision);
-        decision
+        Ok(decision)
     }
     fn cached(&self, id: &str) -> Option<MetadataDecision> {
         self.cache
@@ -2516,12 +2525,13 @@ fn enrich_snippets(
 ) -> Result<Option<String>> {
     let (mut unreadable, mut first) = (0usize, None);
     for hit in hits {
-        let doc = meta_doc(searcher, f, &hit.id)?;
-        let path = doc.as_ref().and_then(|d| d.get_first(f.path)).and_then(|v| v.as_str());
+        let doc = meta_doc(searcher, f, &hit.id)?.ok_or_else(|| missing_meta(&hit.id))?;
+        let path = doc
+            .get_first(f.path)
+            .and_then(|v| v.as_str())
+            .with_context(|| format!("search metadata for {} names no source path", hit.id))?;
         // The stored preview stands in when the live read cannot: marked when the source is
-        // gone, returned as the search's note when it is there but cannot be read. A hit whose
-        // meta doc names no path (a legacy body-only index) keeps its preview unmarked.
-        let Some(path) = path else { continue };
+        // gone, returned as the search's note when it is there but cannot be read.
         match live_snippet(path, &hit.harness, query, scope) {
             Ok(snippet) if !snippet.is_empty() => hit.snippet = snippet,
             Ok(_) => {}
@@ -2620,26 +2630,11 @@ fn ranked_search(
     // possible global winner, even when one session has arbitrarily many matching chunks.
     let mut collector = crate::session_collector::TopSessions::new(f.id, limit);
     if filter.harness.is_some() || filter.cwd.is_some() {
-        let harness = filter.harness.map(str::to_owned);
-        let cwd = filter.cwd.map(str::to_owned);
-        let fields = f.clone();
         let shared = decisions.clone();
-        collector.filter = Some(std::sync::Arc::new(move |id, store, doc_id| {
-            // Resumed chunks can retain older labels/cwd: filter the same current meta doc that
-            // describes the returned hit, falling back only for legacy body-only documents.
-            match shared.resolve(id) {
-                MetadataDecision::Present { accepted, .. } => {
-                    return Ok(crate::session_collector::FilterDecision::Session(accepted))
-                }
-                MetadataDecision::Missing | MetadataDecision::Unavailable => {}
-            }
-            let fallback = store.get::<TantivyDocument>(doc_id)?;
-            Ok(crate::session_collector::FilterDecision::Document(metadata_matches(
-                &fallback,
-                &fields,
-                harness.as_deref(),
-                cwd.as_deref(),
-            )))
+        // Resumed chunks can retain older labels/cwd: filter the same current meta doc that
+        // describes the returned hit.
+        collector.filter = Some(std::sync::Arc::new(move |id| {
+            shared.resolve(id).map(|decision| decision.accepted)
         }));
     }
     let ranked = searcher.search(&parsed, &collector).context("running search")?;
@@ -2657,44 +2652,29 @@ fn ranked_search(
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             searcher.doc(candidate.addr).context("loading stored doc")
         };
-        // Preserve candidate-meta identity (including compatible duplicate metadata rows).
-        // A body winner needs its current meta document; only legacy/missing/unreadable
-        // metadata or a reordered header demands the complete candidate document.
-        let (is_meta, candidate_doc) = match head.value(f.kind) {
-            Some(kind) => (kind.as_str() == Some(KIND_META), None),
-            None => {
-                let doc = load_candidate()?;
-                let is_meta = doc.get_first(f.kind).and_then(|v| v.as_str()) == Some(KIND_META);
-                (is_meta, Some(doc))
-            }
-        };
-        // Filtered hits must display the same authoritative metadata that admitted them.
-        // Unfiltered queries retain the matching meta row in compatible duplicate indexes.
-        let doc = if is_meta && filter.harness.is_none() && filter.cwd.is_none() {
-            match candidate_doc {
-                Some(doc) => doc,
-                None => load_candidate()?,
-            }
+        // A meta winner is its own metadata; a body winner reads its session's meta document.
+        let is_meta = head
+            .value(f.kind)
+            .with_context(|| {
+                format!("search index document of {id} carries no kind; rebuild it with `cv index --rebuild`")
+            })?
+            .as_str()
+            == Some(KIND_META);
+        let doc = if is_meta {
+            load_candidate()?
         } else {
-            let metadata = match decisions.cached(&id) {
-                Some(MetadataDecision::Present { address, .. }) => {
+            let address = match decisions.cached(&id) {
+                Some(decision) => {
                     #[cfg(test)]
                     decisions
                         .observed
                         .winner_metadata_reads
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    Some(searcher.doc(address).context("reading search metadata")?)
+                    decision.address
                 }
-                Some(MetadataDecision::Missing) => None,
-                _ => meta_doc(searcher, f, &id)?,
+                None => meta_addr(searcher, f, &id)?.ok_or_else(|| missing_meta(&id))?,
             };
-            match metadata {
-                Some(doc) => doc,
-                None => match candidate_doc {
-                    Some(doc) => doc,
-                    None => load_candidate()?,
-                },
-            }
+            searcher.doc(address).context("reading search metadata")?
         };
         let get_str =
             |field: Field| -> Option<String> { doc.get_first(field).and_then(|v| v.as_str()).map(|s| s.to_string()) };
@@ -2941,6 +2921,9 @@ mod tests {
         for (id, harness) in [("a", "codex"), ("b", "claude"), ("c", "claude")] {
             writer
                 .add_document(tantivy::doc!(f.id => id, f.kind => KIND_BODY, f.harness => harness, f.body => "needle"))
+                .unwrap();
+            writer
+                .add_document(tantivy::doc!(f.id => id, f.kind => KIND_META, f.harness => harness, f.path => format!("/gone/{id}")))
                 .unwrap();
         }
         writer.commit().unwrap();
@@ -3893,19 +3876,33 @@ mod tests {
         let mut writer = open_writer(&index, 15_000_000).unwrap();
         // A hundred best-scoring chunks from one session used to fill the whole fetch window.
         for _ in 0..100 {
-            writer.add_document(tantivy::doc!(f.id => "dominant", f.body => "needle needle needle", f.preview => "dominant preview")).unwrap();
+            writer
+                .add_document(tantivy::doc!(f.id => "dominant", f.kind => KIND_BODY, f.body => "needle needle needle"))
+                .unwrap();
         }
+        writer
+            .add_document(tantivy::doc!(f.id => "dominant", f.kind => KIND_META, f.preview => "dominant preview"))
+            .unwrap();
         // Reverse id order exercises equal-score cutoff selection beyond the former 64 docs.
         for i in (0..100).rev() {
-            writer.add_document(tantivy::doc!(f.id => format!("other-{i:03}"), f.body => "needle padding padding padding", f.preview => "other preview")).unwrap();
+            writer.add_document(tantivy::doc!(f.id => format!("other-{i:03}"), f.kind => KIND_BODY, f.body => "needle padding padding padding")).unwrap();
+            writer
+                .add_document(
+                    tantivy::doc!(f.id => format!("other-{i:03}"), f.kind => KIND_META, f.preview => "other preview"),
+                )
+                .unwrap();
         }
         writer.commit().unwrap();
         // The same sessions span another segment, including a better chunk of other-099.
         writer
-            .add_document(tantivy::doc!(f.id => "other-099", f.body => "needle needle needle needle"))
+            .add_document(
+                tantivy::doc!(f.id => "other-099", f.kind => KIND_BODY, f.body => "needle needle needle needle"),
+            )
             .unwrap();
         writer
-            .add_document(tantivy::doc!(f.id => "dominant", f.body => "needle padding padding padding"))
+            .add_document(
+                tantivy::doc!(f.id => "dominant", f.kind => KIND_BODY, f.body => "needle padding padding padding"),
+            )
             .unwrap();
         writer.commit().unwrap();
         writer.delete_term(Term::from_field_text(f.id, "other-050"));
@@ -3960,90 +3957,77 @@ mod tests {
         assert!(!crate::is_invalid_text_query(&setup));
     }
 
+    /// A body winner displays its session's meta document, a meta winner itself; a document the
+    /// writer did not shape (no kind, no metadata, reordered fields) fails the query and names
+    /// `cv index --rebuild` instead of being read through a fallback.
     #[test]
-    fn body_only_filter_decisions_are_not_reused_by_session_identity() {
+    fn winner_projection_reads_current_metadata_and_refuses_other_layouts() {
+        use std::sync::Arc;
         let _home = IsolatedHome::new();
-        for reverse in [false, true] {
+        let search = |docs: Vec<TantivyDocument>, filter: crate::SearchFilter<'_>| {
             let dir = tmpdir();
             let (index, f) = open_or_create(&dir).unwrap();
             let mut writer = open_writer(&index, 15_000_000).unwrap();
-            let rows = [
-                ("claude", "/outside", "needle needle needle", "wrong"),
-                ("codex", "/wanted", "needle padding padding", "right"),
-            ];
-            for i in if reverse { vec![1, 0] } else { vec![0, 1] } {
-                let (harness, cwd, body, preview) = rows[i];
-                writer
-                    .add_document(tantivy::doc!(f.id => "legacy", f.kind => KIND_BODY,
-                    f.harness => harness, f.cwd => cwd, f.body => body, f.preview => preview))
-                    .unwrap();
+            for doc in docs {
+                writer.add_document(doc).unwrap();
             }
             writer.commit().unwrap();
             drop(writer);
-            for filter in [
+            let searcher = index.reader().unwrap().searcher();
+            let decisions = Arc::new(MetadataDecisions::new(&searcher, &f, filter));
+            ranked_search(&index, &f, &searcher, "needle", 10, filter, decisions)
+        };
+        let f = open_or_create(&tmpdir()).unwrap().1;
+        let current = || {
+            vec![
+                tantivy::doc!(f.id => "current", f.kind => KIND_BODY, f.body => "needle", f.preview => "discarded".repeat(131072)),
+                tantivy::doc!(f.id => "current", f.kind => KIND_META, f.harness => "codex", f.preview => "current preview", f.title => "current title"),
+                tantivy::doc!(f.id => "titled", f.kind => KIND_META, f.harness => "codex", f.title => "needle", f.preview => "titled preview"),
+            ]
+        };
+        for filter in [
+            crate::SearchFilter::default(),
+            crate::SearchFilter {
+                harness: Some("codex"),
+                ..Default::default()
+            },
+        ] {
+            let actual = search(current(), filter).unwrap();
+            let recorded = [
+                r#"{"id":"titled","harness":"codex","cwd":null,"title":"needle","score":0.9808292,"snippet":"titled preview","created_at":null,"updated_at":null,"parent_id":null,"agent_id":null,"workflow":null}"#,
+                r#"{"id":"current","harness":"codex","cwd":null,"title":"current title","score":0.53945607,"snippet":"current preview","created_at":null,"updated_at":null,"parent_id":null,"agent_id":null,"workflow":null}"#,
+            ];
+            assert_eq!(
+                serde_json::to_string(&actual).unwrap(),
+                format!("[{}]", recorded.join(","))
+            );
+        }
+        for (broken, filter) in [
+            (
+                tantivy::doc!(f.id => "body-only", f.kind => KIND_BODY, f.body => "needle"),
+                crate::SearchFilter::default(),
+            ),
+            (
+                tantivy::doc!(f.id => "body-only", f.kind => KIND_BODY, f.harness => "codex", f.body => "needle"),
                 crate::SearchFilter {
                     harness: Some("codex"),
-                    cwd: None,
                     ..Default::default()
                 },
-                crate::SearchFilter {
-                    harness: None,
-                    cwd: Some("wanted"),
-                    ..Default::default()
-                },
-            ] {
-                let hits = text_search_indexed_filtered(&dir, "needle", 1, filter).unwrap();
-                assert_eq!(hits.len(), 1);
-                assert_eq!(hits[0].harness, "codex");
-                assert_eq!(hits[0].snippet, "right");
-            }
-        }
-    }
-
-    #[test]
-    fn winner_header_projection_preserves_meta_and_legacy_fallback() {
-        use std::sync::Arc;
-        let _home = IsolatedHome::new();
-        let dir = tmpdir();
-        let (index, f) = open_or_create(&dir).unwrap();
-        let mut writer = open_writer(&index, 15_000_000).unwrap();
-        for doc in [
-            tantivy::doc!(f.id => "current", f.kind => KIND_BODY, f.body => "needle", f.preview => "discarded".repeat(131072)),
-            tantivy::doc!(f.id => "current", f.kind => KIND_META, f.preview => "current preview", f.title => "current title"),
-            // Compatible documents place kind after the inspected header or omit it entirely.
-            tantivy::doc!(f.title => "reordered", f.id => "legacy", f.kind => KIND_BODY, f.body => "needle", f.preview => "legacy preview"),
-            tantivy::doc!(f.id => "missing-kind", f.title => "old", f.body => "needle", f.preview => "old preview"),
-            // Candidate metadata rows must not be replaced by another same-id metadata row.
-            tantivy::doc!(f.id => "duplicate-meta", f.kind => KIND_META, f.title => "needle", f.preview => "matching meta"),
-            tantivy::doc!(f.id => "duplicate-meta", f.kind => KIND_META, f.title => "unrelated", f.preview => "other meta"),
+            ),
+            (
+                tantivy::doc!(f.id => "missing-kind", f.body => "needle"),
+                crate::SearchFilter::default(),
+            ),
+            (
+                tantivy::doc!(f.title => "reordered", f.id => "reordered", f.kind => KIND_BODY, f.body => "needle"),
+                crate::SearchFilter::default(),
+            ),
         ] {
-            writer.add_document(doc).unwrap();
+            let mut docs = current();
+            docs.push(broken);
+            let error = format!("{:#}", search(docs, filter).unwrap_err());
+            assert!(error.contains("cv index --rebuild"), "{error}");
         }
-        writer.commit().unwrap();
-        drop(writer);
-        let searcher = index.reader().unwrap().searcher();
-        let filter = crate::SearchFilter::default();
-        let decisions = Arc::new(MetadataDecisions::new(&searcher, &f, filter));
-        let actual = ranked_search(&index, &f, &searcher, "needle", 10, filter, decisions).unwrap();
-        // Recorded from the retired segment-local lookup, which this projection matched hit for hit.
-        let recorded = [
-            r#"{"id":"duplicate-meta","harness":"","cwd":null,"title":"needle","score":1.5404451,"snippet":"matching meta","created_at":null,"updated_at":null,"parent_id":null,"agent_id":null,"workflow":null}"#,
-            r#"{"id":"current","harness":"","cwd":null,"title":"current title","score":0.49191087,"snippet":"current preview","created_at":null,"updated_at":null,"parent_id":null,"agent_id":null,"workflow":null}"#,
-            r#"{"id":"legacy","harness":"","cwd":null,"title":"reordered","score":0.49191087,"snippet":"legacy preview","created_at":null,"updated_at":null,"parent_id":null,"agent_id":null,"workflow":null}"#,
-            r#"{"id":"missing-kind","harness":"","cwd":null,"title":"old","score":0.49191087,"snippet":"old preview","created_at":null,"updated_at":null,"parent_id":null,"agent_id":null,"workflow":null}"#,
-        ];
-        assert_eq!(
-            serde_json::to_string(&actual).unwrap(),
-            format!("[{}]", recorded.join(","))
-        );
-        assert_eq!(
-            actual.iter().find(|hit| hit.id == "current").unwrap().snippet,
-            "current preview"
-        );
-        assert_eq!(
-            actual.iter().find(|hit| hit.id == "duplicate-meta").unwrap().snippet,
-            "matching meta"
-        );
     }
 
     #[test]
@@ -4064,7 +4048,7 @@ mod tests {
                 .unwrap();
         }
         writer.commit().unwrap();
-        for segment in 0..16 {
+        for _ in 0..16 {
             for i in 0..128 {
                 writer
                     .add_document(tantivy::doc!(f.id => format!("session-{i:03}"), f.kind => KIND_BODY,
@@ -4072,10 +4056,6 @@ mod tests {
                     f.harness => "old-harness", f.cwd => "/stale", f.preview => "stale preview"))
                     .unwrap();
             }
-            // Missing metadata must not share one segment's body decision with another segment.
-            writer.add_document(tantivy::doc!(f.id => "legacy", f.kind => KIND_BODY,
-                f.body => "needle padding padding padding", f.harness => if segment % 2 == 0 { "codex" } else { "claude" },
-                f.cwd => "/current/project", f.preview => "legacy preview")).unwrap();
             writer.commit().unwrap();
         }
         drop(writer);
@@ -4089,28 +4069,25 @@ mod tests {
         };
         let decisions = Arc::new(MetadataDecisions::new(&searcher, &f, filter));
         let actual = ranked_search(&index, &f, &searcher, "needle", 10, filter, decisions.clone()).unwrap();
-        // Recorded from the retired segment-local lookup (16 * 129 + 5 metadata queries), which
-        // this shared lookup matched hit for hit.
+        // Recorded: the current metadata, not the stale body fields, admits and labels each hit.
         let recorded = [
-            r#"{"id":"session-000","harness":"codex","cwd":"/current/project","title":"current title 0","score":0.05895274,"snippet":"current preview 0","created_at":11,"updated_at":22,"parent_id":null,"agent_id":null,"workflow":null}"#,
-            r#"{"id":"session-001","harness":"codex","cwd":"/current/project","title":"current title 1","score":0.05895274,"snippet":"current preview 1","created_at":11,"updated_at":22,"parent_id":null,"agent_id":null,"workflow":null}"#,
-            r#"{"id":"session-002","harness":"codex","cwd":"/current/project","title":"current title 2","score":0.05895274,"snippet":"current preview 2","created_at":11,"updated_at":22,"parent_id":null,"agent_id":null,"workflow":null}"#,
-            r#"{"id":"session-003","harness":"codex","cwd":"/current/project","title":"current title 3","score":0.05895274,"snippet":"current preview 3","created_at":11,"updated_at":22,"parent_id":null,"agent_id":null,"workflow":null}"#,
-            r#"{"id":"legacy","harness":"codex","cwd":"/current/project","title":null,"score":0.051666375,"snippet":"legacy preview","created_at":null,"updated_at":null,"parent_id":null,"agent_id":null,"workflow":null}"#,
+            r#"{"id":"session-000","harness":"codex","cwd":"/current/project","title":"current title 0","score":0.059323233,"snippet":"current preview 0","created_at":11,"updated_at":22,"parent_id":null,"agent_id":null,"workflow":null}"#,
+            r#"{"id":"session-001","harness":"codex","cwd":"/current/project","title":"current title 1","score":0.059323233,"snippet":"current preview 1","created_at":11,"updated_at":22,"parent_id":null,"agent_id":null,"workflow":null}"#,
+            r#"{"id":"session-002","harness":"codex","cwd":"/current/project","title":"current title 2","score":0.059323233,"snippet":"current preview 2","created_at":11,"updated_at":22,"parent_id":null,"agent_id":null,"workflow":null}"#,
+            r#"{"id":"session-003","harness":"codex","cwd":"/current/project","title":"current title 3","score":0.059323233,"snippet":"current preview 3","created_at":11,"updated_at":22,"parent_id":null,"agent_id":null,"workflow":null}"#,
         ];
         assert_eq!(
             serde_json::to_string(&actual).unwrap(),
             format!("[{}]", recorded.join(","))
         );
-        assert_eq!(actual.len(), 5);
-        assert!(actual.iter().any(|hit| hit.id == "legacy"));
+        assert_eq!(actual.len(), 4);
         let queries = decisions.observed.queries.load(Ordering::Relaxed);
         let reads = decisions.observed.stored_reads.load(Ordering::Relaxed);
-        // The shared pass is paid once per index state, not per hit (the retired lookup spent
-        // 16 * 129 + 5): exact counts are the implementation's business, the ceiling is the point.
+        // The shared pass is paid once per index state, not per hit (a per-segment lookup would
+        // spend 16 * 128 + 4): exact counts are the implementation's business, the ceiling is the point.
         assert!(queries <= 129, "shared lookup queries {queries}");
         assert!(reads <= 128, "stored reads {reads}");
-        assert_eq!(decisions.observed.winner_body_reads.load(Ordering::Relaxed), 1);
+        assert_eq!(decisions.observed.winner_body_reads.load(Ordering::Relaxed), 0);
         assert_eq!(decisions.observed.winner_metadata_reads.load(Ordering::Relaxed), 4);
         assert!(decisions.cache.lock().unwrap().len() <= 129);
         // A top-three cutoff still compares exact scores/ties and current stored previews.
@@ -4140,12 +4117,12 @@ mod tests {
         let (index, f) = open_or_create(&dir).unwrap();
         let mut writer = open_writer(&index, 15_000_000).unwrap();
         for i in 0..100 {
-            writer.add_document(tantivy::doc!(f.id => format!("unwanted-{i}"), f.body => "needle needle needle", f.harness => "claude", f.cwd => "/outside/project")).unwrap();
+            writer.add_document(tantivy::doc!(f.id => format!("unwanted-{i}"), f.kind => KIND_BODY, f.body => "needle needle needle", f.harness => "claude", f.cwd => "/outside/project")).unwrap();
+            writer.add_document(tantivy::doc!(f.id => format!("unwanted-{i}"), f.kind => KIND_META, f.harness => "claude", f.cwd => "/outside/project")).unwrap();
         }
+        // A resumed body keeps the cwd it was indexed under; the meta doc is current.
         writer.add_document(tantivy::doc!(f.id => "wanted", f.kind => KIND_BODY, f.body => "needle padding padding", f.harness => "codex", f.cwd => "/stale/path")).unwrap();
-        writer.add_document(tantivy::doc!(f.id => "wanted", f.kind => KIND_META, f.harness => "codex", f.cwd => "/repo/mixed.Path/project", f.preview => "current preview")).unwrap();
-        // A compatible duplicate can win on its old title; display still follows admission.
-        writer.add_document(tantivy::doc!(f.id => "wanted", f.kind => KIND_META, f.title => "metaneedle", f.harness => "claude", f.cwd => "/old/project", f.preview => "old preview")).unwrap();
+        writer.add_document(tantivy::doc!(f.id => "wanted", f.kind => KIND_META, f.title => "metaneedle", f.harness => "codex", f.cwd => "/repo/mixed.Path/project", f.preview => "current preview")).unwrap();
         writer.commit().unwrap();
         drop(writer);
         for filter in [
@@ -6493,33 +6470,40 @@ mod tests {
         assert_eq!(observe(&dir, &refs, &words), whole_sweep(&refs, &words));
     }
 
+    /// An index missing a current field, or built under another `source::VERSION` (no format
+    /// stamp), is refused by a query and rebuilt whole by indexing.
     #[test]
-    fn discovery_metadata_schema_migration_is_indexing_only() {
-        let dir = tmpdir();
-        let mut old = serde_json::to_value(build_schema()).unwrap();
-        old.as_array_mut()
-            .unwrap()
-            .retain(|field| field["name"] != "discovery_metadata");
-        let old: Schema = serde_json::from_value(old).unwrap();
-        let index = Index::create_in_dir(&*dir, old.clone()).unwrap();
-        let mut writer = index.writer(15_000_000).unwrap();
-        let mut doc = TantivyDocument::default();
-        doc.add_text(old.get_field("id").unwrap(), "old");
-        doc.add_text(old.get_field("title").unwrap(), "obsolete");
-        writer.add_document(doc).unwrap();
-        writer.commit().unwrap();
-        // A raw tantivy writer: join its post-commit GC as `ingest::Writer` does on drop.
-        writer.wait_merging_threads().unwrap();
-        drop(index);
-        // A query cannot silently trust old stale postings, and never clears them.
-        assert!(open_existing(&dir).err().unwrap().to_string().contains("cv index"));
-        let existing = Index::open_in_dir(&*dir).unwrap();
-        assert_eq!(existing.reader().unwrap().searcher().num_docs(), 1);
-        drop(existing);
-        let (new, _) = open_or_create(&dir).unwrap();
-        assert!(schema_current(&new.schema()));
-        assert_eq!(new.reader().unwrap().searcher().num_docs(), 0);
-        drop(new);
+    fn older_schema_or_format_is_rebuilt_by_indexing_only() {
+        for missing in ["discovery_metadata".to_owned(), format_field()] {
+            let dir = tmpdir();
+            let mut old = serde_json::to_value(build_schema()).unwrap();
+            old.as_array_mut()
+                .unwrap()
+                .retain(|field| field["name"] != missing.as_str());
+            let old: Schema = serde_json::from_value(old).unwrap();
+            let index = Index::create_in_dir(&*dir, old.clone()).unwrap();
+            let mut writer = index.writer(15_000_000).unwrap();
+            let mut doc = TantivyDocument::default();
+            doc.add_text(old.get_field("id").unwrap(), "old");
+            doc.add_text(old.get_field("title").unwrap(), "obsolete");
+            writer.add_document(doc).unwrap();
+            writer.commit().unwrap();
+            // A raw tantivy writer: join its post-commit GC as `ingest::Writer` does on drop.
+            writer.wait_merging_threads().unwrap();
+            drop(index);
+            // A query cannot silently trust old stale postings, and never clears them.
+            assert!(
+                open_existing(&dir).err().unwrap().to_string().contains("cv index"),
+                "{missing}"
+            );
+            let existing = Index::open_in_dir(&*dir).unwrap();
+            assert_eq!(existing.reader().unwrap().searcher().num_docs(), 1);
+            drop(existing);
+            let (new, _) = open_or_create(&dir).unwrap();
+            assert!(schema_current(&new.schema()));
+            assert_eq!(new.reader().unwrap().searcher().num_docs(), 0);
+            drop(new);
+        }
     }
 
     /// A title-changing append cannot keep prefix title postings: Boolean clauses are
@@ -7187,10 +7171,16 @@ mod tests {
         let (index, f) = open_or_create(&dir).unwrap();
         let mut writer = open_writer(&index, 15_000_000).unwrap();
         for i in 0..TIER_FANOUT {
-            let mut doc = TantivyDocument::default();
-            doc.add_text(f.id, format!("s{i}"));
-            doc.add_text(f.body, format!("zqtier{i} common"));
-            writer.add_document(doc).unwrap();
+            writer
+                .add_document(
+                    tantivy::doc!(f.id => format!("s{i}"), f.kind => KIND_BODY, f.body => format!("zqtier{i} common")),
+                )
+                .unwrap();
+            writer
+                .add_document(
+                    tantivy::doc!(f.id => format!("s{i}"), f.kind => KIND_META, f.path => format!("/gone/s{i}")),
+                )
+                .unwrap();
             writer.commit().unwrap();
         }
         assert_eq!(index.searchable_segment_ids().unwrap().len(), TIER_FANOUT);
@@ -7275,7 +7265,7 @@ mod tests {
         ids.sort();
         (ids, reads.load(Ordering::Relaxed))
     }
-    fn append_merge_control(legacy: bool) -> (MergeBytes, Vec<String>, usize) {
+    fn append_merge_control() -> (MergeBytes, Vec<String>, usize) {
         use tantivy::{
             query::{BooleanQuery, TermQuery},
             schema::IndexRecordOption,
@@ -7293,7 +7283,7 @@ mod tests {
         let cold_meta = index.searchable_segment_metas().unwrap().pop().unwrap();
         let cold_bytes = segment_bytes(&dir, &cold_meta);
         let floor = cold_bytes / 2;
-        eprintln!("append tier scale: cold={cold_bytes} bytes, floor={floor} bytes, legacy={legacy}");
+        eprintln!("append tier scale: cold={cold_bytes} bytes, floor={floor} bytes");
         let mut cold = HashSet::from([cold_meta.id()]);
         let mut total = MergeBytes::default();
         for n in 0..24 {
@@ -7334,13 +7324,7 @@ mod tests {
             let append_hit = session_ids_and_reads(&dir, &term);
             assert_eq!(cold_hit, (vec!["cold".into()], 1));
             assert_eq!(append_hit, (vec!["hot".into()], 1));
-            let work = measured_compact(
-                &dir,
-                &index,
-                &mut writer,
-                if legacy { floor * TIER_FANOUT as u64 } else { floor },
-                &mut cold,
-            );
+            let work = measured_compact(&dir, &index, &mut writer, floor, &mut cold);
             total.inputs += work.inputs;
             total.outputs += work.outputs;
             total.merges += work.merges;
@@ -7361,29 +7345,20 @@ mod tests {
         }
         total.final_segments = index.searchable_segment_ids().unwrap().len();
         let (ids, reads) = session_ids_and_reads(&dir, "common");
-        assert_eq!(
-            measured_compact(
-                &dir,
-                &index,
-                &mut writer,
-                if legacy { floor * TIER_FANOUT as u64 } else { floor },
-                &mut cold
-            )
-            .merges,
-            0
-        );
+        assert_eq!(measured_compact(&dir, &index, &mut writer, floor, &mut cold).merges, 0);
         (total, ids, reads)
     }
+    /// Twenty-four appends compact the small segments among themselves (the merges happen) and
+    /// never rewrite the cold segment above the bottom tier; every search answers the same.
     #[test]
     fn append_compaction_keeps_the_cold_segment_above_the_bottom_tier() {
-        let (legacy, ids, reads) = append_merge_control(true);
-        let (fixed, fixed_ids, fixed_reads) = append_merge_control(false);
-        assert_eq!((ids, reads), (fixed_ids, fixed_reads));
-        assert!(legacy.cold_rewrites >= 2, "legacy: {legacy:?}");
-        assert_eq!(fixed.cold_rewrites, 0, "fixed: {fixed:?}");
-        assert!(fixed.inputs < legacy.inputs, "inputs {fixed:?} versus {legacy:?}");
-        assert!(fixed.outputs < legacy.outputs, "outputs {fixed:?} versus {legacy:?}");
-        eprintln!("append merge bytes: legacy={legacy:?}, fixed={fixed:?}");
+        let (work, ids, reads) = append_merge_control();
+        assert_eq!(ids, ["cold", "hot"]);
+        assert_eq!(reads, 25, "one identity request per live body: the cold one and 24 appends");
+        assert!(work.merges > 0, "{work:?}");
+        assert_eq!(work.cold_rewrites, 0, "{work:?}");
+        assert!(work.final_segments < 24, "{work:?}");
+        eprintln!("append merge bytes: {work:?}");
     }
 
     /// Opt-in operation control on a disposable copy of an existing index. The byte-tier
