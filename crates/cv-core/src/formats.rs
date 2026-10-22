@@ -566,12 +566,12 @@ fn recent_refs(harness: Option<Harness>, recent: usize) -> BTreeMap<&'static str
     if recent == 0 {
         return BTreeMap::new();
     }
-    // `sessions_for` has already narrowed to the harness, so no in-loop filter here.
-    select_recent_refs(crate::sessions_for(harness), recent)
+    select_recent_refs(crate::sessions_for(harness), harness, recent)
 }
 
 fn select_recent_refs(
     refs: impl IntoIterator<Item = SessionRef>,
+    harness: Option<Harness>,
     recent: usize,
 ) -> BTreeMap<&'static str, (Harness, Vec<SessionRef>)> {
     type Rank = (std::cmp::Reverse<Option<chrono::DateTime<chrono::Utc>>>, usize);
@@ -580,6 +580,9 @@ fn select_recent_refs(
         return BTreeMap::new();
     }
     for (position, reference) in refs.into_iter().enumerate() {
+        if harness.is_some_and(|h| h != reference.harness) {
+            continue;
+        }
         let rank = (std::cmp::Reverse(reference.updated_at), position);
         let (_, candidates) = by
             .entry(reference.harness.as_str())
@@ -732,14 +735,7 @@ mod tests {
                         candidates.truncate(limit);
                     }
                 }
-                // Pre-filter the fixture here: the function no longer narrows by harness
-                // (its one product caller passes `sessions_for(harness)`, already narrowed).
-                let scoped = || {
-                    refs.iter()
-                        .filter(|r| harness.is_none_or(|h| h == r.harness))
-                        .cloned()
-                };
-                let actual = select_recent_refs(scoped(), limit);
+                let actual = select_recent_refs(refs.clone(), harness, limit);
                 let ids = |selection: &BTreeMap<&str, (Harness, Vec<SessionRef>)>| {
                     selection
                         .iter()

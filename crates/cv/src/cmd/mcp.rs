@@ -1707,15 +1707,27 @@ mod instructions_tests {
             .spawn(|| {
                 // Hand-copied from the text below: the test's oracle, kept next to the check.
                 let named = [
-                    "ls", "query", "search", "show", "cat", "pack", "doctor", "workflow", "prune",
-                    "rewind", "distill", "splice", "port", "await_omen", "observe_stream",
+                    "ls",
+                    "query",
+                    "search",
+                    "show",
+                    "cat",
+                    "pack",
+                    "doctor",
+                    "workflow",
+                    "prune",
+                    "rewind",
+                    "distill",
+                    "splice",
+                    "port",
+                    "await_omen",
+                    "observe_stream",
                 ];
                 let text = super::instructions();
                 for name in named {
                     assert!(text.contains(name), "instructions dropped `{name}`");
                 }
-                let tools = crate::cmd::mcp_tools::CliTools::from_tree(&crate::build_cli())
-                    .expect("tool tree");
+                let tools = crate::cmd::mcp_tools::CliTools::from_tree(&crate::build_cli()).expect("tool tree");
                 let mut real: std::collections::BTreeSet<String> =
                     tools.commands().iter().map(|c| c.tool_name()).collect();
                 real.extend(super::NativeTool::ALL.map(|t| t.name().to_string()));

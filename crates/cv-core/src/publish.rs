@@ -235,9 +235,7 @@ fn rename_no_replace_using(
     }
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
-        // The cause may be this platform lacking the exclusive-rename API, or this filesystem
-        // rejecting it; the message claims neither alone.
-        "platform or filesystem does not support an atomic exclusive rename; destination left untouched",
+        "filesystem does not support an atomic exclusive rename; destination left untouched",
     ))
 }
 

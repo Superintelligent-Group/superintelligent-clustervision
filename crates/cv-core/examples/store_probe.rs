@@ -745,7 +745,7 @@ fn main() -> Result<()> {
             },
             "materialize": if a.operation == "affordance-read" { Value::Null }
                            else { json!(a.materialize || matches!(a.operation.as_str(), "affordances" | "hash" | "resolve")) },
-            "physical_input_bytes": physical_bytes,
+            "physical_input_bytes": physical_bytes, "traversed_bytes": null,
             "build_features": { "mmap": cfg!(feature = "mmap"), "probe_heap": cfg!(feature = "probe-heap") },
             "hash_output": a.hash_output,
             "hash_detail": a.hash_detail,
