@@ -388,7 +388,7 @@ pub(crate) fn append_cell(
         });
     }
     conn.query_row(
-        &format!("SELECT {} FROM {} WHERE rowid = ?1", quote_ident(column), quote_ident(table)),
+        &format!("SELECT {column} FROM {table} WHERE rowid = ?1"),
         [rowid],
         |row| {
             Ok(arena.append(|writer| {
@@ -434,9 +434,9 @@ impl Cells {
     /// `i + 1`: the rowid and the cell's type when reads are incremental, else the cell itself.
     pub(crate) fn select(&self, column: &str) -> String {
         if self.incremental {
-            format!("rowid, typeof({})", quote_ident(column))
+            format!("rowid, typeof({column})")
         } else {
-            format!("{}, NULL", quote_ident(column))
+            format!("{column}, NULL")
         }
     }
 
@@ -603,16 +603,10 @@ pub(crate) fn incremental_utf8_table(conn: &Connection, table: &str) -> bool {
         .as_deref()
         == Some("UTF-8");
     utf8 && conn
-        .query_row(&format!("PRAGMA main.table_list({})", quote_ident(table)), [], |row| {
+        .query_row(&format!("PRAGMA main.table_list('{table}')"), [], |row| {
             Ok(row.get::<_, String>(2)? == "table" && !row.get::<_, bool>(4)?)
         })
         .unwrap_or(false)
-}
-
-/// An adapter-owned table/column name as a quoted SQL identifier. These names come from the
-/// adapter, never from store data; quoting keeps a name with punctuation or a keyword legible.
-pub(crate) fn quote_ident(name: &str) -> String {
-    format!("\"{}\"", name.replace('"', "\"\""))
 }
 
 /// Borrow a read-only cell handle while the caller's active statement/snapshot is still alive.
@@ -728,7 +722,7 @@ impl Select {
 /// table yields the empty set.
 pub(crate) fn columns(conn: &Connection, table: &str) -> HashSet<String> {
     let mut set = HashSet::new();
-    if let Ok(mut stmt) = conn.prepare(&format!("PRAGMA table_info({})", quote_ident(table))) {
+    if let Ok(mut stmt) = conn.prepare(&format!("PRAGMA table_info({table})")) {
         if let Ok(rows) = stmt.query_map([], |row| row.get::<_, String>(1)) {
             set.extend(rows.flatten());
         }
