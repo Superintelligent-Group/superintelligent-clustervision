@@ -50,8 +50,8 @@ pub(crate) fn available_provider() -> Option<&'static str> {
 pub(crate) fn digest(session: &cv_core::Session, opts: &DigestOptions) -> Result<String> {
     let provider = provider_from_env().ok_or_else(|| {
         anyhow!(
-            "no LLM provider: set OPENROUTER_API_KEY (preferred), ANTHROPIC_API_KEY, or \
-             LMSTUDIO_API_BASE (=local for a free local LM Studio server) to enable the digest"
+            "no LLM API key found: set OPENROUTER_API_KEY (preferred) or ANTHROPIC_API_KEY \
+             to enable the digest"
         )
     })?;
     let prompt = build_prompt(session, opts)?;
@@ -520,7 +520,10 @@ fn call_chat(
             req = openrouter_headers(req, b);
         }
         let v = read_json(req.send_json(body), "chat").with_context(|| format!("POST to {url}"))?;
-        extract_openai_text(&v, "chat")
+        v["choices"][0]["message"]["content"]
+            .as_str()
+            .map(str::to_string)
+            .ok_or_else(|| anyhow!("chat response missing message content: {v}"))
     };
 
     match provider {

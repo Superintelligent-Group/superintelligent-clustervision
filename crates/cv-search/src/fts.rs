@@ -3017,11 +3017,10 @@ mod tests {
         assert_eq!(result.observed.admission.charged_bytes, 0);
         let bounded = std::env::var_os("CV_SWEEP_COMPARE_UNBOUNDED").is_none();
         if bounded {
-            assert!(result
-            .observed
-            .admission
-            .peak_charged_bytes
-            <= crate::ingest::DOCUMENT_BYTES.max(result.observed.admission.largest_document_bytes));
+            assert!(
+                result.observed.admission.peak_charged_bytes
+                    <= crate::ingest::DOCUMENT_BYTES.max(result.observed.admission.largest_document_bytes)
+            );
         }
         // This is a scoped composed-path ceiling, not a universal RSS promise. Four concurrent
         // synthetic giant Source inputs include raw queues, working buffers, tokenizers and arenas.
@@ -3062,7 +3061,11 @@ mod tests {
         let repeat_started = std::time::Instant::now();
         let unchanged = sweep(&dir, refs, false, false).unwrap();
         assert_eq!(
-            (unchanged.changed, unchanged.errors, unchanged.observed.admission.peak_charged_bytes),
+            (
+                unchanged.changed,
+                unchanged.errors,
+                unchanged.observed.admission.peak_charged_bytes
+            ),
             (0, 0, 0)
         );
         eprintln!(
@@ -3148,7 +3151,11 @@ mod tests {
         let result = sweep(&dir, refs.clone(), false, false).unwrap();
         assert_eq!((result.changed, result.errors), (refs.len(), 0));
         let admission = result.observed.admission;
-        let (live, peak, largest) = (admission.charged_bytes, admission.peak_charged_bytes, admission.largest_document_bytes);
+        let (live, peak, largest) = (
+            admission.charged_bytes,
+            admission.peak_charged_bytes,
+            admission.largest_document_bytes,
+        );
         assert_eq!(live, 0, "commit consumed every accepted document");
         assert!(peak <= crate::ingest::DOCUMENT_BYTES.max(largest));
         assert!(peak > 0);
@@ -4242,7 +4249,6 @@ mod tests {
 
         // Conjunction-by-default: a term present in neither yields nothing.
         assert!(text_search(&dir, "kubernetes", 10).unwrap().is_empty());
-
     }
 
     #[test]
@@ -4489,7 +4495,6 @@ mod tests {
         index_refs(&dir, &[sref("y", "second", p2)], false).unwrap();
         assert!(text_search(&dir, "alpha", 10).unwrap().is_empty());
         assert_eq!(text_search(&dir, "delta", 10).unwrap().len(), 1);
-
     }
 
     /// Rewrite a file with its own byte-identical content — bumping mtime (the OS stamps "now" on
@@ -4582,7 +4587,6 @@ mod tests {
         let hits = text_search(&dir, "gamma", 10).unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].id, "s2");
-
     }
 
     #[test]
@@ -4924,7 +4928,6 @@ mod tests {
         let hits = text_search(&dir, "zqxmarker", 10).unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].id, "big");
-
     }
 
     /// A session with no discovery title labels itself from the first user message, and the body
@@ -4949,7 +4952,6 @@ mod tests {
         assert_eq!(hits[0].id, "m");
         // No ai-title → label is the first user message's text.
         assert_eq!(hits[0].title.as_deref(), Some("alpha question about tantivy"));
-
     }
 
     /// `live_snippet` must stay O(cap) on a session fronted by one giant field: a term within the
@@ -4972,7 +4974,6 @@ mod tests {
             !snip.contains("zqlate") && snip.starts_with("zqearly"),
             "beyond-cap term must fall back to the head, got: {snip:?}"
         );
-
     }
 
     #[test]
@@ -5133,7 +5134,6 @@ mod tests {
             "marker expected: {:?}",
             hits[0].snippet
         );
-
     }
 
     /// The event ride-along, end to end through the production `index_session` tee: one indexing
@@ -5276,7 +5276,6 @@ mod tests {
         let scoped = text_search(&dir, "parent_id:parent1 zqsubmarker", 10).unwrap();
         assert_eq!(scoped.len(), 1);
         assert_eq!(scoped[0].id, "agent-child9");
-
     }
 
     /// Regression for the truncated-fresh hole: a parse error *after* chunk docs were already
@@ -5542,7 +5541,6 @@ mod tests {
             !sigs.contains_key("victim"),
             "a failed session must not enter the freshness skip-set (B1)"
         );
-
     }
 
     /// The sweep reads on every core and writes on one: over many sessions, two of them files under
@@ -5662,7 +5660,6 @@ mod tests {
             1,
             "an FTS-fresh, events-stale sub-agent must keep its docs (B2)"
         );
-
     }
 
     /// A catalog wipe removes FTS's independent dependency baselines too. Existing documents
@@ -5721,7 +5718,6 @@ mod tests {
             "a plain refresh must not silently reap the folded sub-agent forest (B3)"
         );
         assert_eq!(text_search(&dir, "orchestrator", 10).unwrap().len(), 1);
-
     }
 
     #[test]
@@ -5912,7 +5908,6 @@ mod tests {
         let edit = rows.iter().find(|e| e.kind == "file_edit").expect("edit event");
         assert_eq!(edit.parent_id.as_deref(), Some("evt-parent"));
         assert_eq!(edit.agent_id.as_deref(), Some("ed1"));
-
     }
 
     /// The preview rides only the session's *first* chunk doc, but a hit can score on a *later*
@@ -5943,7 +5938,6 @@ mod tests {
         // The stored preview itself is capped (marker text rides on top of it).
         let stored = hits[0].snippet.trim_end_matches(" (source file moved)").chars().count();
         assert!(stored <= PREVIEW_CHARS, "preview over cap: {stored} chars");
-
     }
 
     /// A hit shows the session's current label, from its meta doc, even when the body doc that
@@ -6161,173 +6155,173 @@ mod tests {
         }
     }
 
-/// One native Qwen chat record: the envelope the native parser keys on, plus `body`'s fields.
-fn qwen_rec(id: &str, body: serde_json::Value) -> String {
-    let mut v = serde_json::json!({"uuid":id,"sessionId":"native","cwd":"/scratch",
+    /// One native Qwen chat record: the envelope the native parser keys on, plus `body`'s fields.
+    fn qwen_rec(id: &str, body: serde_json::Value) -> String {
+        let mut v = serde_json::json!({"uuid":id,"sessionId":"native","cwd":"/scratch",
         "timestamp":"2026-10-11T00:00:01Z","version":"0.25.1"});
-    v.as_object_mut().unwrap().extend(body.as_object().unwrap().clone());
-    v.to_string()
-}
-
-/// The native transcript up to the unterminated record: 100 user turns, a tool call, then a
-/// pending assistant reply — valid EOF records emit, but may wait for the physical newline.
-fn qwen_native_text() -> String {
-    let mut text = String::new();
-    for n in 0..100 {
-        text.push_str(&qwen_rec(&format!("u{n}"), serde_json::json!({"type":"user",
-            "provenance":"real_user","message":{"role":"user","parts":[{"text":format!("prefix sapphire message {n}")}]}})));
-        text.push('\n');
+        v.as_object_mut().unwrap().extend(body.as_object().unwrap().clone());
+        v.to_string()
     }
-    text.push_str(&qwen_rec(
-        "a1",
-        serde_json::json!({"type":"assistant","model":"first-model",
+
+    /// The native transcript up to the unterminated record: 100 user turns, a tool call, then a
+    /// pending assistant reply — valid EOF records emit, but may wait for the physical newline.
+    fn qwen_native_text() -> String {
+        let mut text = String::new();
+        for n in 0..100 {
+            text.push_str(&qwen_rec(&format!("u{n}"), serde_json::json!({"type":"user",
+            "provenance":"real_user","message":{"role":"user","parts":[{"text":format!("prefix sapphire message {n}")}]}})));
+            text.push('\n');
+        }
+        text.push_str(&qwen_rec(
+            "a1",
+            serde_json::json!({"type":"assistant","model":"first-model",
         "message":{"role":"model","parts":[{"functionCall":{"id":"call","name":"tool_call",
             "args":{"name":"agent","arguments":{"prompt":"explore"}}}}]}}),
-    ));
-    text.push('\n');
-    text.push_str(&qwen_rec(
-        "pending",
-        serde_json::json!({"type":"assistant","model":"next-model",
+        ));
+        text.push('\n');
+        text.push_str(&qwen_rec(
+            "pending",
+            serde_json::json!({"type":"assistant","model":"next-model",
         "message":{"role":"model","parts":[{"text":"pending amber reply"}]}}),
-    ));
-    text
-}
+        ));
+        text
+    }
 
-fn qwen_words() -> Vec<String> {
-    ["sapphire", "amber", "returned", "compressed"]
-        .into_iter()
-        .map(str::to_owned)
-        .collect()
-}
+    fn qwen_words() -> Vec<String> {
+        ["sapphire", "amber", "returned", "compressed"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
+    }
 
-/// Native Qwen has stable ChatRecord boundaries: appends resume from the mark and leave what a
-/// whole sweep leaves, across counts, events and stored search docs.
-#[test]
-fn qwen_native_append_resumes_at_record_boundaries() {
-    use cv_core::{Harness, SessionRef};
-    let _home = IsolatedHome::new();
-    let (dir, root) = (tmpdir(), tmpdir());
-    let chats = root.join("projects/group/chats");
-    std::fs::create_dir_all(&chats).unwrap();
-    let r = SessionRef::new("native", Harness::Qwen, chats.join("native.jsonl"));
-    let mut text = qwen_native_text();
-    std::fs::write(&r.path, &text).unwrap();
-    assert_eq!(sweep(&dir, vec![r.clone()], false, false).unwrap().resumed, 0);
-    assert!(
-        cv_core::resume::MarkTable::load().get(&r).is_some(),
-        "native head must leave a safe chunk boundary"
-    );
-    let words = qwen_words();
-    for suffix in [
-        qwen_rec(
-            "result",
-            serde_json::json!({"type":"tool_result","message":{"role":"user","parts":[
+    /// Native Qwen has stable ChatRecord boundaries: appends resume from the mark and leave what a
+    /// whole sweep leaves, across counts, events and stored search docs.
+    #[test]
+    fn qwen_native_append_resumes_at_record_boundaries() {
+        use cv_core::{Harness, SessionRef};
+        let _home = IsolatedHome::new();
+        let (dir, root) = (tmpdir(), tmpdir());
+        let chats = root.join("projects/group/chats");
+        std::fs::create_dir_all(&chats).unwrap();
+        let r = SessionRef::new("native", Harness::Qwen, chats.join("native.jsonl"));
+        let mut text = qwen_native_text();
+        std::fs::write(&r.path, &text).unwrap();
+        assert_eq!(sweep(&dir, vec![r.clone()], false, false).unwrap().resumed, 0);
+        assert!(
+            cv_core::resume::MarkTable::load().get(&r).is_some(),
+            "native head must leave a safe chunk boundary"
+        );
+        let words = qwen_words();
+        for suffix in [
+            qwen_rec(
+                "result",
+                serde_json::json!({"type":"tool_result","message":{"role":"user","parts":[
             {"functionResponse":{"id":"call","name":"tool_call","response":{"output":"returned emerald"}}}]},
             "toolCallResult":{"callId":"call","status":"success"}}),
-        ),
-        qwen_rec(
-            "compact",
-            serde_json::json!({"type":"system","subtype":"chat_compression","systemPayload":{
+            ),
+            qwen_rec(
+                "compact",
+                serde_json::json!({"type":"system","subtype":"chat_compression","systemPayload":{
             "info":{"originalTokenCount":99,"newTokenCount":9},"compressedHistory":[{"role":"user","parts":[{"text":"compressed ruby"}]}]}}),
-        ),
-    ] {
-        text.push('\n');
-        text.push_str(&suffix);
-        text.push('\n');
-        std::fs::write(&r.path, &text).unwrap();
-        let swept = sweep(&dir, vec![r.clone()], false, false).unwrap();
-        assert_eq!((swept.changed, swept.resumed), (1, 1));
-        assert_eq!(
-            observe(&dir, std::slice::from_ref(&r), &words),
-            whole_sweep(std::slice::from_ref(&r), &words)
-        );
+            ),
+        ] {
+            text.push('\n');
+            text.push_str(&suffix);
+            text.push('\n');
+            std::fs::write(&r.path, &text).unwrap();
+            let swept = sweep(&dir, vec![r.clone()], false, false).unwrap();
+            assert_eq!((swept.changed, swept.resumed), (1, 1));
+            assert_eq!(
+                observe(&dir, std::slice::from_ref(&r), &words),
+                whole_sweep(std::slice::from_ref(&r), &words)
+            );
+        }
     }
-}
 
-/// A sidecar edit must not reuse checkpointed lineage, even alongside transcript growth.
-#[test]
-fn qwen_sidecar_metadata_edit_does_not_resume() {
-    use cv_core::{Harness, SessionRef};
-    let _home = IsolatedHome::new();
-    let (dir, root) = (tmpdir(), tmpdir());
-    let chats = root.join("projects/group/chats");
-    std::fs::create_dir_all(&chats).unwrap();
-    let r = SessionRef::new("native", Harness::Qwen, chats.join("native.jsonl"));
-    let result = qwen_rec(
-        "result",
-        serde_json::json!({"type":"tool_result","message":{"role":"user","parts":[
+    /// A sidecar edit must not reuse checkpointed lineage, even alongside transcript growth.
+    #[test]
+    fn qwen_sidecar_metadata_edit_does_not_resume() {
+        use cv_core::{Harness, SessionRef};
+        let _home = IsolatedHome::new();
+        let (dir, root) = (tmpdir(), tmpdir());
+        let chats = root.join("projects/group/chats");
+        std::fs::create_dir_all(&chats).unwrap();
+        let r = SessionRef::new("native", Harness::Qwen, chats.join("native.jsonl"));
+        let result = qwen_rec(
+            "result",
+            serde_json::json!({"type":"tool_result","message":{"role":"user","parts":[
         {"functionResponse":{"id":"call","name":"tool_call","response":{"output":"returned emerald"}}}]},
         "toolCallResult":{"callId":"call","status":"success"}}),
-    );
-    let compact = qwen_rec(
-        "compact",
-        serde_json::json!({"type":"system","subtype":"chat_compression","systemPayload":{
+        );
+        let compact = qwen_rec(
+            "compact",
+            serde_json::json!({"type":"system","subtype":"chat_compression","systemPayload":{
         "info":{"originalTokenCount":99,"newTokenCount":9},"compressedHistory":[{"role":"user","parts":[{"text":"compressed ruby"}]}]}}),
-    );
-    let text = format!("{}\n{}\n\n{}\n", qwen_native_text(), result, compact);
-    std::fs::write(&r.path, &text).unwrap();
+        );
+        let text = format!("{}\n{}\n\n{}\n", qwen_native_text(), result, compact);
+        std::fs::write(&r.path, &text).unwrap();
 
-    let sub = root.join("projects/group/subagents/native");
-    std::fs::create_dir_all(&sub).unwrap();
-    let child = SessionRef::new("agent-worker", Harness::Qwen, sub.join("agent-worker.jsonl"));
-    let meta = sub.join("agent-worker.meta.json");
-    std::fs::write(&meta, r#"{"toolUseId":"old","subagentName":"worker"}"#).unwrap();
-    std::fs::write(&child.path, &text).unwrap();
-    sweep(&dir, vec![r.clone(), child.clone()], false, false).unwrap();
-    std::fs::write(&meta, r#"{"toolUseId":"new","subagentName":"worker"}"#).unwrap();
-    std::fs::write(
-        &child.path,
-        format!(
-            "{text}\n{}\n",
-            qwen_rec(
-                "last",
-                serde_json::json!({"type":"user",
+        let sub = root.join("projects/group/subagents/native");
+        std::fs::create_dir_all(&sub).unwrap();
+        let child = SessionRef::new("agent-worker", Harness::Qwen, sub.join("agent-worker.jsonl"));
+        let meta = sub.join("agent-worker.meta.json");
+        std::fs::write(&meta, r#"{"toolUseId":"old","subagentName":"worker"}"#).unwrap();
+        std::fs::write(&child.path, &text).unwrap();
+        sweep(&dir, vec![r.clone(), child.clone()], false, false).unwrap();
+        std::fs::write(&meta, r#"{"toolUseId":"new","subagentName":"worker"}"#).unwrap();
+        std::fs::write(
+            &child.path,
+            format!(
+                "{text}\n{}\n",
+                qwen_rec(
+                    "last",
+                    serde_json::json!({"type":"user",
         "message":{"role":"user","parts":[{"text":"child append"}]}})
-            )
-        ),
-    )
-    .unwrap();
-    let swept = sweep(&dir, vec![r.clone(), child.clone()], false, false).unwrap();
-    assert_eq!((swept.changed, swept.resumed), (1, 0));
-    assert_eq!(
-        observe(&dir, &[r.clone(), child.clone()], &qwen_words()),
-        whole_sweep(&[r, child], &qwen_words())
-    );
-}
-
-/// Legacy Qwen replay replaces old record IDs: the grown file re-reads whole instead of
-/// resuming, and the replaced records leave nothing searchable behind.
-#[test]
-fn qwen_legacy_replay_replaces_old_ids_with_a_full_reread() {
-    use cv_core::{Harness, SessionRef};
-    let _home = IsolatedHome::new();
-    let (dir, root) = (tmpdir(), tmpdir());
-    let legacy_dir = root.join("tmp/hash/chats");
-    std::fs::create_dir_all(&legacy_dir).unwrap();
-    let legacy = SessionRef::new("legacy", Harness::Qwen, legacy_dir.join("session-legacy.jsonl"));
-    let mut old = String::from(
-        r#"{"sessionId":"legacy","startTime":"2026-10-11T00:00:00Z","lastUpdated":"2026-10-11T00:00:01Z","kind":"main"}"#,
-    );
-    for n in 0..60 {
-        old.push_str(&format!(
-            "\n{{\"id\":\"u{n}\",\"type\":\"user\",\"content\":\"legacy prompt\"}}"
-        ));
+                )
+            ),
+        )
+        .unwrap();
+        let swept = sweep(&dir, vec![r.clone(), child.clone()], false, false).unwrap();
+        assert_eq!((swept.changed, swept.resumed), (1, 0));
+        assert_eq!(
+            observe(&dir, &[r.clone(), child.clone()], &qwen_words()),
+            whole_sweep(&[r, child], &qwen_words())
+        );
     }
-    old.push_str("\n{\"id\":\"answer\",\"type\":\"gemini\",\"content\":\"obsolete sapphire\"}\n");
-    std::fs::write(&legacy.path, &old).unwrap();
-    sweep(&dir, vec![legacy.clone()], false, false).unwrap();
-    old.push_str("{\"id\":\"answer\",\"type\":\"gemini\",\"content\":\"replacement amber\"}\n");
-    std::fs::write(&legacy.path, &old).unwrap();
-    let swept = sweep(&dir, vec![legacy.clone()], false, false).unwrap();
-    assert_eq!((swept.changed, swept.resumed), (1, 0));
-    let words = qwen_words();
-    assert_eq!(
-        observe(&dir, std::slice::from_ref(&legacy), &words),
-        whole_sweep(std::slice::from_ref(&legacy), &words)
-    );
-    assert!(text_search(&dir, "sapphire", 100).unwrap().is_empty());
-    assert!(!text_search(&dir, "amber", 100).unwrap().is_empty());
-}
+
+    /// Legacy Qwen replay replaces old record IDs: the grown file re-reads whole instead of
+    /// resuming, and the replaced records leave nothing searchable behind.
+    #[test]
+    fn qwen_legacy_replay_replaces_old_ids_with_a_full_reread() {
+        use cv_core::{Harness, SessionRef};
+        let _home = IsolatedHome::new();
+        let (dir, root) = (tmpdir(), tmpdir());
+        let legacy_dir = root.join("tmp/hash/chats");
+        std::fs::create_dir_all(&legacy_dir).unwrap();
+        let legacy = SessionRef::new("legacy", Harness::Qwen, legacy_dir.join("session-legacy.jsonl"));
+        let mut old = String::from(
+            r#"{"sessionId":"legacy","startTime":"2026-10-11T00:00:00Z","lastUpdated":"2026-10-11T00:00:01Z","kind":"main"}"#,
+        );
+        for n in 0..60 {
+            old.push_str(&format!(
+                "\n{{\"id\":\"u{n}\",\"type\":\"user\",\"content\":\"legacy prompt\"}}"
+            ));
+        }
+        old.push_str("\n{\"id\":\"answer\",\"type\":\"gemini\",\"content\":\"obsolete sapphire\"}\n");
+        std::fs::write(&legacy.path, &old).unwrap();
+        sweep(&dir, vec![legacy.clone()], false, false).unwrap();
+        old.push_str("{\"id\":\"answer\",\"type\":\"gemini\",\"content\":\"replacement amber\"}\n");
+        std::fs::write(&legacy.path, &old).unwrap();
+        let swept = sweep(&dir, vec![legacy.clone()], false, false).unwrap();
+        assert_eq!((swept.changed, swept.resumed), (1, 0));
+        let words = qwen_words();
+        assert_eq!(
+            observe(&dir, std::slice::from_ref(&legacy), &words),
+            whole_sweep(std::slice::from_ref(&legacy), &words)
+        );
+        assert!(text_search(&dir, "sapphire", 100).unwrap().is_empty());
+        assert!(!text_search(&dir, "amber", 100).unwrap().is_empty());
+    }
 
     #[test]
     fn a_copied_index_keeps_its_baselines() {
@@ -6353,13 +6347,18 @@ fn qwen_legacy_replay_replaces_old_ids_with_a_full_reread() {
 
     #[test]
     fn fts_only_reread_keeps_event_checkpoints_for_later_append() {
-        let _home = IsolatedHome::new();
+        let home = IsolatedHome::new();
         let (dir, sdir) = (tmpdir(), tmpdir());
         let fleet = resumable_fleet(&sdir, 2);
         let refs: Vec<_> = fleet.iter().map(|(r, _)| r.clone()).collect();
         write_heads(&fleet, 1, 3);
         sweep(&dir, refs.clone(), false, false).unwrap();
-        cv_core::catalog::test_support::forget_source_dependencies(&source_consumer(&dir).unwrap());
+        let conn = rusqlite::Connection::open(home.home.join("catalog.db")).unwrap();
+        conn.execute(
+            "DELETE FROM source_dependencies WHERE consumer=?1",
+            [source_consumer(&dir).unwrap()],
+        )
+        .unwrap();
         for r in &refs {
             assert!(!cv_core::events::needs_ingest(r));
         }
@@ -6378,7 +6377,7 @@ fn qwen_legacy_replay_replaces_old_ids_with_a_full_reread() {
 
     #[test]
     fn failed_event_publication_cannot_advance_a_resume_mark_on_retry() {
-        let _home = IsolatedHome::new();
+        let home = IsolatedHome::new();
         let (dir, sdir) = (tmpdir(), tmpdir());
         let fleet = resumable_fleet(&sdir, 2);
         let refs: Vec<_> = fleet.iter().map(|(r, _)| r.clone()).collect();
@@ -6394,7 +6393,11 @@ fn qwen_legacy_replay_replaces_old_ids_with_a_full_reread() {
                 )
             })
             .collect();
-        let reject_event = cv_core::catalog::test_support::RejectInserts::on("events", None, "test");
+        let conn = rusqlite::Connection::open(home.home.join("catalog.db")).unwrap();
+        conn.execute_batch(
+            "CREATE TRIGGER reject_event BEFORE INSERT ON events BEGIN SELECT RAISE(ABORT, 'test'); END;",
+        )
+        .unwrap();
         write_heads(&fleet, 1, 1);
         let grown = sweep(&dir, refs.clone(), false, false).unwrap();
         assert_eq!(grown.resumed, refs.len());
@@ -6428,7 +6431,7 @@ fn qwen_legacy_replay_replaces_old_ids_with_a_full_reread() {
                 "event rollback must not prevent independent counts publication on the reused connection"
             );
         }
-        drop(reject_event);
+        conn.execute_batch("DROP TRIGGER reject_event;").unwrap();
         let retry = sweep(&dir, refs.clone(), false, false).unwrap();
         assert_eq!((retry.resumed, retry.errors), (0, 0));
         for r in &refs {
@@ -6442,7 +6445,7 @@ fn qwen_legacy_replay_replaces_old_ids_with_a_full_reread() {
     /// commit, and the next pass reads the one session whose baseline is missing.
     #[test]
     fn one_failed_baseline_publication_rereads_only_its_session() {
-        let _home = IsolatedHome::new();
+        let home = IsolatedHome::new();
         let (dir, sdir) = (tmpdir(), tmpdir());
         let fleet = resumable_fleet(&sdir, 3);
         let refs: Vec<_> = fleet.iter().map(|(r, _)| r.clone()).collect();
@@ -6450,12 +6453,15 @@ fn qwen_legacy_replay_replaces_old_ids_with_a_full_reread() {
         let cold = sweep(&dir, refs.clone(), false, false).unwrap();
         assert_eq!((cold.changed, cold.errors), (refs.len(), 0));
         let consumer = source_consumer(&dir).unwrap();
-        cv_core::catalog::test_support::forget_source_dependencies(&consumer);
-        let reject_baseline = cv_core::catalog::test_support::RejectInserts::on(
-            "source_dependencies",
-            Some(&format!("NEW.consumer='{consumer}' AND NEW.id='{}'", refs[1].id)),
-            "test",
-        );
+        let conn = rusqlite::Connection::open(home.home.join("catalog.db")).unwrap();
+        conn.execute("DELETE FROM source_dependencies WHERE consumer=?1", [&consumer])
+            .unwrap();
+        conn.execute_batch(&format!(
+            "CREATE TRIGGER reject_baseline BEFORE INSERT ON source_dependencies
+             WHEN NEW.consumer='{consumer}' AND NEW.id='{}' BEGIN SELECT RAISE(ABORT, 'test'); END;",
+            refs[1].id
+        ))
+        .unwrap();
         let reread = sweep(&dir, refs.clone(), false, false).unwrap();
         assert_eq!(
             (reread.changed, reread.errors),
@@ -6473,7 +6479,7 @@ fn qwen_legacy_replay_replaces_old_ids_with_a_full_reread() {
             report(reread, false, false).is_err(),
             "a lost publication is the pass's failure"
         );
-        drop(reject_baseline);
+        conn.execute_batch("DROP TRIGGER reject_baseline;").unwrap();
         let retry = sweep(&dir, refs.clone(), false, false).unwrap();
         assert_eq!(
             (retry.changed, retry.errors),
@@ -7002,7 +7008,12 @@ fn qwen_legacy_replay_replaces_old_ids_with_a_full_reread() {
         let _writer_lock = open_writer(&index, 15_000_000).unwrap();
         let swept = sweep(&dir, refs.clone(), false, false).unwrap();
         assert_eq!(
-            (swept.changed, swept.removed, swept.errors, swept.observed.admission.peak_charged_bytes),
+            (
+                swept.changed,
+                swept.removed,
+                swept.errors,
+                swept.observed.admission.peak_charged_bytes
+            ),
             (0, 0, 0, 0)
         );
         assert_eq!(swept.observed.work, SweepWork::default());
@@ -7580,7 +7591,6 @@ fn qwen_legacy_replay_replaces_old_ids_with_a_full_reread() {
         let note = staleness_line(&s).expect("a stale session must produce the note");
         assert!(note.contains("behind for 1 session"), "{note}");
         assert!(note.contains("cv index"), "{note}");
-
     }
 
     /// A session the index has never seen counts as stale too — a hit list that can't contain it
@@ -7596,6 +7606,5 @@ fn qwen_legacy_replay_replaces_old_ids_with_a_full_reread() {
 
         let refs = vec![sref("old", "one", p), sref("new", "two", p2)];
         assert_eq!(staleness_over(&dir, &refs).map(|s| s.stale_sessions), Some(1));
-
     }
 }

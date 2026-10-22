@@ -39,4 +39,3 @@ dirs.workspace = true
 cv-testkit = { path = "../cv-testkit" }
 rusqlite.workspace = true
 zstd = { version = "0.13", default-features = false }
-cv-core = { path = "../cv-core", version = "0.17", package = "clustervision-core", features = ["test-support"] }

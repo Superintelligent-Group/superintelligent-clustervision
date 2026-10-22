@@ -584,15 +584,6 @@ impl<'a> Response<'a> {
                     "response body ended early",
                 ));
             }
-            // Surplus bytes must not complete a response that lies by its Content-Length. Every
-            // body is a Cursor or a file reader, so this read is an immediate EOF when correct.
-            let mut surplus = [0u8; 1];
-            if self.body.read(&mut surplus)? != 0 {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "response body exceeds Content-Length",
-                ));
-            }
         }
         out.flush()
     }
