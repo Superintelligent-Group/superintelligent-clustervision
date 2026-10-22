@@ -14,6 +14,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use cv_core::ir::Harness;
 use cv_core::harness::claude::Claude;
 use cv_core::harness::cline::Cline;
 use cv_core::harness::codex::Codex;
@@ -284,7 +285,13 @@ fn summarize_one(adapter: &dyn Adapter, r: &SessionRef, version_dir: &Path) -> V
     );
     json!({
         "id": s.id,
-        "path": r.path.strip_prefix(version_dir).unwrap_or(&r.path),
+        "path": r.path.strip_prefix(version_dir).unwrap_or_else(|_| {
+            panic!(
+                "{}: corpus path is not under {} — a machine path would leak into the golden",
+                r.path.display(),
+                version_dir.display()
+            )
+        }),
         "messages": s.messages.len(),
         "sequence": s.messages.iter().map(|m| format!("{}/{}", tag(m.role), tag(m.kind))).collect::<Vec<_>>(),
         "blocks": blocks,
@@ -340,6 +347,14 @@ fn every_corpus_version_reads_as_its_golden_summary() {
             continue;
         }
         assert!(known.contains(&name), "tests/corpus/{name} has no row in HARNESSES");
+    }
+    // And the roster names only harnesses the registry knows: a renamed variant must land here.
+    for h in HARNESSES {
+        assert!(
+            Harness::ALL.iter().any(|known| known.as_str() == h.name),
+            "HARNESSES row {:?} names no harness in the registry",
+            h.name
+        );
     }
     let mut failures = Vec::new();
     for h in HARNESSES {

@@ -140,6 +140,24 @@ pub enum TaskEventKind {
     Retired(RetiredEvent),
 }
 
+/// The wire tags of every live [`TaskEventKind`], the image of [`TaskEventKind::tag`] over the
+/// whole grammar. Fixture tests hold golden logs to this roster, so a new variant adds its tag
+/// here (the round-trip test fails loud until it does).
+pub const LIVE_TAGS: &[&str] = &[
+    "opened",
+    "claimed",
+    "released",
+    "noted",
+    "done",
+    "abandoned",
+    "superseded",
+    "tagged",
+    "blocked_by",
+    "posed",
+    "resolved",
+    "status_set",
+];
+
 /// The wire tags of the land facet retired in 0.15.0: reviewed code revisions, review
 /// verdicts, and the git verifier's observations. Kept so a log that holds them still replays
 /// and so a tool that names one can be told what happened to it.
@@ -346,13 +364,20 @@ mod tests {
                 text: "tip abc123; next: merge B".into(),
             },
         ];
+        let mut tags = std::collections::BTreeSet::new();
         for kind in kinds {
             let ev = event(kind);
             let json = serde_json::to_string(&ev).unwrap();
             let back: TaskEvent = serde_json::from_str(&json).unwrap();
             assert_eq!(ev, back, "round-trip mismatch for {json}");
             assert!(!back.kind.is_retired(), "a live kind must not read as retired: {json}");
+            tags.insert(back.kind.tag());
         }
+        assert_eq!(
+            tags,
+            LIVE_TAGS.iter().copied().collect::<std::collections::BTreeSet<_>>(),
+            "every live kind's tag is in LIVE_TAGS, and LIVE_TAGS names no kind this list leaves out"
+        );
     }
 
     /// The wire contract: tags and core field names, pinned. If this test fails you are
