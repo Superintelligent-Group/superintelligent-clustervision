@@ -2778,6 +2778,47 @@ mod tests {
         }
     }
 
+    /// Every corpus version, listed as `cv ls` lists it: cold (nothing counted yet), then after
+    /// full reads recorded each session's count (the certified counts list), then with the store
+    /// replaced by a fresh copy of the same bytes, as the dump-hash stage rebuilds it: that is
+    /// another store, so the listing is the cold one again, not the counts certified for the old
+    /// file's rows.
+    #[test]
+    fn corpus_listing_of_a_replaced_store_is_the_cold_listing() {
+        let corpus = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/corpus/hermes");
+        let mut versions: Vec<_> = std::fs::read_dir(&corpus).unwrap().map(|e| e.unwrap().path()).collect();
+        versions.sort();
+        for version in versions {
+            let world = crate::test_world("hermes-cold-warm");
+            let home = world.home.join(".hermes");
+            std::fs::create_dir_all(&home).unwrap();
+            let db = home.join("state.db");
+            let stage = || {
+                let _ = std::fs::remove_file(&db);
+                std::fs::copy(version.join(".hermes/state.db"), &db).unwrap();
+            };
+            let listing = || {
+                let mut rows: Vec<(String, Option<usize>)> = crate::sessions()
+                    .into_iter()
+                    .filter(|r| r.harness == Harness::Hermes)
+                    .map(|r| (r.id, r.message_count))
+                    .collect();
+                rows.sort();
+                rows
+            };
+            stage();
+            let cold = listing();
+            assert!(!cold.is_empty(), "{version:?}");
+            let adapter = Hermes::with_home(&home);
+            for r in adapter.discover().unwrap().refs {
+                crate::stream::collect_with(&adapter, &r, &stream::Demand::RICH).unwrap();
+            }
+            assert_ne!(listing(), cold, "{version:?}: full reads certify counts on this store");
+            stage();
+            assert_eq!(listing(), cold, "{version:?}: a replaced store lists as a cold one");
+        }
+    }
+
     #[test]
     fn parses_basic_text_conversation() {
         let conn = mk_conn("schema-v14.sql");

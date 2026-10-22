@@ -229,21 +229,18 @@ Audited against `git log v0.17.0..HEAD` on 2026-10-21; a closure below names its
   Cursor CLI counts to exclude empty stores. Removing these reads needs to preserve inclusion and exact metadata.
   Shared selections landed for OpenClaw/Hermes/Qwen tasks/Goose/exports (`62f0ccda`, `0a6a3b22`,
   `7475e978`, `20980e64`, `646b8fb6`); native allocations and validation still cost work.
-- **Search freshness, closed.** A query is the index plus a live read of what it has not seen
-  (`cv-search/src/fts/live.rs`), from FTS marks, same BM25 over summed statistics, within
-  `--live-bytes`; `cv index` pre-pays, no timer. A shared SQLite store's write rereads only the
-  sessions whose `source::Rows` certificate moved (every SQLite store), each whole, not from a mark.
+- **Search freshness, closed.** Index plus a live read of its stale suffix from FTS marks, one
+  BM25, within `--live-bytes` (`fts/live.rs`); a SQLite write rereads only moved `source::Rows`.
 - **Archive inventory.** `archive sync` uses `index_all`'s references; `cv/src/cmd/archive` owns
   its checked artifact projection. An unavailable index falls back to discovery with a diagnostic.
 - **Three message windowings, closed.** JSON, text rendering and pack relevance excerpts share
   `api::MessageWindow`; renderers retain their own byte accounting and metadata timing.
   CLI and HTTP search share `cv_search::Searcher::search`, including notes and snippets.
-- **Format-dependent costs, open.** Grok sibling lineage retains per-query metadata guards;
-  Kimi wire enrichment and Kimi Code's auxiliary index reread changed prefixes; Claude fork
-  inference can inspect sibling bodies. These dependencies can change independently of the main
-  transcript. External SQLite schemas remain read-only; OpenClaw custom queries and giant native
-  cells still allocate in SQLite. Zed discovery grows Serde scratch; Hermes reasoning/provider
-  extras and row/FTS allocation remain owned. Rust heap gates do not bound those native costs.
+- **Format-dependent costs, open.** Grok sibling lineage keeps per-query metadata guards; Kimi wire
+  enrichment and Kimi Code's index reread changed prefixes; Claude fork inference reads sibling
+  heads (append-only dependencies). External SQLite schemas stay read-only; OpenClaw queries and
+  giant native cells allocate in SQLite; Zed discovery grows Serde scratch; Hermes extras and
+  row/FTS allocation stay owned. Rust heap gates do not bound those native costs.
 - **Resume-mark sampling, a known limit.** Boundary 3 cannot detect every prefix rewrite plus
   growth, or every same-length edit during captured-read admission. No trusted change signal is
   available; whole-prefix hashing was measured and rejected (see `PERF.md`, Resume marks).

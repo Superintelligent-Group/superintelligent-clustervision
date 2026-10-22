@@ -600,11 +600,20 @@ impl Baseline {
     /// store's own files aside, every dependency is as recorded, and `r`'s rows certify as they
     /// did ([`Rows`]).
     pub fn rows_fresh(&self, r: &SessionRef, current: &Self, probe: &mut Probe) -> bool {
-        let (Some(rows), Some(_), Some(old), Some(now)) =
-            (self.rows, current.primary, self.stamp.as_ref(), current.stamp.as_ref())
-        else {
+        let (Some(rows), Some(then), Some(now_primary), Some(old), Some(now)) = (
+            self.rows,
+            self.primary,
+            current.primary,
+            self.stamp.as_ref(),
+            current.stamp.as_ref(),
+        ) else {
             return false;
         };
+        // Writes to a store keep its file; a store replaced by another file (a copy, a restore)
+        // is another store, whose rows nothing here has read.
+        if (then.dev, then.ino) != (now_primary.dev, now_primary.ino) {
+            return false;
+        }
         let primary = probe.primary_path(r);
         let mut store: Vec<PathBuf> = sqlite_sidecars(&primary).into();
         store.push(primary);
