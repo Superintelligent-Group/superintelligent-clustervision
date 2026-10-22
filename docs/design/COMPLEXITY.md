@@ -42,6 +42,7 @@ or rewritten. Paths are relative to `crates/`.
 | `cv index` sweep queue | O(Z log Z) for Z groups | — | — | `sweep.rs` `Queue` |
 | `cv search` | O(postings) + `limit` snippets | same | + suffix read within `--live-bytes` | `cv-search` `search_suffixed` |
 | `stats --tokens` | O(S) | O(n) cache loads + a bounded sweep | one source reparsed | `stats/usage_cache.rs` |
+| Sessions API page / head | O(start) / O(s) | O(page) from its continuation / a hit | O(start) / O(s) | `api/read.rs` |
 | `cv scry` / watch poll | O(n) stats per tick | O(n) | O(appended) from the anchor | `watch.rs`, `watch/read.rs` |
 | MCP `observe_stream` | O(n) stats | same | O(appended); a cursor from another process rereads each changed session once | `watch.rs` `Readers` |
 | `cv watch` archive | O(S) | O(n) baseline checks + 2n stats | O(appended) | `watch.rs` `offer_sources`, `archive/reuse.rs` |
@@ -61,9 +62,6 @@ or rewritten. Paths are relative to `crates/`.
 - **Task log replay**: every command, prompt hook and API request replays all E events.
   E appends cost O(E²) in total. Needs a persisted reducer snapshot plus a suffix fold
   (about 150 lines).
-- **API read cache** (`api/read.rs`): limits of 32 entries FIFO, 256 KiB per entry and 2 MiB
-  total. Past them a page costs O(start) and a head costs O(s). Needs per-session offset
-  certificates in the catalog (about 200 lines).
 - **`agent-…` lookups** read the catalog, not a rediscovery, but still list each session's
   sidecar dir. A by-id index cannot replace that: the scan cache holds an agent only after its
   forest was read and flushed, and an agent written since (or a copy) is in no record.
@@ -75,6 +73,8 @@ Budgets (they bound work and say so):
 - `--live-bytes` (search suffix): sessions over the budget are named in the stale note.
 - `LIVE_HAY_BYTES` 256 KiB (`--scan`): stderr says results are head-capped.
 - `PIPE_GUARD_*` (show), MCP `SHOW_DEFAULT_*`, `observe_stream` caps: stated in output.
+- `api/read.rs` `ENTRIES` 1024: one continuation per session read, least recently used out.
+  Past it an evicted session's page costs O(start) and its head O(s); stderr says so once.
 - `source/scope.rs` `RETAINED_BYTES` 16 MiB: per namespace. When a namespace passes it,
   stderr says so once.
 - Codex `FULL_SCAN_CAP` 8 MiB: listing metadata for larger rollouts comes from 1 MiB head and
@@ -98,6 +98,8 @@ Safety caps (they bound memory, and the fallback is bounded too):
 - `catalog/reader.rs` Probe reset at 256 refs: one extra stat per 256 refs.
 
 Removed mode switches:
+- API read cache: 32 entries FIFO, 256 KiB per entry and 2 MiB in all, past which a session
+  silently paid O(start) per page.
 - MCP observe cursor: reader state for eight sessions under 64 KiB each. It is now one state
   per session in the serving process (`watch::Readers`), and the output's `rereads` counts the rest.
 - Usage cache: the FIFO eviction at 256 MiB / 65,536 sources, and the 16 MiB per-source limit.

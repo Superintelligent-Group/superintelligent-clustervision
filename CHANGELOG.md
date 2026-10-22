@@ -42,6 +42,8 @@
 
 - MCP `observe_stream` keeps every observed session's reader state in the server, not eight in the cursor, and reports `rereads`.
 
+- The sessions API resumes pages and heads for its 1024 most recent sessions of any size, not 32 under 256 KiB.
+
 - OpenClaw SQLite stores are rediscovered only when the store changes, not on every listing refresh.
 
 - A copied SQLite store with WAL frames is copied once per command, however large, not again whenever another database opens.

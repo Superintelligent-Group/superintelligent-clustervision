@@ -186,9 +186,7 @@ impl MessageSink for WindowSink {
     }
     fn checkpoint(&mut self, checkpoint: &mut Checkpoint) {
         self.capture = false;
-        if super::read::bounded_size(&(&*checkpoint, &self.meta)).is_some() {
-            self.checkpoint = Some((self.idx, checkpoint.clone(), self.meta.clone()));
-        }
+        self.checkpoint = Some((self.idx, checkpoint.clone(), self.meta.clone()));
     }
     fn take_error(&mut self) -> Option<anyhow::Error> {
         self.fail.take()
