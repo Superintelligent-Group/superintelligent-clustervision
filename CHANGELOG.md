@@ -2,130 +2,120 @@
 
 ## Unreleased
 
-- `cv splice --generate` rejects an empty chat completion from OpenRouter or LM Studio, as digests already did, instead of appending an empty turn.
-- With `CV_PACK_LLM` set and no LLM provider configured, `cv pack`'s warning names `LMSTUDIO_API_BASE` alongside the two API keys.
-- `cv serve` treats a response body longer than its Content-Length as a failed response and closes the connection, instead of silently dropping the excess.
-- `cv blame -L` says when its commit list was cut, has its own no-commit message, and marks an empty commit message `(no message)`.
-- `cv blame` spells sub-agent sessions in full in every `cv show` hint, not only under exact matches.
-- A refused write after a failed JSONL record names that record and its cause, instead of only saying the stage failed.
-- Claude, Gemini and Qwen port resume hints are one runnable line, `cd <dir> && <harness> --resume <id>`, instead of a command plus prose.
-- Long-running `serve`, `mcp` and followers resolve Gemini/Qwen projects registered after they started, instead of leaving those sessions without a working directory.
-- Qwen checkpoints keep their facts under the `qwen` bag and Qwen part decoding, no longer under `gemini`.
-- Builds without `sqlite` count extracted events instead of spooling them to private memory and temporary files that nothing could publish.
-- Followers announce a session unreadable when they started as new once it reads, instead of tracking it from a guessed message count.
-- `created:` no longer answers from the update time when a listing lacks a creation time; the parsed session decides, and none means no match.
-- A refused exclusive rename says whether the platform lacks it or the kernel/filesystem declined, with the OS error, instead of blaming the filesystem.
-- **Breaking (library):** `formats::FindingKind::ManifestInvalid` reports a manifest that does not parse, previously tagged `source_file_missing`.
-- Compaction scans report a failed summary read with its full cause chain instead of a flattened one-line copy.
-- OpenCode JSON-file reads avoid retaining duplicate part inventories while preserving source-change checks and bounded dataset selection heap.
+**Breaking: commands, MCP, HTTP and JSON.** A removed name exits 2 with a pointer to its replacement; a changed shape is named here.
+- An uncounted session's `message_count` was `0`; `ls --json`, `/api/sessions` and search rows now emit `null`.
+- `cv archive ls` counts turns like `cv ls`; `catalog.jsonl` rows keep the raw count as `messages_written`; 0.17's rows show a dash until resynced.
+- `extra.openclaw` keys copied from records keep native camelCase (`stopReason`, `customType`, `error.errorCode`); `custom_details` and `branch_from_id` become `details` and `fromId`.
+- An IR or OpenSession 0.3 message without `kind` or `origin` is refused instead of inferred from its role; cv has written both since 0.11.
+- Fidelity-report `deltas` elements and `cv formats` findings serialize as one Divergence, `{what, a, b, expected, where}`, replacing `{field, before, after}` and the old finding keys.
+- MCP tools generated from the CLI omit `--follow` (no Ctrl-C in a tool call); a `follow` argument is refused, naming `for`.
+- Installed hooks run `cv hook <name> --harness <h>`; `$CV_HOOK_HARNESS` exits 2 with a pointer to `cv hooks install codex`.
+- `cv scry` with stdout piped prints the sessions it would follow once and exits 0; `--follow` keeps following, `--for 30s|5m|2h` bounds it.
+- Watch and `observe_stream` cursors are version 2 (one mark per position); a 0.17 cursor starts a fresh baseline.
+- A tag-only `decision` (nothing posed, written before 0.15) reads as an assigned action, not a decision owed; the page's tagged-decision card is gone.
+- `$CLAURDVOYANT_HOME` and `$CLAURDVOYANT_MAX_STALE_SECS` exit 2 with a pointer to the `CLUSTERVISION_` names; the `claurdvoyant` config, cache and home directories are no longer read.
+- `cv rewind --from-compaction` (the default start, never a switch) exits 2 with a pointer to `--full`.
+- `cv deferrals --since <msg>` is `--at <msg>` (`--since` is a duration on `lanes`); the old spelling exits 2 with a pointer.
+- `cv dataset --out <path>` is `--file <path>` (`--out` is a directory everywhere else); the old spelling exits 2 with a pointer.
+- `cv tools --agent` takes an exact id or unique prefix on every view, else exits 2; `--across` with `--agent`, `--tool` or `--timeline` exits 2.
+- An unknown `cv task events --kind` (or `/api/events?kind=`) exits 2 (400) naming the known kinds; it used to list nothing.
+- `cv workflow` exits 2 where it dropped flags: run-only flags with no run named, `--revive-all` without `--revive`, `--revive` with `--json`.
+- A `-q` with `text:` and no full-text index exits 2 naming `cv index` (`/api/stats`: 503) instead of matching nothing.
+- `cv events`, `cv touched`, `cv blame` and their HTTP routes fail on an event-catalog error instead of answering empty.
 
-- Desktop ZIP imports report transcript decoding errors instead of attempting to serialize an ingestion result.
+**Breaking (library): cv-core, cv-search and cv-testkit APIs.** Rust callers migrate as follows.
+- `ParseOptions` and `ExtraProjection` become `Demand { tier, spans, offsets }`; the five `Watcher` poll methods become `poll`/`try_poll(Poll { .. })`.
+- `MessageSink::extra_projection` is `MessageSink::tier`, returning a `Tier`; a sink that overrode it overrides `tier`.
+- `Adapter::resume`, `try_resume` and `resume_format` become `Adapter::transcript(r, demand, Start, sink)`; `append_only` returns `bool`; JSONL transcripts share one driver.
+- `Adapter::discover` returns `Discovered { refs, skipped }`; an out-of-tree adapter returns `Ok(refs.into())`.
+- `cline::discover_in` returns `Discovered`; `cline_sdk::discover` takes `&mut Discovered` and fills it instead of returning refs.
+- `Watcher::run` is gone (callers own scheduling around `poll`); `poll_sources` is `offer_sources`.
+- Transcript text over 4 KiB is `Text::Source` (checked); `Span` is wire form only, a JSON string body; malformed escapes error instead of decoding lossily.
+- Unresolved `Text` formatting errors; `matches_str` replaces string equality, and `is_lazy` replaces `is_span`.
+- `lazy::json_string_span` is gone (adapters build `Text::Source`); `try_resolve_prefix` budgets decoded bytes, not raw (`max_raw` is `max`).
+- `projection::Head` replaces `ir::Head`: byte prefixes and character labels share one builder with separate budgets; `push` returns `true` once full.
+- `projection::Counted` is built with `Counted::new`; `hashing()` captures an optional SHA-256 digest during writes.
+- `emit::Delta` and `formats::Finding` become one `emit::Divergence {what, a, b, expected, at}` (`at` serializes as `where`); format-check returns follow.
+- `formats::FindingKind::ManifestInvalid` reports a manifest that does not parse, previously tagged `source_file_missing`.
+- `SubagentInfo` and `claude::subagent_refs` become `ir::AgentRef` and `subagent_tree_of`; `claude::CARRIER_KEY` is `ir::CARRIER_KEY`.
+- `SubagentEnd`, `ApiErrorNotice` and `TaskNotice` move from `harness::claude` to `lanes`.
+- Agent end, return, task-notice and workflow-launch reads return `Result`; aborted reads no longer imply missing or running agents.
+- Forest and subagent-reference APIs return `Result`; unreadable forests fail views, queries, indexing and stats instead of hiding agents.
+- `one_agent_across` returns `Result<bool>`: an unreadable forest is an error, not `false`.
+- Modules move: `handoff` is `codex_handoff`, `loom` is `splice`, `harness::harmony` is `harness::wire::harmony`.
+- `wire::harmony::decode_content` takes a call-id generator; derive position ids with `ir::derived_call_id`.
+- `export::ChatGptExport`, `ClaudeExport` and their `with_roots` are gone; use `harness::for_harness_with_root(Harness::ChatGptExport, dir)` (or `ClaudeExport`).
+- `codex::parse_str`, `gemini::parse_all_str`, `parse_all_str_for` and `ingest::ingest_files` return `Result`; a codec failure is an error, not a partial session.
+- `store_affordances` and `json_files` return `Result`; failed side-store reads now fail affordance views and count publication.
+- `harness::wire::openai::tool_calls` returns `Result`; an entry that fails to decode is an error, not a shorter list.
+- `affordance::classify_tool` is private and `items_of`/`item_of` are gone; use `classify_tool_json`/`classify_tool_view` and `items_of_view`/`item_of_view`.
+- `affordance::Returns` gains `ResultInPrompt`, the spawn-table row for Roo's `new_task`.
+- `affordance::{unwrap,rewrap}_deferred` take a `DeferredWrapper`, not a `Harness`; `wire::anthropic`'s owned `Texter`/`block_from*`/`blocks_from` helpers are gone.
+- `distill::distill` splits into `prepare_distill` and `distill_pack`; `Session::first_user_text` and `searchable_text` are gone.
+- `SearchRow::to_json` is `to_json_with(&SearchRowContext)`; `scan::live_search` is `live_search_filtered`; `lazy::read_head` is `read_head_checked`, returning `Result`.
+- Redaction and HTML message rendering require a resolver; Markdown consumers use `write_md_message`/`write_md_block` instead of removed buffering wrappers.
+- `html::share_message_with_resolver` is `share_message(.., resolver)`; `redact::scrub_value`/`scrub_cow` are private: use `redact_with`, `redact_message` or `redact_text`.
+- `RedactOptions.keep_emails` is `classes.emails`, inverted: `false` keeps emails. `task::AppendOutcome.replay_warnings` (always empty) is gone.
+- `source::Published` becomes `Record<T>`; `Table<T: Payload>`, `get` returns a `Record`, `admit` replaces `published`/`fresh`; `update` is generic.
+- `source::rename_consumer` is gone: a consumer missing its baselines under a new identity rereads the source instead of migrating them.
+- `catalog::fill_count` is gone; a complete read certifies counts in the counts record.
+- `resume::version` returns `String`, not `Option<String>`; `resume::MarkUpdate` is a struct `{session, mark}`, not a tuple.
+- `publish::retract` is gone: a `publish::Set` owns grouped rollback. `EmitOptions` gains `parsed_at`, so exhaustive struct literals break.
+- `EmitOptions.sidechain_of` is `Option<SidechainOf {root, agent}>`; `PruneOptions`/`RewindOptions` gain `skills_policy` and their results `skills`, breaking exhaustive literals.
+- `prune::prune_session` takes the session's `Harness` first; prune and rewind accept a harness whose adapter declares derived copies.
+- `events::ingest_all` takes named `IngestOptions` instead of two positional booleans.
+- `events::events_for`, `sessions_touching`, `sessions_editing` and `edits_touching_file` return `Result`.
+- `query::WindowPresence` is gone: `filter_refs_limited` drops its presence argument and always skips absent sources before choosing the window.
+- `lanes::Lane.status` is a `LaneStatus` (`Running`, `Stopped`, `Returned`, `Recorded(word)`; `as_str` and JSON unchanged); `LaneEvent.event` is `LaneEventKind`.
+- `lanes::STRAND_PATTERNS` is private: `lanes::text_is_waiting` is the strand check.
+- `ForestTools::for_workflow` is gone; `tools::forest_tools_selected(r, None, Some(run_id), None)` reads only that workflow.
+- `query::HAS_FLAGS` rows are `(name, help, Cost)` triples; destructuring code takes three fields.
+- `task::store::append_agent_event` (the free function) is gone; call `TaskStore::default_store().append_agent_event(event)`.
+- `Searcher::semantic` is private; pass configured `SemanticSearch` state through `Searcher::from`.
+- cv-search's root `text_search*`, `enrich_text_snippets`, `embed_all` and `semantic_search_filtered` become `Searcher::{search, search_in}` and `embed_sessions`.
+- `fts::enrich_text_snippets` returns `Result<Option<String>>` (a degradation note). New fields (`Stats.uncounted`, `HarnessCensus.first_error`, `LaneWork.unread`) break exhaustive literals.
+- cv-testkit: `heap::begin`/`end` return a `Measurement` instead of a `usize`.
+- `Env::enter_isolated` returns `Isolated(armed, Scope)`, which derefs to the scope, instead of a bare `Scope`.
+- cv-testkit: `claude::user` takes the session id first: `user(sid, uuid, ts, text)`.
 
-- `prune`, `rewind`, and `port` accept `--skills keep|drop|drop-stale`, including legacy command-file skills; the default preserves restored skills unchanged.
-- **Breaking (library):** redaction and HTML message rendering require a resolver; Markdown consumers use `write_md_message`/`write_md_block` instead of removed buffering wrappers.
-
-- **Breaking (library):** unresolved `Text` formatting errors; `matches_str` replaces string equality, and `is_lazy` replaces `is_span`.
-
-- Compressed Codex rollouts use the independent `zstd` feature; disabled decoding errors explicitly instead of reading compressed bytes as JSONL.
-
-- **Breaking (library):** `projection::Head` replaces `ir::Head`; byte prefixes and character labels share one builder with explicit budgets.
-
-- `cv cat` reports corrupt sidecar reads instead of attributing them to `--drop`.
-- `cv events --subagents` reports unreadable agent transcripts with their identity and path.
-- Archive watch uses source-path adapters, fails unavailable adapters, and names retryable reads; archive listing reports corrupt catalog line numbers.
-
-- Indexing rejects unreadable persisted outputs; search propagates metadata query failures and names optional index-metadata failures before retrying.
-
-- **Breaking (library):** `events::ingest_all` takes named `IngestOptions` instead of two positional booleans.
-
-- **Breaking (library):** agent end, return, task-notice and workflow-launch reads return `Result`; aborted reads no longer imply missing or running agents.
-- String-entry readers preserve named read failures; a malformed legacy Codex `.json` rollout is a named read failure, skipped in listings, never an empty session.
-
-- Usage-cache read, publication, commit and rollback failures report named diagnostics and retry without publishing partial projections.
-
-- Catalog and scan-cache failures warn once; catalog schema replacement commits its tables and version stamp atomically.
-
-- Native database listings and reads report failed row decoding; OpenCode reports database discovery failures and Zed rejects unreadable listing cells.
-
-- Multi-file publication reports destination metadata failures before replacing files.
-
-- **Breaking (library):** `store_affordances` and `json_files` return `Result`; failed side-store reads now fail affordance views and count publication.
-
-- **Breaking (library):** forest and subagent-reference APIs return `Result`; unreadable forests fail views, queries, indexing and stats instead of hiding agents.
-- Initialize the sweep catalog before feeding jobs, preventing concurrent cold opens from failing search baseline invalidation.
-- Search refreshes rely on the shared stored-format version; obsolete duplicate-row repair is removed.
-
-- **Breaking (library):** `Searcher::semantic` is private; pass configured `SemanticSearch` state through `Searcher::from`.
-
-- Boolean search filters load affordance counts only when metadata and indexed text cannot decide a row.
-
-- Failed partial spill-index reads preserve cached membership data for safe retry and eviction.
-
-- Failed spill appends truncate partially written bytes while preserving valid buffered keys; cleanup failures prevent unsafe reuse.
-
-- Tool-filtered histograms correlate all calls before selection, preserving edit counts and failing if required correlation arguments are unreadable.
-
-- Reconcile native edits by call and resolved path; honor tool working directories and avoid guessing relative paths in compound shell commands.
-- Semantic indexing caps transcript heads at 64 KiB of decoded text, independent of JSON escaping, with bounded heap.
-- Gemini JSONL reads report source mutation even when the final consumer callback also fails.
-
-- Restore standalone wasm and no-default-features builds by gating the SQLite-only compaction resolver constructor.
-
-- Read-only checkpointed catalogs retain writer-version observations and warm listings without accepting publications or bypassing live WAL contents.
-- Byte prefixes and character-bounded labels retain separate limits and formatting policies within the shared `projection::Head` builder.
-
-- Cursor legacy listings count readable turns, excluding empty and malformed bubbles.
-
-- Claude reports malformed nonblank JSONL records in `cv.skipped_lines`, including incomplete trailing records.
-- Codex and Gemini string parsing and uploaded-file ingestion return codec failures instead of successful partial sessions.
-- Compressed Codex rollouts use the independent `zstd` feature; builds without it report unreadable sources instead of parsing compressed bytes as JSONL.
-
-- Document `cv events` catalog writes and `--frozen`; update the manual for 0.18 counts, flags, diagnostics and migrations.
-- Qwen emission preserves absent cache counts and incomplete totals, and rejects overflowing usage aggregates.
-- OpenCode emission keeps unknown working directories empty instead of substituting the invoking process’s directory.
-- Port fidelity reports declare target-supplied timestamps and complete-to-rich verification; Grok tool updates prefer recorded session creation time.
-
-- Codex usage-only records are harness notices; emission rejects overflowing counts and omits totals when components are unknown.
-
-- Goose reports bare model names; providers stay in the Goose metadata bag and never substitute for missing models.
-
-- Claude and OpenClaw compaction boundaries carry no invented text; `show` labels contentless boundaries by kind and marks them synthesized.
-- ZIP uploads reject archives exceeding 10,000 entries, including empty files and directories.
-
-- Library: construct `projection::Counted` with `Counted::new`; `hashing()` captures an optional SHA-256 digest during writes.
-
-- MCP errors for removed properties name their replacement arguments.
-
-- `pack --json` returns bundle content or emitted artifact paths and resume hints without scraping human output.
-
-- Add global `--frozen` (`CV_FROZEN=1`): read without updating cv stores; stream stale events and reject commands that write stores or sessions.
-- Usage cache eviction failures warn once and preserve committed projections; later publications retry eviction.
+**After upgrading, once.**
+- The first listing rediscovers the fleet (announced on stderr; `cv index` does it ahead): a catalog stamped with another `source::VERSION` is dropped and rebuilt.
+- The full-text index's schema names `source::VERSION`: the first `cv index` rebuilds it whole, and `cv search` asks for that until then.
+- Every store, mark, checkpoint and watch state invalidates once: `source::VERSION` 6 is the one version all check; nothing expires per release.
 
 **Listing and counts.** A first `cv ls` lists without counting where counting is not free.
 - `message_count` is `null` (a dash in the table) until a full read or `cv index` certifies it; `0` means a session with no turns.
 - Claude counts at discovery (its record heads are read anyway); Codex, Grok, Kimi, Kimi Code, Qwen, Hermes, Goose and Zed are not counted until then.
-- **Breaking:** an uncounted session's `message_count` was `0`; `ls --json`, `/api/sessions` and search rows now emit `null`.
 - `cv stats` reports "N not counted yet" beside the total (`uncounted` in `--json` and `/api/stats`); `--sort-by messages` (descending) ranks uncounted last.
 - A certified count survives metadata refreshes that leave the source unchanged and is dropped when the source changes.
 - Kimi, Kimi Code and Grok listings take the recorded native title and stop reading at the first fallback prompt.
 - Continue and OpenCode's JSON tree no longer read every history or message file to count at discovery; their `message_count` is `null` until certified.
 - Hermes and Goose listings read session metadata only; Zed projects its snapshot metadata without decoding messages.
 - A listing racing `cv index` waits up to the catalog's 5 s busy timeout for the other writer instead of discarding its discovery update.
-- **Breaking:** `cv archive ls` counts turns like `cv ls`; `catalog.jsonl` rows keep the raw count as `messages_written`; 0.17's rows show a dash until resynced.
+- Cursor legacy listings count readable turns, excluding empty and malformed bubbles.
+- `created:` no longer answers from the update time when a listing lacks a creation time; the parsed session decides, and none means no match.
+- Long-running `serve`, `mcp` and followers resolve Gemini/Qwen projects registered after they started, instead of leaving those sessions without a working directory.
+- Read-only checkpointed catalogs retain writer-version observations and warm listings without accepting publications or bypassing live WAL contents.
+- Builds without `sqlite` count extracted events instead of spooling them to private memory and temporary files that nothing could publish.
+- `ls --json --asc` with a query selects the same sessions as descending, reversed; an absent session no longer takes a window slot.
+- Initialize the sweep catalog before feeding jobs, preventing concurrent cold opens from failing search baseline invalidation.
+- Search refreshes rely on the shared stored-format version; obsolete duplicate-row repair is removed.
+- Boolean search filters load affordance counts only when metadata and indexed text cannot decide a row.
+- Semantic indexing caps transcript heads at 64 KiB of decoded text, independent of JSON escaping, with bounded heap.
 
 **Reading.**
+- Add global `--frozen` (`CV_FROZEN=1`): read without updating cv stores; stream stale events and reject commands that write stores or sessions.
 - OpenSession validates each turn before streaming delivery, keeping discarded history bounded in memory while rejecting late invalid turns before callbacks.
 - Goose, Hermes, Kimi, Kimi Code and Qwen boundaries carry no invented text; labels show their kind and mark cv-inferred turns as synthesized.
+- Claude and OpenClaw compaction boundaries carry no invented text; `show` labels contentless boundaries by kind and marks them synthesized.
 - Cursor and LM Studio (Harmony) tool calls without native IDs receive declared position-derived IDs: `cv:<format>:<position>`.
 - Codex tool results use only recorded status, removing invented `completed` and `error` values.
+- Codex usage-only records are harness notices; emission rejects overflowing counts and omits totals when components are unknown.
 - Zed reports the recorded model; the provider moves to `extra.zed.provider` and never substitutes for a missing model.
-- **Breaking:** `extra.openclaw` keys copied from records keep native camelCase (`stopReason`, `customType`, `error.errorCode`); `custom_details` and `branch_from_id` become `details` and `fromId`.
-- **Breaking:** an IR or OpenSession 0.3 message without `kind` or `origin` is refused instead of inferred from its role; cv has written both since 0.11.
+- Goose reports bare model names; providers stay in the Goose metadata bag and never substitute for missing models.
 - Codex outputs beginning `[error] ` stay verbatim unless cv wrote the rollout; only cv provenance enables the error sentinel.
 - `cv distill` and `cv adopt --model` share the `general-purpose` agent type default, applied only when the source names none.
-- **Breaking (library):** `ParseOptions` and `ExtraProjection` become `Demand { tier, spans, offsets }`; the five `Watcher` poll methods become `poll`/`try_poll(Poll { .. })`.
 - Gemini, Qwen, Goose, Grok, LM Studio, OpenClaw and OpenCode report the model on every turn the harness wrote it; windowed reads no longer lose it.
-- **Breaking (library):** `Adapter::resume`, `try_resume` and `resume_format` become `Adapter::transcript(r, demand, Start, sink)`; `append_only` returns `bool`; JSONL transcripts share one driver.
 - A reader checks its source after a slow callback, per mapped window, at a checkpoint and at EOF; a replacement detected there is an error.
 - Native Codex file-change records feed `cv touched`, tool histograms and query facts, including code-mode edits, without duplicating visible patch calls.
 - `cv index --subagents` folds the sub-agent forest from stat-keyed metadata instead of re-parsing every transcript each pass.
@@ -134,7 +124,13 @@
 - Hermes keeps generation membership in private indexed storage while preserving exact duplicate detection and lazy message bodies.
 - Repeated OpenClaw parent lookups share private indexed facts; one-query operations keep native startup cost, query order, malformed values, and source guards.
 - Claude reads report source deletion or replacement during callbacks even after an intentional stop with owned content.
-- Preserve untouched native records while sharing Claude prune, rewind, and adoption derivation.
+- Gemini JSONL reads report source mutation even when the final consumer callback also fails.
+- OpenCode JSON-file reads avoid retaining duplicate part inventories while preserving source-change checks and bounded dataset selection heap.
+- Qwen checkpoints keep their facts under the `qwen` bag and Qwen part decoding, no longer under `gemini`.
+- Compressed Codex rollouts read through the independent `zstd` feature; a build without it reports the source unreadable instead of parsing compressed bytes as JSONL.
+- ZIP uploads reject archives exceeding 10,000 entries, including empty files and directories.
+- `cv blame -L` says when its commit list was cut, has its own no-commit message, and marks an empty commit message `(no message)`.
+- `cv blame` spells sub-agent sessions in full in every `cv show` hint, not only under exact matches.
 - Claude Code 2.1.304 corpus: the request ledger (`api-request`, `-shape`, `-blob`), `isolation-latch` and unknown record types are carried, never read as turns.
 - A Claude fork sub-agent's `fork-context-ref` sets `lineage.forked_from` and `extra.claude.fork_context`; a retried request's `api_error` renders as an error line.
 - Claude Code 2.1.304 is the verified writer: its corpus (request ledger, fork sub-agent, retried request, `--max-turns`) is committed and golden-tested.
@@ -148,17 +144,21 @@
 - `has:skill` and `--kind affordances` count a Claude skill loaded by slash command (its "Base directory for this skill:" body), once per activation.
 - Kimi Code: the latest `TodoList` state is a `plan/state` row; legacy `Agent`/`AgentSwarm` calls are spawns and their completed or failed results returns.
 - Roo: a `new_task` result carried beside user text is a `subagent_return` detail; the turn stays a prompt.
-- **Breaking (library):** `affordance::Returns` gains `ResultInPrompt`, the spawn-table row for Roo's `new_task`.
-- **Breaking (library):** `SubagentEnd`, `ApiErrorNotice` and `TaskNotice` move from `harness::claude` to `lanes`.
+- Tool-filtered histograms correlate all calls before selection, preserving edit counts and failing if required correlation arguments are unreadable.
+- Reconcile native edits by call and resolved path; honor tool working directories and avoid guessing relative paths in compound shell commands.
 
 **Reshaping.**
+- `cv splice --generate` rejects an empty chat completion from OpenRouter or LM Studio, as digests already did, instead of appending an empty turn.
+- With `CV_PACK_LLM` set and no LLM provider configured, `cv pack`'s warning names `LMSTUDIO_API_BASE` alongside the two API keys.
+- `pack --json` returns bundle content or emitted artifact paths and resume hints without scraping human output.
+- `prune`, `rewind`, and `port` accept `--skills keep|drop|drop-stale`, including legacy command-file skills; the default preserves restored skills unchanged.
+- Preserve untouched native records while sharing Claude prune, rewind, and adoption derivation.
 - Hermes and OpenCode exports reject unreadable sources before creating output directories or databases, while retaining transaction publication guards.
-- `cv prune`, `cv rewind` and agent adoption refuse a source line that is not one JSON record instead of copying it; blank lines pass.
-- `cv prune`, `cv rewind` and agent adoption copy an empty line as blank instead of failing with "JSON range is empty".
+- `cv prune`, `cv rewind` and adoption refuse a line that is not one JSON record, instead of copying it; empty and blank lines stay blank.
 - `cv prune` refuses an empty or blank-only transcript; it published a one-newline session. Minted prune and rewind ids are UUID v7.
 - `cv prune`, `cv rewind`, `cv adopt` and Claude ports verify the staged session resumes before publishing; a break its source lacks refuses and leaves nothing.
 - `cv rewind` copies to the end of the file (`cost-state` and other tail records were dropped).
-- `cv rewind` at a cut keeps the cut response's other parallel calls and stops at a result for no open call, so no answered call is left open.
+- `cv rewind` at a cut keeps the response's other parallel calls and stops at a result for no open call, leaving no answered call open.
 - `cv rewind`: an explicit cut omits a malformed later line while closing open calls; an unterminated last line asks for a rerun.
 - `cv rewind` refuses a bodyless turn record only when re-emitting (`--thinking portable`) would drop it; a native copy keeps it.
 - `cv port` to Codex writes the source's recorded `cli_version`, or Codex's empty unknown, instead of cv's own version.
@@ -173,7 +173,13 @@
 - Cline, Roo and Continue emits stage their task or session files, publish the transcript or index last, and roll back on failure.
 - `cv prune --force` and adoption with `--force` put a replaced sidecar or metadata file back when the transcript then fails to publish.
 - Staged emits are not atomic: a crash can leave a published prefix, and a rollback that itself fails is reported.
-- **Breaking (library):** `prune::prune_session` takes the session's `Harness` first; prune and rewind accept a harness whose adapter declares derived copies.
+- Claude, Gemini and Qwen port resume hints are one runnable line, `cd <dir> && <harness> --resume <id>`, instead of a command plus prose.
+- Qwen emission preserves absent cache counts and incomplete totals, and rejects overflowing usage aggregates.
+- OpenCode emission keeps unknown working directories empty instead of substituting the invoking process’s directory.
+- Port fidelity reports declare target-supplied timestamps and complete-to-rich verification; Grok tool updates prefer recorded session creation time.
+- A refused write after a failed JSONL record names that record and its cause, instead of only saying the stage failed.
+- A refused exclusive rename says whether the platform lacks it or the kernel/filesystem declined, with the OS error, instead of blaming the filesystem.
+- Multi-file publication reports destination metadata failures before replacing files.
 
 **Doctor and hooks.**
 - `cv doctor` adds a Writer versions row: the newest Claude/Codex version seen in the stores versus the newest the corpus verified, plus unknown sessions.
@@ -183,39 +189,26 @@
 - The Codex edit guard no longer denies a patch over a file edited by the same root thread's parent or sub-agents.
 - `cv hooks` and `cv hook --harness` accept every spelling `--harness` does (`cc`, `claude-code`).
 - `cv lanes --recent N` reads Codex sessions too (every harness whose hooks record lanes), not only Claude's.
-- **Breaking:** installed hooks run `cv hook <name> --harness <h>`; `$CV_HOOK_HARNESS` exits 2 with a pointer to `cv hooks install codex`.
 
 **Waiting commands.**
-- **Breaking:** `cv scry` with stdout piped prints the sessions it would follow once and exits 0; `--follow` keeps following, `--for 30s|5m|2h` bounds it.
 - Every waiting command announces what it waits for on stderr within a second, before its first discovery; daemons print their ready line first.
 - `cv workflow --follow` gains `--for <duration>`: stop after that long and render the run as it stands.
 - `cv hook` with a terminal on stdin exits 2 with usage; `cv mcp` and `cv task … -` say what they are reading.
-- MCP tools generated from the CLI omit `--follow` (no Ctrl-C in a tool call); a `follow` argument is refused with a pointer to `for`.
 - `tests/announce.rs` pins it: every command on a pipe exits within 5 s or is a daemon that announced within the 3 s test allowance.
-- **Breaking:** watch and `observe_stream` cursors are version 2 (one mark per position); a 0.17 cursor starts a fresh baseline.
-- `ls --json --asc` with a query selects the same sessions as descending, reversed; an absent session no longer takes a window slot.
-- **Breaking:** a tag-only `decision` (nothing posed, written before 0.15) reads as an assigned action, not a decision owed; the page's tagged-decision card is gone.
+- Followers announce a session unreadable when they started as new once it reads, instead of tracking it from a guessed message count.
 - `cv events` keeps every extracted event; the per-message `(kind, target)` dedup inherited from 0.9.10's unique index is gone.
 - A follower cursor's byte mark on a compressed Codex rollout no longer resumes from a decoded-stream prefix; it is unresolved, like any non-append-only session.
 
 **Removed.**
-- **Breaking:** `$CLAURDVOYANT_HOME` and `$CLAURDVOYANT_MAX_STALE_SECS` exit 2 with a pointer to the `CLUSTERVISION_` names; the `claurdvoyant` config, cache and home directories are no longer read.
-- **Breaking:** `cv rewind --from-compaction` (the default start, never a switch) exits 2 with a pointer to `--full`.
-- **Breaking:** `cv deferrals --since <msg>` is `--at <msg>` (`--since` is a duration on `lanes`); the old spelling exits 2 with a pointer.
-- **Breaking:** `cv dataset --out <path>` is `--file <path>` (`--out` is a directory everywhere else); the old spelling exits 2 with a pointer.
 - `cv watch --interval` takes seconds as a number like `scry`; a negative `--interval` on either exits 2 instead of clamping.
-- **Breaking:** `cv tools --agent` takes an exact id or unique prefix on every view, else exits 2; `--across` with `--agent`, `--tool` or `--timeline` exits 2.
 - `cv pack --format` is checked by the parser: an unknown value exits 2 and names the choices (`md`, `prompt`, `session`).
-- **Breaking:** an unknown `cv task events --kind` (or `/api/events?kind=`) exits 2 (400) naming the known kinds; it used to list nothing.
-- **Breaking:** `cv workflow` exits 2 where it dropped flags: run-only flags with no run named, `--revive-all` without `--revive`, `--revive` with `--json`.
 - `cv search` no longer mentions a leftover `index.sqlite`; the sqlite full-text index was retired long ago.
-- cv-core: `catalog::fill_count` is gone; nothing called it since a complete read certifies counts in the counts record.
+- MCP errors for removed properties name their replacement arguments.
 
 **Skips: counted, reported, or warned once.**
 - A source discovery cannot open (an unreadable dir, a locked or corrupt database) is no longer silently empty: `cv doctor` names it.
 - `cv doctor --json` gains `skipped_sources` when discovery skipped any; per-file `cv: skipping` lines become one stderr summary.
 - When the catalog cannot record discovery's skipped sources, cv says so once on stderr; `cv doctor` shows the previous list.
-- **Breaking (library):** `Adapter::discover` returns `Discovered { refs, skipped }`; an out-of-tree adapter returns `Ok(refs.into())`.
 - A catalog, usage cache or scan cache that cannot open prints one stderr line per process; a failed open is retried, never remembered.
 - Devin, Hermes and Goose sessions whose row vanished error instead of reading as an empty session.
 - Zed's unreadable `threads.db` lists nothing and is named by `cv doctor`, instead of failing discovery and keeping the old listing.
@@ -229,17 +222,29 @@
 - `cv index`/`cv search` stderr speaks as `cv:` only; a hit whose source cannot be read is named in the search's note, not silently previewed.
 - An unreadable or malformed `config.toml` is said once per process (`cv: the config file unavailable…`) and no longer read as absent silently.
 - cv no longer mentions a leftover pre-0.9.12 `discover.json`; delete it by hand if one remains.
-- **Breaking:** a `-q` with `text:` and no full-text index exits 2 naming `cv index` (`/api/stats`: 503) instead of matching nothing.
 - `cv archive`'s resume state that exists but cannot be read is said once on stderr; the session is re-read.
 - `cv pack`'s opportunistic event ingest says once on stderr when it fails instead of dropping the error twice.
 - `cv workflow --revive` says when a lane's transcript read stopped early; `LaneWork` gains `unread`.
 - `cv workflow` claims no ghost launch for a session whose run-state file cannot be read; it names that file once on stderr.
 - `cv ls --json --enrich`: a row whose transcript cannot be read carries `enrich_error` instead of looking unenriched.
 - `cv search --scan` skips a session it cannot read and names the unscanned sources in its note, instead of failing the whole scan.
-- **Breaking (library):** `harness::wire::openai::tool_calls` returns `Result`; an entry that fails to decode is an error, not a shorter list.
 - `cv formats` reports each harness's first parse error (`first_error` in `--json`) beside the count.
-- **Breaking:** `cv events`, `cv touched`, `cv blame` and their HTTP routes fail on an event-catalog error instead of answering empty.
-- **Breaking (library):** `events::events_for`, `sessions_touching`, `sessions_editing` and `edits_touching_file` return `Result`.
+- String-entry readers preserve named read failures; a malformed legacy Codex `.json` rollout is a named read failure, skipped in listings, never an empty session.
+- Codex and Gemini string parsing and uploaded-file ingestion return codec failures instead of successful partial sessions.
+- Claude reports malformed nonblank JSONL records in `cv.skipped_lines`, including incomplete trailing records.
+- Compaction scans report a failed summary read with its full cause chain instead of a flattened one-line copy.
+- Desktop ZIP imports report transcript decoding errors instead of attempting to serialize an ingestion result.
+- `cv cat` reports corrupt sidecar reads instead of attributing them to `--drop`.
+- `cv events --subagents` reports unreadable agent transcripts with their identity and path.
+- Archive watch uses source-path adapters, fails unavailable adapters, and names retryable reads; archive listing reports corrupt catalog line numbers.
+- Indexing rejects unreadable persisted outputs; search propagates metadata query failures and names optional index-metadata failures before retrying.
+- Usage-cache read, publication, commit and rollback failures report named diagnostics and retry without publishing partial projections.
+- Catalog and scan-cache failures warn once; catalog schema replacement commits its tables and version stamp atomically.
+- Native database listings and reads report failed row decoding; OpenCode reports database discovery failures and Zed rejects unreadable listing cells.
+- Failed partial spill-index reads preserve cached membership data for safe retry and eviction.
+- Failed spill appends truncate partially written bytes while preserving valid buffered keys; cleanup failures prevent unsafe reuse.
+- Usage cache eviction failures warn once and preserve committed projections; later publications retry eviction.
+- `cv serve` treats a response body longer than its Content-Length as a failed response and closes the connection, instead of silently dropping the excess.
 
 **Tooling and CI.**
 - `cv schema --json` lists `routes`: every HTTP method/path pattern `cv serve` answers, from the routers' own tables.
@@ -253,48 +258,8 @@
 - macOS runs nightly and on rc tags: APFS identity, publish, SQLite and mmap gates; a separate workflow smokes the published Darwin artifact natively.
 - `tools/dump-hash.sh` streams one sha256 per command, session and demand over `tools/dump-hash.manifest`: the byte-identity gate for output-preserving changes.
 - Shared modules in cv-core, `cv` and cv-search name a harness, even through an alias, only inside exhaustive matches; new `Adapter` methods have defaults.
-
-**Breaking (library): cv-core, cv-search and cv-testkit APIs.** Rust callers migrate as follows; the CLI, HTTP and MCP are unaffected.
-- Transcript text over 4 KiB is `Text::Source` (checked); `Span` is wire form only, a JSON string body; malformed escapes error instead of decoding lossily.
-- `emit::Delta {field, before, after}` and `formats::Finding` become one `emit::Divergence {what, a, b, expected, at}`; serialized, `at` is `where` and `FidelityReport.deltas` elements change keys.
-- `SubagentInfo` and `claude::subagent_refs` become `ir::AgentRef` and `subagent_tree_of`; `claude::CARRIER_KEY` is `ir::CARRIER_KEY`.
-- Modules move: `handoff` is `codex_handoff`, `loom` is `splice`, `harness::harmony` is `harness::wire::harmony`.
-- `Watcher::run` is gone (callers own scheduling around `poll`); `poll_sources` is `offer_sources`.
-- `cline::discover_in` returns `Discovered`; `cline_sdk::discover` takes `&mut Discovered` and fills it instead of returning refs.
-- `distill::distill` splits into `prepare_distill` and `distill_pack`; `Session::first_user_text` and `searchable_text` are gone.
-- `SearchRow::to_json` is `to_json_with(&SearchRowContext)`; `scan::live_search` is `live_search_filtered`; `lazy::read_head` is `read_head_checked`, returning `Result`.
-- `RedactOptions.keep_emails` is `classes.emails`, inverted: `false` keeps emails. `task::AppendOutcome.replay_warnings` (always empty) is gone.
-- `source::Published` becomes `Record<T>`; `Table<T: Payload>`, `get` returns a `Record`, `admit` replaces `published`/`fresh`; `update` is generic.
-- `affordance::{unwrap,rewrap}_deferred` take a `DeferredWrapper`, not a `Harness`; `wire::anthropic`'s owned `Texter`/`block_from*`/`blocks_from` helpers are gone.
-- `publish::retract` is gone: a `publish::Set` owns grouped rollback. `EmitOptions` gains `parsed_at`, so exhaustive struct literals break.
-- cv-search's root `text_search*`, `enrich_text_snippets`, `embed_all` and `semantic_search_filtered` become `Searcher::{search, search_in}` and `embed_sessions`.
-- `fts::enrich_text_snippets` returns `Result<Option<String>>` (a degradation note). New fields (`Stats.uncounted`, `HarnessCensus.first_error`, `LaneWork.unread`) break exhaustive literals.
-- cv-testkit: `heap::begin`/`end` return a `Measurement` instead of a `usize`.
-- `source::rename_consumer` is gone: a consumer missing its baselines under a new identity rereads the source instead of migrating them.
-- `query::WindowPresence` is gone: `filter_refs_limited` drops its presence argument and always skips absent sources before choosing the window.
-- `lanes::Lane.status` is a `LaneStatus` (`Running`, `Stopped`, `Returned`, `Recorded(word)`; `as_str` and JSON unchanged); `LaneEvent.event` is `LaneEventKind`.
-- `MessageSink::extra_projection` is `MessageSink::tier`, returning a `Tier`; a sink that overrode it overrides `tier`.
-- `one_agent_across` returns `Result<bool>`: an unreadable forest is an error, not `false`.
-- `wire::harmony::decode_content` takes a call-id generator; derive position ids with `ir::derived_call_id`.
-- `export::ChatGptExport`, `ClaudeExport` and their `with_roots` are gone; use `harness::for_harness_with_root(Harness::ChatGptExport, dir)` (or `ClaudeExport`).
-- `codex::parse_str`, `gemini::parse_all_str`, `parse_all_str_for` and `ingest::ingest_files` return `Result`; a codec failure is an error, not a partial session.
-- `affordance::classify_tool` is private and `items_of`/`item_of` are gone; use `classify_tool_json`/`classify_tool_view` and `items_of_view`/`item_of_view`.
-- `projection::Head::push` returns `bool`, `true` once the budget is full, so a caller stops feeding text.
-- `lazy::json_string_span` is gone (adapters build `Text::Source`); `try_resolve_prefix` budgets decoded bytes, not raw (`max_raw` is `max`).
-- `html::share_message_with_resolver` is `share_message(.., resolver)`; `redact::scrub_value`/`scrub_cow` are private: use `redact_with`, `redact_message` or `redact_text`.
-- `resume::version` returns `String`, not `Option<String>`; `resume::MarkUpdate` is a struct `{session, mark}`, not a tuple.
-- `EmitOptions.sidechain_of` is `Option<SidechainOf {root, agent}>`; `PruneOptions`/`RewindOptions` gain `skills_policy` and their results `skills`, breaking exhaustive literals.
-- `lanes::STRAND_PATTERNS` is private: `lanes::text_is_waiting` is the strand check.
-- `ForestTools::for_workflow` is gone; `tools::forest_tools_selected(r, None, Some(run_id), None)` reads only that workflow.
-- `query::HAS_FLAGS` rows are `(name, help, Cost)` triples; destructuring code takes three fields.
-- `task::store::append_agent_event` (the free function) is gone; call `TaskStore::default_store().append_agent_event(event)`.
-- `Env::enter_isolated` returns `Isolated(armed, Scope)`, which derefs to the scope, instead of a bare `Scope`.
-- cv-testkit: `claude::user` takes the session id first: `user(sid, uuid, ts, text)`.
-
-**After upgrading, once.**
-- The first listing rediscovers the fleet (announced on stderr; `cv index` does it ahead): a catalog stamped with another `source::VERSION` is dropped and rebuilt.
-- The full-text index's schema names `source::VERSION`: the first `cv index` rebuilds it whole, and `cv search` asks for that until then.
-- Every store, mark, checkpoint and watch state invalidates once: `source::VERSION` 6 is the one version all check; nothing expires per release.
+- Restore standalone wasm and no-default-features builds by gating the SQLite-only compaction resolver constructor.
+- Document `cv events` catalog writes and `--frozen`; update the manual for 0.18 counts, flags, diagnostics and migrations.
 
 ## 0.17.0 — 2026-10-17 — stream, never materialize
 
