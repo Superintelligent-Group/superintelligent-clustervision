@@ -147,12 +147,12 @@ pub(super) fn source_tracked(path: &Path, sink: &mut dyn crate::MessageSink) -> 
                 .and_then(|n| n.to_str())
                 .is_some_and(|n| n.ends_with(".jsonl") && !n.ends_with(".flat.jsonl"))
         })
-        .filter(|p| p.is_file())
         .filter(|p| {
             sink.dependency(p);
-            // Live at the copied record's time: written since.
-            modified(p).is_some_and(|m| m >= at)
+            p.is_file()
         })
+        // Live at the copied record's time: written since.
+        .filter(|p| modified(p).is_some_and(|m| m >= at))
         .filter_map(|p| {
             let h = head(&p)?;
             let first = h.at?;
