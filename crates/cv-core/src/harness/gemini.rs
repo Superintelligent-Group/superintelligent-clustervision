@@ -264,13 +264,29 @@ fn project_cwd(path: &Path) -> Option<PathBuf> {
 /// `short-id → project path`, one map per runtime root.
 type Registry = std::sync::Arc<std::collections::HashMap<String, PathBuf>>;
 
-/// The [`Registry`] for one runtime root, read once per process.
+/// What a [`Registry`] read saw: the modification times of the three places it reads from.
+/// `tmp/` and `history/` move when a project directory (and so its marker) is added or removed
+/// under them; `projects.json` moves when the map is rewritten.
+type RegistryStamp = [Option<std::time::SystemTime>; 3];
+
+fn registry_stamp(runtime: &Path) -> RegistryStamp {
+    ["tmp", "history", "projects.json"].map(|name| fs::metadata(runtime.join(name)).and_then(|m| m.modified()).ok())
+}
+
+/// The [`Registry`] for one runtime root, read once and re-read when its stamp moves, so a
+/// long-lived process (`serve`, `mcp`, a follower) resolves projects registered after it started.
 fn registry_for(runtime: &Path) -> Registry {
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex, OnceLock};
-    static CACHE: OnceLock<Mutex<HashMap<PathBuf, Registry>>> = OnceLock::new();
+    static CACHE: OnceLock<Mutex<HashMap<PathBuf, (RegistryStamp, Registry)>>> = OnceLock::new();
     let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    if let Some(hit) = cache.lock().ok().and_then(|c| c.get(runtime).cloned()) {
+    let stamp = registry_stamp(runtime);
+    let hit = cache.lock().ok().and_then(|c| {
+        c.get(runtime)
+            .filter(|(seen, _)| *seen == stamp)
+            .map(|(_, registry)| registry.clone())
+    });
+    if let Some(hit) = hit {
         return hit;
     }
     let mut map: HashMap<String, PathBuf> = HashMap::new();
@@ -302,7 +318,7 @@ fn registry_for(runtime: &Path) -> Registry {
     }
     let arc = Arc::new(map);
     if let Ok(mut c) = cache.lock() {
-        c.insert(runtime.to_path_buf(), arc.clone());
+        c.insert(runtime.to_path_buf(), (stamp, arc.clone()));
     }
     arc
 }
@@ -1930,6 +1946,34 @@ mod tests {
             .content
             .iter()
             .any(|b| matches!(b, Block::ToolResult { content, .. } if content.matches_str("4") == Some(true))));
+    }
+
+    #[test]
+    fn a_project_registered_after_the_first_lookup_resolves() {
+        let world = crate::test_world("gemini-registry-refresh");
+        let runtime = world.base.join("runtime");
+        // Each change gets its own whole-second mtime: a filesystem with a coarse clock could
+        // otherwise stamp two steps alike.
+        let at = |path: &Path, second: u64| {
+            let when = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000 + second);
+            fs::File::open(path).unwrap().set_modified(when).unwrap();
+        };
+        let mark = |id: &str, root: &str, second: u64| {
+            let dir = runtime.join("tmp").join(id);
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(dir.join(".project_root"), root).unwrap();
+            at(&runtime.join("tmp"), second);
+        };
+        mark("first", "/work/first", 1);
+        assert_eq!(registry_for(&runtime).get("first"), Some(&PathBuf::from("/work/first")));
+        mark("second", "/work/second", 2);
+        assert_eq!(
+            registry_for(&runtime).get("second"),
+            Some(&PathBuf::from("/work/second"))
+        );
+        fs::write(runtime.join("projects.json"), r#"{"projects":{"/work/moved":"first"}}"#).unwrap();
+        at(&runtime.join("projects.json"), 3);
+        assert_eq!(registry_for(&runtime).get("first"), Some(&PathBuf::from("/work/moved")));
     }
 
     /// Qwen writes gemini-cli's checkpoint shape; what cv derives from one belongs in Qwen's bag

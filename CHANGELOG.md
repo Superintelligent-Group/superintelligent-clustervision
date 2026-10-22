@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Long-running `serve`, `mcp` and followers resolve Gemini/Qwen projects registered after they started, instead of leaving those sessions without a working directory.
 - Qwen checkpoints keep their facts under the `qwen` bag and Qwen part decoding, no longer under `gemini`.
 - Builds without `sqlite` count extracted events instead of spooling them to private memory and temporary files that nothing could publish.
 - Followers announce a session unreadable when they started as new once it reads, instead of tracking it from a guessed message count.
