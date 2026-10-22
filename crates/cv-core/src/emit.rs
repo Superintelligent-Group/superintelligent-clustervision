@@ -1484,8 +1484,7 @@ mod tests {
         let emit_main = |s: &Session| {
             let out = temp_dir();
             let res = emit(s, Harness::Claude, &out, &EmitOptions::default()).unwrap();
-            let text = fs::read_to_string(&res.path).unwrap();
-            text
+            fs::read_to_string(&res.path).unwrap()
         };
         let t = emit_main(&src);
         assert!(!t.contains("\"t3\""), "the unanswered trailing call is dropped: {t}");
