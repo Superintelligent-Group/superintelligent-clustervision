@@ -552,7 +552,7 @@ mod tests {
         crate::catalog::open_db()
     }
 
-    fn fixture(tag: &str) -> (cv_testkit::InProcess<crate::env::Scope>, SessionRef) {
+    fn fixture(tag: &str) -> (cv_testkit::InProcess<crate::env::Isolated>, SessionRef) {
         let world = crate::test_world(tag);
         let path = world.base.join("source.jsonl");
         std::fs::write(&path, "source").unwrap();

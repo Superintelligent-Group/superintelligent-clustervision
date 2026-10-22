@@ -745,7 +745,7 @@ fn ambiguous<'a>(id: &str, hits: impl Iterator<Item = &'a SessionRef>) -> anyhow
 
 /// A hermetic world whose environment this thread's library calls read (see [`env`]).
 #[cfg(test)]
-pub(crate) fn test_world(tag: &str) -> cv_testkit::InProcess<env::Scope> {
+pub(crate) fn test_world(tag: &str) -> cv_testkit::InProcess<env::Isolated> {
     cv_testkit::World::in_process(tag, env::Env::enter_isolated)
 }
 
