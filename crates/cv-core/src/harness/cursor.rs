@@ -222,15 +222,11 @@ impl Adapter for Cursor {
 
     fn stream(&self, r: &SessionRef, opts: &Demand, sink: &mut dyn MessageSink) -> Result<Session> {
         crate::stream::checked(sink, |sink| {
-            // `path` is the DB the thread lives in. Legacy refs carry a `legacy:` id prefix. CLI
-            // stores record their own compound provenance (main DB, WAL, ACP head) in
-            // `cli::read_with_reads`; these workspace-DB sidecars are not theirs to watch.
-            if !r.id.starts_with("cli:") {
-                for suffix in ["-wal", "-journal"] {
-                    let mut path = r.path.as_os_str().to_os_string();
-                    path.push(suffix);
-                    sink.dependency(&PathBuf::from(path));
-                }
+            // `path` is the DB the thread lives in. Legacy refs carry a `legacy:` id prefix.
+            for suffix in ["-wal", "-journal"] {
+                let mut path = r.path.as_os_str().to_os_string();
+                path.push(suffix);
+                sink.dependency(&PathBuf::from(path));
             }
             let conn = open_ro(&r.path)?;
             conn.read(|conn, reads| {

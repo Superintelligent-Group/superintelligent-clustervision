@@ -264,31 +264,13 @@ fn project_cwd(path: &Path) -> Option<PathBuf> {
 /// `short-id → project path`, one map per runtime root.
 type Registry = std::sync::Arc<std::collections::HashMap<String, PathBuf>>;
 
-/// What a runtime root's registry read saw: the root dir's own mtime (markers created or removed
-/// directly under it) and `projects.json`'s (the map rewritten).
-type RegistryStamp = (Option<std::time::SystemTime>, Option<std::time::SystemTime>);
-
-fn registry_stamp(runtime: &Path) -> RegistryStamp {
-    let modified = |p: &Path| fs::metadata(p).and_then(|m| m.modified()).ok();
-    (modified(runtime), modified(&runtime.join("projects.json")))
-}
-
-/// The [`Registry`] for one runtime root, read once per process — and re-read when the root's
-/// stamp moves, so a long-lived reader sees registrations made after it started.
+/// The [`Registry`] for one runtime root, read once per process.
 fn registry_for(runtime: &Path) -> Registry {
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex, OnceLock};
-    static CACHE: OnceLock<Mutex<HashMap<PathBuf, (RegistryStamp, Registry)>>> = OnceLock::new();
+    static CACHE: OnceLock<Mutex<HashMap<PathBuf, Registry>>> = OnceLock::new();
     let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    let stamp = registry_stamp(runtime);
-    let hit = match cache.lock() {
-        Ok(c) => c
-            .get(runtime)
-            .filter(|(seen, _)| *seen == stamp)
-            .map(|(_, registry)| registry.clone()),
-        Err(_) => None,
-    };
-    if let Some(hit) = hit {
+    if let Some(hit) = cache.lock().ok().and_then(|c| c.get(runtime).cloned()) {
         return hit;
     }
     let mut map: HashMap<String, PathBuf> = HashMap::new();
@@ -320,7 +302,7 @@ fn registry_for(runtime: &Path) -> Registry {
     }
     let arc = Arc::new(map);
     if let Ok(mut c) = cache.lock() {
-        c.insert(runtime.to_path_buf(), (stamp, arc.clone()));
+        c.insert(runtime.to_path_buf(), arc.clone());
     }
     arc
 }
@@ -353,7 +335,7 @@ pub(crate) fn scan_session_file(path: &Path, harness: Harness) -> Result<Vec<Ses
         return Ok(vec![r]);
     } else if is_checkpoint(&name) {
         let text = fs::read_to_string(path)?;
-        if let Some(s) = parse_checkpoint(harness, &text, &name, Some(path.to_path_buf()))? {
+        if let Some(s) = parse_checkpoint(&text, &name, Some(path.to_path_buf()))? {
             return Ok(vec![session_ref(&s, path, harness)]);
         }
     }
@@ -396,7 +378,7 @@ pub(crate) fn stream_for(
 
     // Bounded shapes (checkpoints, logs.json): a few KB–MB, never the OOM risk. Bridge through a
     // whole-Session parse and replay its messages into the sink.
-    let mut session = parse_bounded(harness, r, &name)?;
+    let mut session = parse_bounded(r, &name)?;
     session.harness = harness;
     let messages = std::mem::take(&mut session.messages);
     sink.meta(&session);
@@ -411,11 +393,11 @@ pub(crate) fn stream_for(
 /// Whole-`Session` parse for the bounded (non-streamed) shapes: gemini-cli checkpoints and
 /// `logs.json` (many sessions per file — picks the one matching `r.id`). These are small enough
 /// to materialize.
-fn parse_bounded(harness: Harness, r: &SessionRef, name: &str) -> Result<Session> {
+fn parse_bounded(r: &SessionRef, name: &str) -> Result<Session> {
     let text = fs::read_to_string(&r.path).with_context(|| format!("reading {}", r.path.display()))?;
     // Checkpoint: one session per file.
     if is_checkpoint(name) {
-        if let Some(s) = parse_checkpoint(harness, &text, name, Some(r.path.clone()))? {
+        if let Some(s) = parse_checkpoint(&text, name, Some(r.path.clone()))? {
             return Ok(s);
         }
     }
@@ -864,9 +846,7 @@ fn parse_all_str_inner(harness: Harness, text: &str, source_path: Option<PathBuf
                 .any(|it| it.get("role").is_some() && it.get("parts").is_some())
         });
     if checkpoint_shaped {
-        return Ok(checkpoint(harness, (&value).into(), "", source_path)?
-            .into_iter()
-            .collect());
+        return Ok(checkpoint((&value).into(), "", source_path)?.into_iter().collect());
     }
     Ok(Vec::new())
 }
@@ -1064,20 +1044,14 @@ struct EmitState {
 
 /// Parse a gemini-cli checkpoint into an IR [`Session`]. The id is derived from the `checkpoint-<tag>`
 /// filename when available (the `tag` is percent-encoded by gemini-cli; we decode it best-effort).
-fn parse_checkpoint(
-    harness: Harness,
-    text: &str,
-    file_name: &str,
-    source_path: Option<PathBuf>,
-) -> Result<Option<Session>> {
+fn parse_checkpoint(text: &str, file_name: &str, source_path: Option<PathBuf>) -> Result<Option<Session>> {
     let Ok(value) = serde_json::from_str::<Value>(text) else {
         return Ok(None);
     };
-    checkpoint(harness, (&value).into(), file_name, source_path)
+    checkpoint((&value).into(), file_name, source_path)
 }
 
 fn checkpoint(
-    harness: Harness,
     view: crate::json::JsonView<'_>,
     file_name: &str,
     source_path: Option<PathBuf>,
@@ -1093,7 +1067,7 @@ fn checkpoint(
     let id = checkpoint_id(file_name);
     let resolver = crate::lazy::Resolver::new(None);
     let parts_demand = record::Demand {
-        harness,
+        harness: Harness::Gemini,
         source: None,
         resolver: &resolver,
     };
@@ -1165,9 +1139,9 @@ fn checkpoint(
         title,
         messages,
         source_path,
-        ..Session::new(id, harness)
+        ..Session::new(id, Harness::Gemini)
     };
-    let bag = s.harness_extra_mut(harness);
+    let bag = s.harness_extra_mut(Harness::Gemini);
     crate::affordance::note_checkpoints(bag, 1, []);
     if let Some(cp) = bag
         .get_mut(crate::affordance::CHECKPOINTS_KEY)
@@ -1930,7 +1904,7 @@ mod tests {
     #[test]
     fn parses_checkpoint_history() {
         let text = fixture("checkpoint.json");
-        let s = parse_checkpoint(Harness::Gemini, &text, "checkpoint-my%20tag.json", None)
+        let s = parse_checkpoint(&text, "checkpoint-my%20tag.json", None)
             .unwrap()
             .expect("checkpoint");
         assert_eq!(s.id, "checkpoint-my tag");
@@ -2613,9 +2587,7 @@ mod tests {
     #[test]
     fn a_merged_checkpoint_turn_splits_the_preamble_from_the_prompt() {
         let text = r#"{"history":[{"role":"user","parts":[{"text":"<session_context>\nctx\n</session_context>"},{"text":"Say saved."}]},{"role":"model","parts":[{"text":"saved"}]}]}"#;
-        let s = parse_checkpoint(Harness::Gemini, text, "checkpoint-x.json", None)
-            .unwrap()
-            .unwrap();
+        let s = parse_checkpoint(text, "checkpoint-x.json", None).unwrap().unwrap();
         assert_eq!(
             kinds(&s),
             vec![
