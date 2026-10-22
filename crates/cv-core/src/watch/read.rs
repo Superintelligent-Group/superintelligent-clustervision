@@ -314,7 +314,7 @@ impl stream::MessageSink for Tail<'_> {
                 }
                 .is_some_and(|span| span.source.is_none())
             });
-            source::record_message_reads(&message, &self.primary, &mut self.materialized_reads);
+            source::record_message_reads(&message, Some(&self.primary), &mut self.materialized_reads);
             let result = output.try_message(message);
             return match result {
                 Ok(flow) => flow,
@@ -522,7 +522,7 @@ pub(super) fn pass(
     reads.merge(&sink.materialized_reads);
     let resolver = done.session.resolver();
     for message in &mut sink.messages {
-        source::record_message_reads(message, &primary, &mut reads);
+        source::record_message_reads(message, Some(&primary), &mut reads);
         if !retained {
             message.materialize(&resolver)?;
         }
@@ -619,7 +619,7 @@ mod tests {
         let mut message = Message::new(crate::Role::Assistant);
         message.content.push(crate::Block::Text { text });
         let mut text_reads = source::ReadSet::default();
-        source::record_message_reads(&message, &path, &mut text_reads);
+        source::record_message_reads(&message, Some(&path), &mut text_reads);
         message.content = vec![crate::Block::ToolUse {
             id: "call".into(),
             name: "test".into(),
@@ -627,7 +627,7 @@ mod tests {
             input: value,
         }];
         let mut input_reads = source::ReadSet::default();
-        source::record_message_reads(&message, &path, &mut input_reads);
+        source::record_message_reads(&message, Some(&path), &mut input_reads);
         assert!(text_reads.fresh(&mut source::Probe::default()));
         assert!(input_reads.fresh(&mut source::Probe::default()));
         std::fs::write(&sidecar, "created after capture").unwrap();

@@ -413,8 +413,8 @@ impl ReadSet {
 /// Record the original and auxiliary sources retained by one message before a consumer demands it.
 pub(crate) fn session_reads(session: &crate::Session) -> ReadSet {
     let mut reads = ReadSet::default();
-    let primary = session.source_path.as_deref().unwrap_or_else(|| Path::new(""));
-    if session.source_path.is_some() {
+    let primary = session.source_path.as_deref();
+    if let Some(primary) = primary {
         reads.record(primary);
     }
     for message in &session.messages {
@@ -424,15 +424,19 @@ pub(crate) fn session_reads(session: &crate::Session) -> ReadSet {
 }
 
 /// Record the original and auxiliary sources retained by one message before a consumer demands it.
-pub(crate) fn record_message_reads(message: &crate::Message, primary: &std::path::Path, reads: &mut ReadSet) {
+pub(crate) fn record_message_reads(message: &crate::Message, primary: Option<&std::path::Path>, reads: &mut ReadSet) {
+    /// A captured source records its path (unless it *is* the primary) plus its dependencies.
+    fn captured(path: &std::path::Path, deps: Option<&ReadSet>, primary: Option<&std::path::Path>, reads: &mut ReadSet) {
+        if primary != Some(path) {
+            reads.record(path);
+        }
+        if let Some(deps) = deps {
+            reads.merge(deps);
+        }
+    }
     if let Some(record) = &message.complete_record {
         if let crate::Json::Source(range) = &record.value {
-            if range.path() != primary {
-                reads.record(range.path());
-            }
-            if let Some(guard) = range.dependencies() {
-                reads.merge(guard);
-            }
+            captured(range.path(), range.dependencies(), primary, reads);
         }
     }
     for block in &message.content {
@@ -441,12 +445,7 @@ pub(crate) fn record_message_reads(message: &crate::Message, primary: &std::path
             ..
         } = block
         {
-            if range.path() != primary {
-                reads.record(range.path());
-            }
-            if let Some(guard) = range.dependencies() {
-                reads.merge(guard);
-            }
+            captured(range.path(), range.dependencies(), primary, reads);
         }
         let text = match block {
             crate::Block::Text { text } | crate::Block::Thinking { text, .. } => Some(text),
@@ -455,18 +454,11 @@ pub(crate) fn record_message_reads(message: &crate::Message, primary: &std::path
         };
         match text {
             Some(crate::Text::Span(span)) => {
-                if let Some(path) = span.source.as_ref().filter(|path| path.as_path() != primary) {
+                if let Some(path) = span.source.as_ref().filter(|path| Some(path.as_path()) != primary) {
                     reads.record(path);
                 }
             }
-            Some(crate::Text::Source(source)) => {
-                if source.path() != primary {
-                    reads.record(source.path());
-                }
-                if let Some(guard) = source.dependencies() {
-                    reads.merge(guard);
-                }
-            }
+            Some(crate::Text::Source(source)) => captured(source.path(), source.dependencies(), primary, reads),
             _ => {}
         }
     }

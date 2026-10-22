@@ -96,7 +96,7 @@ impl Message {
 
     fn write_json_format(&self, writer: &mut impl Write, resolver: &Resolver, pretty: bool) -> anyhow::Result<()> {
         let mut reads = crate::source::ReadSet::default();
-        crate::source::record_message_reads(self, std::path::Path::new(""), &mut reads);
+        crate::source::record_message_reads(self, None, &mut reads);
         let result = self.serialize(Fields {
             writer,
             resolver,

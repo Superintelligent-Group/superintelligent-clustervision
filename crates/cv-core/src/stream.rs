@@ -957,7 +957,7 @@ impl MessageSink for Counting<'_> {
             return Flow::Stop;
         }
         if let Some(guard) = &mut self.guard {
-            crate::source::record_message_reads(&m, &guard.primary, &mut guard.reads);
+            crate::source::record_message_reads(&m, Some(&guard.primary), &mut guard.reads);
         }
         let flow = self.inner.message(m);
         self.stopped |= flow == Flow::Stop;
