@@ -706,7 +706,7 @@ fn rewind_session_after_scan(
             source = stage.finish()?;
         }
         (source, skills) = skills::apply(source, opts.skills_policy, skills::config_dir_of(&r.path).as_deref())?;
-        bytes_written = source.len()?;
+        bytes_written = source.byte_len()?;
         if let Some(w) = writer.as_mut() {
             source.copy_to(w)?;
         }

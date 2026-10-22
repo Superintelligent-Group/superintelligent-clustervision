@@ -68,15 +68,12 @@ impl Spill {
         let spill = Self {
             file: Some(options.open(&path)?),
             path,
-            linked: true,
+            // Unix unlinks the private path immediately so a reused path survives; other
+            // targets unlink on Drop.
+            linked: !cfg!(unix),
         };
         #[cfg(unix)]
-        let spill = {
-            let mut spill = spill;
-            std::fs::remove_file(&spill.path)?;
-            spill.linked = false;
-            spill
-        };
+        std::fs::remove_file(&spill.path)?;
         Ok(spill)
     }
 }
@@ -238,9 +235,6 @@ impl ByteSource {
     }
     /// Length of the immutable backing without reading its payload.
     pub fn byte_len(&self) -> std::io::Result<u64> {
-        self.len()
-    }
-    pub(crate) fn len(&self) -> std::io::Result<u64> {
         match &self.bytes {
             Bytes::Memory(bytes) => Ok(bytes.len() as u64),
             Bytes::File(spill) => Ok(spill.file.as_ref().unwrap().metadata()?.len()),

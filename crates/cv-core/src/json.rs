@@ -333,7 +333,7 @@ impl JsonSource {
         len: u64,
     ) -> Result<JsonRange> {
         self.check()?;
-        let backing_len = backing.len()?;
+        let backing_len = backing.byte_len()?;
         self.decoded_range(backing, backing_len, offset, len)
     }
     fn decoded_range(
@@ -382,7 +382,7 @@ impl JsonRange {
     pub(crate) fn check_retained_bounds(&self) -> Result<()> {
         self.source.check()?;
         if let Some(bytes) = &self.decoded {
-            let len = bytes.len()?;
+            let len = bytes.byte_len()?;
             anyhow::ensure!(
                 self.offset.checked_add(self.len).is_some_and(|end| end <= len),
                 "source text backing is truncated"
@@ -2136,7 +2136,7 @@ mod tests {
         assert!(Arc::ptr_eq(range.decoded.as_ref().unwrap(), &backing));
         assert!(range.offset >= len);
         assert!(canonical(&value) == inner.as_bytes());
-        assert!(backing.len().unwrap() > len);
+        assert!(backing.byte_len().unwrap() > len);
         std::fs::remove_file(&fixture.path).unwrap();
         assert!(value.canonical_len().is_err());
     }

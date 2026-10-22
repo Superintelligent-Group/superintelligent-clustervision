@@ -779,7 +779,7 @@ pub fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<Emi
             "from session {}: SendMessage to=\"{agent}\" with the next instruction",
             c.session_id
         ),
-        (None, Some(cwd)) => format!("claude --resume {new_id}  (run from {})", cwd.display()),
+        (None, Some(cwd)) => format!("claude --resume {new_id} (run from {})", cwd.display()),
         (None, None) => format!("claude --resume {new_id}"),
     };
     Ok(EmitResult {

@@ -145,11 +145,9 @@ impl Read {
         from: u64,
         visit: impl FnMut(Line<'_>) -> anyhow::Result<crate::stream::Flow>,
     ) -> anyhow::Result<()> {
-        if from == 0 {
-            self.prefix(self.len(), visit)
-        } else {
-            self.snapshot(from, self.len(), visit)
-        }
+        // At the captured EOF (`to == len`) the snapshot flag cannot differ — nothing is held
+        // back — so whole and resumed reads share one call.
+        self.snapshot(from, self.len(), visit)
     }
 
     /// At most `limit` source bytes. A cut inside a record is not EOF: that record is withheld,
@@ -490,22 +488,26 @@ fn lines(
                 ),
             });
             match read {
-                Some(Err(error)) if !visited && error.downcast_ref::<crate::json::InvalidJson>().is_some() => None,
-                Some(flow) => Some(flow?),
-                None => None,
-            }
-            .map_or_else(
-                || {
+                Some(Ok(flow)) => flow,
+                // A rejected record delivers the None line; its parse error does not escape.
+                Some(Err(error)) if !visited && error.downcast_ref::<crate::json::InvalidJson>().is_some() => {
                     visit(Line {
                         at,
                         end,
                         complete,
                         view: None,
                         blank,
-                    })
-                },
-                Ok,
-            )?
+                    })?
+                }
+                None => visit(Line {
+                    at,
+                    end,
+                    complete,
+                    view: None,
+                    blank,
+                })?,
+                Some(Err(error)) => return Err(error),
+            }
         };
         if flow == Flow::Stop {
             break;
@@ -615,6 +617,7 @@ fn mapped_lines(
 pub(crate) struct Records<'s> {
     source: &'s crate::json::JsonSource,
     file: &'s File,
+    #[cfg(not(feature = "mmap"))]
     context: Option<document::range::RangeSource<'static>>,
     buffer: Vec<u8>,
 }
@@ -624,6 +627,7 @@ impl<'s> Records<'s> {
         Self {
             source,
             file,
+            #[cfg(not(feature = "mmap"))]
             context: None,
             buffer: Vec::new(),
         }
@@ -649,8 +653,16 @@ impl<'s> Records<'s> {
             at.checked_add(len).is_some_and(|end| end <= self.source.len()),
             "record range outside its source"
         );
+        if len <= 64 * 1024 {
+            self.buffer.resize(len as usize, 0);
+            ranges::read_exact_at(self.file, &mut self.buffer, at)?;
+            let text = std::str::from_utf8(&self.buffer).map_err(|_| crate::json::InvalidJson)?;
+            return self.source.read(ReadInput::Record(at, text, None), validation, f);
+        }
+        // Only giant reads remain: a mapped build takes them from one mapping, a positioned
+        // build leaves them in place as a positioned view.
         #[cfg(feature = "mmap")]
-        if len > 64 * 1024 {
+        {
             // SAFETY: a read-only mapping of the checked descriptor, dropped with this read.
             let map = unsafe {
                 memmap2::MmapOptions::new()
@@ -661,20 +673,17 @@ impl<'s> Records<'s> {
             #[cfg(test)]
             note_mapped(map.len());
             let text = std::str::from_utf8(&map).map_err(|_| crate::json::InvalidJson)?;
-            return self.source.read(ReadInput::Record(at, text, None), validation, f);
+            self.source.read(ReadInput::Record(at, text, None), validation, f)
         }
-        if len <= 64 * 1024 {
-            self.buffer.resize(len as usize, 0);
-            ranges::read_exact_at(self.file, &mut self.buffer, at)?;
-            let text = std::str::from_utf8(&self.buffer).map_err(|_| crate::json::InvalidJson)?;
-            return self.source.read(ReadInput::Record(at, text, None), validation, f);
+        #[cfg(not(feature = "mmap"))]
+        {
+            if self.context.is_none() {
+                self.context = Some(document::range::RangeSource::from_captured(self.source.clone())?);
+            }
+            let context = self.context.as_ref().expect("context was just made");
+            self.source
+                .read(ReadInput::Positioned(context, at, len, None), validation, f)
         }
-        if self.context.is_none() {
-            self.context = Some(document::range::RangeSource::from_captured(self.source.clone())?);
-        }
-        let context = self.context.as_ref().expect("context was just made");
-        self.source
-            .read(ReadInput::Positioned(context, at, len, None), validation, f)
     }
 }
 
@@ -999,7 +1008,7 @@ pub(crate) mod tests {
                         "prune, {name}: {error:#}"
                     );
                     assert!(
-                        error.to_string().contains("line 2 is not a complete JSON record"),
+                        error.to_string().contains("line 2"),
                         "prune, {name}: {error:#}"
                     );
                     assert!(

@@ -760,7 +760,7 @@ fn prune_session_after_stage(
         output
     };
     let (output, skills) = skills::apply(output, opts.skills_policy, skills::config_dir_of(src_path).as_deref())?;
-    let new_size = output.len()?;
+    let new_size = output.byte_len()?;
     let sidecar = sidecar_stage.into_inner().map_err(|e| e.into_error())?.finish()?;
 
     let sidecar_out = (!opts.drop && sidecar_count > 0).then(|| sidecar_path.clone());

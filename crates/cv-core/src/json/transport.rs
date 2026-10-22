@@ -82,7 +82,7 @@ impl SourceRegistry {
             None => source.range(descriptor.offset, descriptor.len)?,
             Some(id) => {
                 let bytes = self.decoded.get(id).context("unknown staged decoded JSON")?.clone();
-                let len = bytes.len()?;
+                let len = bytes.byte_len()?;
                 // A descriptor must name a complete JSON value; even an empty JSON string
                 // occupies two quote bytes, so a zero-length range cannot be valid.
                 anyhow::ensure!(

@@ -90,19 +90,18 @@ fn string(view: Option<JsonView<'_>>, key: &str) -> Result<Option<String>> {
         .and_then(|v| v.as_str().map(str::to_owned)))
 }
 
+type DateTime = chrono::DateTime<chrono::Utc>;
+
 fn timestamp(r: &Fields<'_>) -> Result<Option<DateTime>> {
     Ok(r.string("timestamp")?.as_deref().and_then(parse_ts))
 }
-type DateTime = chrono::DateTime<chrono::Utc>;
 
 /// Session-level facts every record carries: id, cwd, branch, version, time span, fork origin,
 /// approval mode.
 fn session_facts(s: &mut Session, r: &Fields<'_>) -> Result<()> {
     if s.lineage.parent.is_none() {
         if let Some(id) = r.string("sessionId")? {
-            if s.id != id {
-                s.id = id;
-            }
+            s.id = id;
         }
     }
     if s.cwd.is_none() {
