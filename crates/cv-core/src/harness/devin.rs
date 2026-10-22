@@ -232,6 +232,17 @@ impl Adapter for Devin {
         Ok(found)
     }
 
+    /// Every session's certificate ([`rows_conn`]).
+    fn rows(&self, store: &Path) -> Option<HashMap<String, crate::source::Rows>> {
+        open_ro(store).ok()?.read(|conn, _| rows_conn(conn)).ok()
+    }
+
+    /// A sub-agent `<session_id>/<agent_id>` reads its parent session's forest and row: the
+    /// parent's certificate covers it.
+    fn rows_key<'a>(&self, r: &'a SessionRef) -> &'a str {
+        r.id.split_once('/').map_or(&r.id, |(session, _)| session)
+    }
+
     /// Devin writes its session database in place.
     fn watch_policy(&self, _r: &SessionRef) -> super::WatchPolicy {
         super::WatchPolicy::Database
@@ -325,6 +336,40 @@ fn load_forest(conn: &Connection, session_id: &str, cells: &Cells) -> Result<For
         f.nodes.insert(node, Node { created, chat, meta });
     }
     Ok(f)
+}
+
+/// Every session's [`Rows`](crate::source::Rows) certificate: what a read of it, or of any of its
+/// sub-agent chains, consults besides message bodies. Its whole `sessions` row (the main chain id
+/// among it); per `message_nodes` row, in `row_id` order, its `row_id`, node id, parent node id,
+/// `created_at` and the byte lengths of `chat_message` and `metadata` (headers, never bodies); its
+/// `subagent_heads` rows; and the store's schema version, which the read reports.
+fn rows_conn(conn: &Connection) -> Result<HashMap<String, crate::source::Rows>> {
+    let mut certificates = super::store::sqlite::Certificates::default();
+    let version = if table_exists(conn, "refinery_schema_history") {
+        "(SELECT MAX(version) FROM refinery_schema_history)"
+    } else {
+        "NULL"
+    };
+    certificates.digest(conn, &format!("SELECT id, {version}, * FROM sessions ORDER BY id"))?;
+    let metadata = if super::store::sqlite::columns(conn, "message_nodes").contains("metadata") {
+        "octet_length(metadata)"
+    } else {
+        "NULL"
+    };
+    certificates.rows(
+        conn,
+        &format!(
+            "SELECT session_id, row_id, node_id, parent_node_id, created_at, octet_length(chat_message), {metadata} \
+             FROM message_nodes ORDER BY session_id, row_id"
+        ),
+    )?;
+    if table_exists(conn, "subagent_heads") {
+        certificates.digest(
+            conn,
+            "SELECT session_id, agent_id, chain_node_id, updated_at FROM subagent_heads ORDER BY session_id, agent_id",
+        )?;
+    }
+    Ok(certificates.0)
 }
 
 /// Walk from `head` up `parent_node_id` to a root and reverse it into transcript order. Cycles
@@ -978,6 +1023,41 @@ mod tests {
 
     fn sref(id: &str) -> SessionRef {
         SessionRef::new(id, Harness::Devin, fixture())
+    }
+
+    /// The corpus store: a node appended to one session moves its certificate (and its
+    /// sub-agents', which read its forest) alone; every other session and sub-agent reads exactly
+    /// as before.
+    #[test]
+    fn corpus_rows_certify_each_session_and_move_only_with_its_rows() {
+        let world = crate::test_world("devin-corpus-rows");
+        let db = world.base.join("sessions.db");
+        let corpus = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/corpus/devin");
+        for version in std::fs::read_dir(&corpus).unwrap() {
+            std::fs::copy(version.unwrap().path().join(".local/share/devin/cli/sessions.db"), &db).unwrap();
+            let adapter = Devin::with_root(&world.base);
+            assert!(
+                adapter.discover().unwrap().refs.iter().any(|r| r.id.contains('/')),
+                "sub-agents"
+            );
+            let leaf: String = Connection::open(&db)
+                .unwrap()
+                .query_row(
+                    "SELECT session_id FROM message_nodes ORDER BY session_id LIMIT 1",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            super::super::store::sqlite::assert_rows_move_alone(&adapter, &db, &leaf, |c| {
+                c.execute(
+                    "INSERT INTO message_nodes (session_id, node_id, parent_node_id, chat_message, created_at) \
+                     SELECT ?1, max(node_id) + 1, NULL, '{\"role\":\"user\",\"content\":\"zqcertified\"}', 4102444800 \
+                     FROM message_nodes WHERE session_id = ?1",
+                    [&leaf],
+                )
+                .unwrap();
+            });
+        }
     }
 
     #[test]
