@@ -511,12 +511,9 @@ impl Watcher {
             // (codex/hermes/claude add reasoning/tool/system turns), so seeding from it makes the
             // first `Updated` poll re-emit messages that predate the watcher. Record the true
             // baseline instead — a byte mark where the transcript is append-only (see [`baseline`]).
-            // A session without one stays unseen: the next poll surfaces it as New rather than
-            // standing anywhere based on the wrong count.
-            let (mark, read) = capture_baseline(&r, || baseline(&r));
-            let Some(mark) = mark else {
-                continue;
-            };
+            let (mark, read) = capture_baseline(&r, || {
+                baseline(&r).unwrap_or(Mark::Messages(r.message_count.unwrap_or(0)))
+            });
             self.seen.insert(
                 Self::key(&r),
                 State {

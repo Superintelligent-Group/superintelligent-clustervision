@@ -560,22 +560,17 @@ fn selected_tool_agents(
         }
         matches_workflow && matches_agent(agent, id.strip_prefix("agent-").unwrap_or(id))
     })?;
-    // The refusal names the selector that failed: an agent absent from the workflow is not the
-    // workflow's absence.
-    if let Some(workflow) = workflow {
-        let found = if agent.is_some() {
-            workflow_member.load(std::sync::atomic::Ordering::Relaxed)
-        } else {
-            !selected.is_empty()
-        };
-        anyhow::ensure!(
-            found,
-            match agent {
-                Some(agent) => anyhow::anyhow!("no agent {agent:?} in workflow {workflow:?} in {}", r.id),
-                None => anyhow::anyhow!("no agents found for workflow {workflow:?} in {}", r.id),
-            }
-        );
-    }
+    anyhow::ensure!(
+        workflow.is_none()
+            || if agent.is_some() {
+                workflow_member.load(std::sync::atomic::Ordering::Relaxed)
+            } else {
+                !selected.is_empty()
+            },
+        "no agents found for workflow {:?} in {}",
+        workflow.unwrap_or_default(),
+        r.id
+    );
     Ok(selected)
 }
 

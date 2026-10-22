@@ -603,12 +603,7 @@ fn eval_term(t: &Term, f: &Facts) -> anyhow::Result<Tri> {
             Some(n) => num_match(t.op, &t.val, n as u64),
             None => Tri::Unknown,
         },
-        // A ref without a creation time cannot answer `created:` from anything else; the
-        // parse decides, as it does for `msgs:`.
-        FieldId::Created => match f.r.created_at {
-            Some(at) => date_match(t.op, &t.val, Some(at)),
-            None => Tri::Unknown,
-        },
+        FieldId::Created => date_match(t.op, &t.val, f.r.created_at.or(f.r.updated_at)),
         FieldId::Updated => date_match(t.op, &t.val, f.r.updated_at.or(f.r.created_at)),
         // Parse-required.
         FieldId::Model => or_over(&t.val, |needle| {

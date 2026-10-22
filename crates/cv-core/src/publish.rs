@@ -235,7 +235,7 @@ fn rename_no_replace_using(
     }
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
-        "no atomic exclusive rename here (filesystem or kernel); destination left untouched",
+        "filesystem does not support an atomic exclusive rename; destination left untouched",
     ))
 }
 
