@@ -51,6 +51,20 @@ pub fn refuse_existing(path: &Path, hint: &'static str) -> Result<()> {
     }
 }
 
+/// Raw transform output ids also become filenames/resource directory names. Keep them within the
+/// selected output directory; this does not restrict ids stored in arbitrary IR or restamped text.
+pub(crate) fn validate_output_id(id: &str) -> anyhow::Result<()> {
+    let mut components = std::path::Path::new(id).components();
+    anyhow::ensure!(
+        !id.is_empty()
+            && !id.contains(['/', '\\', '\0'])
+            && matches!(components.next(), Some(std::path::Component::Normal(_)))
+            && components.next().is_none(),
+        "new session id must be a nonempty filename component, not a path: {id:?}"
+    );
+    Ok(())
+}
+
 /// An exclusively created temporary that only this operation owns; dropped unpublished, it is
 /// removed. Writes go straight to the file (wrap it in a `BufWriter` for small writes).
 pub struct Staged {

@@ -19,20 +19,6 @@ struct TopIds<'a> {
     session_id_snake: Option<&'a RawValue>,
 }
 
-/// Raw transform output ids also become filenames/resource directory names. Keep them within the
-/// selected output directory; this does not restrict ids stored in arbitrary IR or restamped text.
-pub(crate) fn validate_output_id(id: &str) -> anyhow::Result<()> {
-    let mut components = std::path::Path::new(id).components();
-    anyhow::ensure!(
-        !id.is_empty()
-            && !id.contains(['/', '\\', '\0'])
-            && matches!(components.next(), Some(std::path::Component::Normal(_)))
-            && components.next().is_none(),
-        "new session id must be a nonempty filename component, not a path: {id:?}"
-    );
-    Ok(())
-}
-
 /// Restamp one transcript line: replace the top-level `sessionId` / `session_id` string values with
 /// `new_id`, leaving every other byte as it was. `None` when the line carries no top-level session
 /// id (non-JSON, or a record without one): the caller keeps it verbatim.

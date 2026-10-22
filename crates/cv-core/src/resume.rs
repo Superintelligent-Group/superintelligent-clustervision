@@ -45,8 +45,13 @@ impl MarkHead {
     /// this way, so a file renamed over the path mid-pass is never paired with this pass's
     /// checkpoint (its next pass sees another inode and reads whole).
     pub fn of_file(file: &std::fs::File, cp: &Checkpoint, version: &str) -> Option<MarkHead> {
-        // Without a stable file identity, prefer a whole read.
-        cfg!(unix).then_some(())?;
+        // Without a stable file identity (off Unix), prefer a whole read.
+        #[cfg(not(unix))]
+        {
+            let _ = (file, cp, version);
+            return None;
+        }
+        #[cfg(unix)]
         Some(MarkHead {
             prefix: Prefix::of(file, cp.offset)?,
             version: version.to_string(),
@@ -74,8 +79,11 @@ pub fn version(adapter: &dyn Adapter, consumer: &str) -> String {
     crate::source::consumer_version(format_args!("{}/{consumer}", adapter.harness().as_str()))
 }
 
-/// A session and its new mark (`None`: it has none any more), for [`update`].
-pub type MarkUpdate = (SessionRef, Option<(MarkHead, Checkpoint)>);
+/// A session and its new mark (`mark: None`: it has none any more), for [`update`].
+pub struct MarkUpdate {
+    pub session: SessionRef,
+    pub mark: Option<(MarkHead, Checkpoint)>,
+}
 
 #[cfg(feature = "sqlite")]
 mod imp {
@@ -192,8 +200,8 @@ mod imp {
             let Ok(mut drop) = tx.prepare("DELETE FROM resume_marks WHERE harness=?1 AND id=?2 AND path=?3") else {
                 return;
             };
-            for (r, mark) in marks {
-                let (h, i, p) = key(r);
+            for MarkUpdate { session, mark } in marks {
+                let (h, i, p) = key(session);
                 let _ = match mark {
                     Some((head, cp)) => {
                         let Ok(text) = serde_json::to_string(cp) else { continue };

@@ -342,8 +342,10 @@ pub(super) fn run_fed(
                         // A mark must describe persisted event rows as well as FTS docs. If the
                         // SQL transaction failed, retry the entire event pass rather than resume
                         // past a missing suffix and incorrectly stamp it fresh.
-                        ran.marks
-                            .push((job.r.clone(), if events_published { mark } else { None }));
+                        ran.marks.push(cv_core::resume::MarkUpdate {
+                            session: job.r.clone(),
+                            mark: if events_published { mark } else { None },
+                        });
                     }
                     ran.resumed += usize::from(resumed);
                     if job.fts {
@@ -366,7 +368,10 @@ pub(super) fn run_fed(
                         open.remove(&job.r.id);
                     }
                     if job.mark.is_some() {
-                        ran.marks.push((job.r.clone(), None));
+                        ran.marks.push(cv_core::resume::MarkUpdate {
+                            session: job.r.clone(),
+                            mark: None,
+                        });
                     }
                     eprintln!("cv: parse failed for {} ({}): {err:#}", job.r.id, job.r.harness);
                 }
