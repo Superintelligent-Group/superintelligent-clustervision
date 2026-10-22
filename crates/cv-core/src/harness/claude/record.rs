@@ -164,6 +164,7 @@ impl<'a> Head<'a> {
             Demand::Facts => FACT_KEYS,
             Demand::Compact => &["type", "subtype", "compactMetadata"],
             Demand::Tools => &["type", "timestamp", "message"],
+            // The listing keys, then the rest of what [`counts_as_turn`] decides on.
             Demand::Metadata => &[
                 "type",
                 "version",
@@ -171,8 +172,14 @@ impl<'a> Head<'a> {
                 "timestamp",
                 "customTitle",
                 "aiTitle",
-                "isApiErrorMessage",
                 "message",
+                "isApiErrorMessage",
+                "isCompactSummary",
+                "isMeta",
+                "scheduledTaskId",
+                "scheduledFireId",
+                "turnOrigin",
+                "origin",
             ],
         };
         let Some(top) = Fields::parse(view, keys)? else {
@@ -409,6 +416,77 @@ impl Facts {
         }
         Ok((facts, body))
     }
+}
+
+/// Who wrote a `user` record: the scheduler, the harness (`isMeta`, or an `origin.kind` other
+/// than `human`), or the person.
+fn user_origin(top: &Fields<'_>) -> Result<Origin> {
+    let scheduled = top.get("scheduledTaskId").is_some()
+        || top.get("scheduledFireId").is_some()
+        || top.string("turnOrigin")?.as_deref() == Some("scheduled");
+    let origin_kind = match top.get("origin") {
+        Some(origin) => origin
+            .get("kind")?
+            .filter(|v| v.may_be_string())
+            .map(|v| v.resolve().map(|v| v.as_str().unwrap_or_default().to_owned()))
+            .transpose()?,
+        None => None,
+    };
+    let is_meta = top.get("isMeta").map(|v| v.as_bool()).transpose()?.flatten() == Some(true);
+    Ok(user_origin_from(scheduled, is_meta, origin_kind.as_deref()))
+}
+
+/// Whether a record is a conversational turn ([`Message::is_turn`]), decided from its head
+/// without building the message: what [`Record::conversation`] classifies a typed prompt or a
+/// model reply. A `user` record carrying only tool results is a Tool turn, an injected one
+/// (`isMeta`, a harness origin, an interrupt marker), a compaction summary or a slash command
+/// is not; neither is a record without a `message` or an assistant client-side notice. `top`
+/// selects `message`, `isApiErrorMessage`, `isCompactSummary`, `isMeta`, `scheduledTaskId`,
+/// `scheduledFireId`, `turnOrigin` and `origin`. Reads only the first 64 characters of a user record's leading text, and the `type` of each block.
+pub(crate) fn counts_as_turn(top: &Fields<'_>, ty: &str) -> Result<bool> {
+    let role = match ty {
+        "user" => Role::User,
+        "assistant" => Role::Assistant,
+        _ => return Ok(false),
+    };
+    let Some(message) = top.get("message") else {
+        return Ok(false);
+    };
+    let body = Fields::parse(message, &["model", "content"])?;
+    if role == Role::Assistant {
+        let api_error = top.get("isApiErrorMessage").map(|v| v.as_bool()).transpose()?.flatten() == Some(true);
+        let model = body.as_ref().map_or(Ok(None), |b| b.string("model"))?;
+        return Ok(is_turn(ty, api_error, model.as_deref()));
+    }
+    if top.get("isCompactSummary").map(|v| v.as_bool()).transpose()?.flatten() == Some(true) {
+        return Ok(false);
+    }
+    // Every other harness-written user record is injected context or a sub-agent's return.
+    let origin = user_origin(top)?;
+    if origin == Origin::Harness {
+        return Ok(false);
+    }
+    let mut head = String::new();
+    match body.as_ref().and_then(|b| b.get("content")) {
+        Some(content) if content.is_string()? => {
+            head = string_head(content, 64)?;
+            if head.starts_with("<command-name>") || head.starts_with("<local-command-stdout>") {
+                return Ok(false);
+            }
+        }
+        Some(content) => {
+            if anthropic::only_tool_results(Some(content), |item| anthropic::block_kind(item, &anthropic::ANTHROPIC))? {
+                return Ok(false);
+            }
+            if let Some(first) = content.array()?.and_then(|mut items| items.next()).transpose()? {
+                if let Some(text) = first.get("text")?.filter(|v| v.may_be_string()) {
+                    head = string_head(text, 64)?;
+                }
+            }
+        }
+        None => {}
+    }
+    Ok(user_kind_from_head(origin, &head).0 == MessageKind::Prompt)
 }
 
 /// A conversational turn by type: a user record, or an assistant record that is not one of
@@ -1001,18 +1079,7 @@ impl<'a> Record<'a, '_> {
             Some(usage) => Some(parse_usage(usage)?),
             None => None,
         };
-        let scheduled = self.top.get("scheduledTaskId").is_some()
-            || self.top.get("scheduledFireId").is_some()
-            || self.top.string("turnOrigin")?.as_deref() == Some("scheduled");
-        let origin_kind = match self.top.get("origin") {
-            Some(origin) => origin
-                .get("kind")?
-                .filter(|v| v.may_be_string())
-                .map(|v| v.resolve().map(|v| v.as_str().unwrap_or_default().to_owned()))
-                .transpose()?,
-            None => None,
-        };
-        let user_origin = user_origin_from(scheduled, self.bool("isMeta")? == Some(true), origin_kind.as_deref());
+        let user_origin = user_origin(&self.top)?;
 
         let mut blocks = Vec::new();
         let mut head = None;

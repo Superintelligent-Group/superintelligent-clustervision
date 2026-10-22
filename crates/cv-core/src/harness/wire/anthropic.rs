@@ -71,6 +71,60 @@ pub const ZED: Quirks = Quirks {
     ..ANTHROPIC
 };
 
+/// What [`block_from_view_with`] makes of `view` under `q`, decided from its `type` (and, for a
+/// text block, whether `text` is a string) without decoding a body: `Some(true)` a tool result,
+/// `Some(false)` any other block, `None` no block. What the "a user turn carrying only tool
+/// results is a Tool turn" rule reads where a listing counts turns without building messages.
+pub(crate) fn block_kind(view: crate::json::JsonView<'_>, q: &Quirks) -> anyhow::Result<Option<bool>> {
+    use super::super::store::document::Fields;
+    let Some(record) = Fields::parse(view, &["type", "text"])? else {
+        return Ok(None);
+    };
+    let Some(ty) = record.string("type")? else {
+        return Ok(None);
+    };
+    Ok(match ty.as_str() {
+        "tool_result" => Some(true),
+        "text" => match record.get("text") {
+            Some(text) if text.is_string()? => {
+                let mut empty = true;
+                if q.skip_empty_text {
+                    text.for_each_char(|_| {
+                        empty = false;
+                        false
+                    })?;
+                }
+                (!(q.skip_empty_text && empty)).then_some(false)
+            }
+            _ => None,
+        },
+        "image" | "document" | "thinking" => Some(false),
+        ty if ty == q.tool_use.0 || Some(ty) == q.redacted_thinking => Some(false),
+        _ => None,
+    })
+}
+
+/// Whether `content` is an array whose blocks are all tool results (and there is one), each
+/// item kinded by `kind` as [`block_kind`] does: the "a user turn carrying only tool results is a
+/// Tool turn" rule, read without building a block.
+pub(crate) fn only_tool_results(
+    content: Option<crate::json::JsonView<'_>>,
+    mut kind: impl FnMut(crate::json::JsonView<'_>) -> anyhow::Result<Option<bool>>,
+) -> anyhow::Result<bool> {
+    let Some(items) = content.map(|c| c.array()).transpose()?.flatten() else {
+        return Ok(false);
+    };
+    let (mut results, mut others) = (0, 0);
+    for item in items {
+        match kind(item?)? {
+            Some(true) => results += 1,
+            Some(false) => others += 1,
+            None => {}
+        }
+    }
+    Ok(results > 0 && others == 0)
+}
+
 /// A content block from a view, with the caller's text rule for content strings, `spans` for tool
 /// arguments, and the size above which a source-backed tool-result array becomes checked joined
 /// text rather than being coerced inline. Unselected fields are never decoded, in every demand.
