@@ -316,7 +316,7 @@ pub(super) fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Res
         path,
         new_id: new_id.clone(),
         resume_hint: Some(match cwd {
-            Some(cwd) => format!("gemini --resume {new_id}  (run from {})", cwd.display()),
+            Some(cwd) => format!("gemini --resume {new_id} (run from {})", cwd.display()),
             None => format!("gemini --resume {new_id}"),
         }),
     })

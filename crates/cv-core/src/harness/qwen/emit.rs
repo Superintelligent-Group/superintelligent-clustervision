@@ -454,7 +454,29 @@ pub fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<Emi
                     })?;
                 }
             }
-            _ => {
+            // What remains arrives as model-facing injected input. Naming each kind keeps a
+            // future MessageKind from silently degrading to this record shape.
+            (
+                Role::System,
+                MessageKind::Prompt
+                | MessageKind::Reply
+                | MessageKind::ToolResult
+                | MessageKind::InjectedContext
+                | MessageKind::CompactionSummary
+                | MessageKind::SubagentSpawn
+                | MessageKind::SubagentReturn
+                | MessageKind::Carrier,
+            )
+            | (
+                Role::User,
+                MessageKind::Reply
+                | MessageKind::ToolResult
+                | MessageKind::InjectedContext
+                | MessageKind::CompactionSummary
+                | MessageKind::SubagentSpawn
+                | MessageKind::SubagentReturn
+                | MessageKind::Carrier,
+            ) => {
                 let parts = parts(&m.content, opts.thinking, &resolver)?;
                 if !parts.is_empty() {
                     let subtype = injected_subtype(m);
@@ -481,7 +503,7 @@ pub fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<Emi
     Ok(EmitResult {
         path,
         new_id: new_id.clone(),
-        resume_hint: Some(format!("qwen --resume {new_id}  (run from {cwd_str})")),
+        resume_hint: Some(format!("qwen --resume {new_id} (run from {cwd_str})")),
     })
 }
 

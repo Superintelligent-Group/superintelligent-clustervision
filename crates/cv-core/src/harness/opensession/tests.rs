@@ -784,6 +784,48 @@ mod projection_schema {
         assert_eq!(declared["renamed"], set(["type", "wire", "alias"]));
         assert_eq!(declared["old"], declared["renamed"]);
     }
+
+    // `rename` transcribes serde's rename rules by hand; probe serde itself so transcription
+    // drift (here, or from a serde bump) fails in this gate instead of on the wire.
+    #[test]
+    fn rename_matches_serde_on_every_accepted_rule() {
+        use serde::Serialize;
+        macro_rules! probe {
+            ($rule:literal) => {{
+                #[derive(Serialize)]
+                #[serde(rename_all = $rule)]
+                enum Variant {
+                    SomeVariantName,
+                }
+                #[derive(Serialize)]
+                #[serde(rename_all = $rule)]
+                struct Field {
+                    some_field_name: u8,
+                }
+                (
+                    serde_json::to_value(Variant::SomeVariantName).unwrap(),
+                    serde_json::to_value(Field { some_field_name: 0 }).unwrap(),
+                )
+            }};
+        }
+        for (rule, (variant, field)) in [
+            ("lowercase", probe!("lowercase")),
+            ("UPPERCASE", probe!("UPPERCASE")),
+            ("snake_case", probe!("snake_case")),
+            ("SCREAMING_SNAKE_CASE", probe!("SCREAMING_SNAKE_CASE")),
+            ("kebab-case", probe!("kebab-case")),
+            ("SCREAMING-KEBAB-CASE", probe!("SCREAMING-KEBAB-CASE")),
+            ("PascalCase", probe!("PascalCase")),
+            ("camelCase", probe!("camelCase")),
+        ] {
+            let variant = variant.as_str().unwrap();
+            let field = field.as_object().unwrap().keys().next().unwrap().clone();
+            assert_eq!(rename("SomeVariantName", Some(rule), true), variant, "variant rule {rule}");
+            assert_eq!(rename("some_field_name", Some(rule), false), field, "field rule {rule}");
+        }
+        assert_eq!(rename("SomeVariantName", None, true), "SomeVariantName");
+        assert_eq!(rename("some_field_name", None, false), "some_field_name");
+    }
 }
 
 #[test]
