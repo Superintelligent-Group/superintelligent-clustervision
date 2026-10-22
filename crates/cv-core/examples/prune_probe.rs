@@ -6,6 +6,9 @@ use cv_core::prune::{prune_session, PruneOptions};
 static ALLOCATOR: cv_testkit::heap::Allocator = cv_testkit::heap::Allocator;
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
+    if args.len() < 2 {
+        anyhow::bail!("expected: prune_probe SOURCE_PATH [MODE...] (modes: rewind|revive|window|range|drop|thinking|declassify|dry|resources)");
+    }
     if args.iter().skip(2).any(|mode| mode == "rewind") {
         let source = cv_core::SessionRef::from_path(std::path::Path::new(&args[1]), cv_core::Harness::Claude);
         let options = cv_core::rewind::RewindOptions {

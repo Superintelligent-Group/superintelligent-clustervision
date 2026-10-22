@@ -252,7 +252,7 @@ impl Adapter for Kimi {
                 };
                 let mut reads = shared_reads.clone();
                 reads.record(&dir.join("state.json"));
-                if transcript.file_name().is_some_and(|name| name == "context.jsonl") {
+                if is_modern_transcript(&transcript) {
                     // Capture membership before enumerating rotations, and each existing file
                     // before the scan reads it. Missing wire/state files are dependencies too.
                     reads.record(&dir);
@@ -755,6 +755,14 @@ fn read_custom_title(dir: &Path) -> Option<String> {
         .flatten()
 }
 
+/// The store-layout rule, name form: the MODERN transcript is the live `context.jsonl` in its
+/// session dir; a LEGACY flat session is `<id>.jsonl` directly in the hash dir. This predicate
+/// needs no `exists()` probe, so every caller that already holds the transcript path shares it
+/// (`locate_transcript` is the exists-based form, for callers that must find the file).
+fn is_modern_transcript(transcript: &Path) -> bool {
+    transcript.file_name().and_then(|n| n.to_str()) == Some("context.jsonl")
+}
+
 /// Given a `SessionRef.path` and id, find the transcript + optional wire sidecar.
 fn locate_transcript(dir: &Path, id: &str) -> (PathBuf, Option<PathBuf>) {
     let modern = dir.join("context.jsonl");
@@ -769,7 +777,7 @@ fn locate_transcript(dir: &Path, id: &str) -> (PathBuf, Option<PathBuf>) {
 
 /// Locate the wire sidecar for a transcript, if it lives next to it (modern only).
 fn wire_path_for(dir: &Path, transcript: &Path) -> Option<PathBuf> {
-    if transcript.file_name().and_then(|n| n.to_str()) == Some("context.jsonl") {
+    if is_modern_transcript(transcript) {
         let w = dir.join("wire.jsonl");
         return w.exists().then_some(w);
     }
@@ -781,7 +789,7 @@ fn wire_path_for(dir: &Path, transcript: &Path) -> Option<PathBuf> {
 /// legacy flat transcript has no segments of its own.
 fn transcript_segments(dir: &Path, transcript: &Path) -> Vec<PathBuf> {
     let mut rotated: Vec<(u64, PathBuf)> = Vec::new();
-    if transcript.file_name().and_then(|n| n.to_str()) == Some("context.jsonl") {
+    if is_modern_transcript(transcript) {
         if let Ok(rd) = fs::read_dir(dir) {
             for e in rd.filter_map(|e| e.ok()) {
                 let name = e.file_name();

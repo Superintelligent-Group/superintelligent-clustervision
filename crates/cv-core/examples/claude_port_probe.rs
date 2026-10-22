@@ -18,7 +18,16 @@ fn main() -> Result<()> {
         .any(|a| a == "--sqlite-heap")
         .then(sqlite_heap::Accounting::enable)
         .transpose()?;
+    #[cfg(not(feature = "sqlite"))]
+    if args.iter().any(|a| a == "--sqlite-heap") {
+        anyhow::bail!("--sqlite-heap requires the sqlite feature");
+    }
     args.retain(|a| a != "--sqlite-heap");
+    if args.len() < 5 {
+        anyhow::bail!(
+            "expected: claude_port_probe SOURCE_HARNESS SOURCE_PATH OUT_PATH THINKING_MODE [TARGET_HARNESS]"
+        );
+    }
     let source = Harness::parse(&args[1]).context("unknown source harness")?;
     let adapter = cv_core::harness::for_harness(source).context("source adapter")?;
     let reference = SessionRef::new("synthetic-source", source, &args[2]);

@@ -37,6 +37,9 @@ fn sanitize_cwd(cwd: &str) -> String {
 }
 
 /// `<home>/projects`, from the projects root, its `tmp/` sibling, or the home itself.
+///
+/// `--out` naming convention (same as lmstudio's `conversations`): the flag may name the CLI's
+/// store root or the store dir inside it; accept either and write where the CLI reads.
 fn projects_dir(out_dir: &Path) -> PathBuf {
     match out_dir.file_name().and_then(|n| n.to_str()) {
         Some("projects") => out_dir.to_path_buf(),

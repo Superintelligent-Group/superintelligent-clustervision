@@ -1120,8 +1120,9 @@ impl PipeGuard {
 /// Render a session to `out` by **streaming** — each message is rendered and written as it arrives,
 /// then dropped, so a multi-GB transcript renders at O(largest message) instead of materializing the
 /// whole `Session`. The header needs the label and model, which come from the first user/assistant
-/// turns, so it's held behind a small bounded buffer (`HOLDBACK` messages) until those are known and
-/// then flushed ahead of the body — header info lives in the first turns, so the buffer stays tiny.
+/// turns, so it's held behind the shared holdback rule (`frames::Frames::ready`: model and title
+/// known, else a bounded message count) and then flushed ahead of the body — header info lives in
+/// the first turns, so the buffer stays tiny.
 pub(crate) fn stream_session_render<W: std::io::Write>(
     adapter: &dyn Adapter,
     r: &SessionRef,

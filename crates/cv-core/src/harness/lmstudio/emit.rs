@@ -223,6 +223,8 @@ pub(super) fn emit(session: &Session, out_dir: &Path, opts: &crate::emit::EmitOp
         .new_id
         .clone()
         .unwrap_or_else(|| created.timestamp_millis().to_string());
+    // `--out` naming convention (same as qwen's `projects_dir`): the flag may name the CLI's
+    // store root or the store dir inside it; accept either and write where the CLI reads.
     let conversations = if out_dir.file_name().is_some_and(|name| name == "conversations") {
         out_dir.to_path_buf()
     } else {
