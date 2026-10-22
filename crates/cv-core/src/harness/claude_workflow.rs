@@ -349,7 +349,7 @@ fn state_recency(parent_path: &Path, run_id: &str) -> std::cmp::Reverse<Option<s
 pub fn workflows(parent_path: &Path) -> Vec<Workflow> {
     let paths = state_paths(parent_path);
     let mut out = crate::par_filter_map(paths, |p| parse_state_file(&p));
-    out.sort_by_key(|w| state_recency(parent_path, &w.run_id));
+    out.sort_by_cached_key(|w| state_recency(parent_path, &w.run_id));
     out
 }
 
@@ -390,7 +390,7 @@ fn workflow_index(parent_path: &Path) -> Vec<(crate::json::JsonSource, String, O
         Some((source, id, name))
     });
     // Keep the existing wire-ID-based mtime ordering, including repeated workflow names.
-    index.sort_by_key(|entry| state_recency(parent_path, &entry.1));
+    index.sort_by_cached_key(|entry| state_recency(parent_path, &entry.1));
     index
 }
 
