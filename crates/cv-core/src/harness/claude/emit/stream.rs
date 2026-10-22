@@ -779,8 +779,10 @@ pub fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<Emi
             "from session {}: SendMessage to=\"{agent}\" with the next instruction",
             c.session_id
         ),
-        (None, Some(cwd)) => format!("claude --resume {new_id}  (run from {})", cwd.display()),
-        (None, None) => format!("claude --resume {new_id}"),
+        (None, cwd) => crate::harness::resume_in(
+            cwd.as_deref(),
+            format!("claude --resume {}", crate::harness::shell_quote(&new_id)),
+        ),
     };
     Ok(EmitResult {
         path: file_path,

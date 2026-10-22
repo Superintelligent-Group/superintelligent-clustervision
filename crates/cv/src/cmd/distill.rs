@@ -153,13 +153,11 @@ fn write_sidecar(transcript: &Path, elided: &[cv_core::distill::Elided]) -> Resu
 }
 
 fn resume_hint(id: &str, cwd: Option<&Path>) -> String {
-    use crate::util::shell_quote;
-    format!(
-        "{}claude -p --resume {} \"<next instruction>\"",
-        cwd.map(|dir| format!("cd {} && ", shell_quote(&dir.display().to_string())))
-            .unwrap_or_default(),
-        shell_quote(id)
-    )
+    let command = format!(
+        "claude -p --resume {} \"<next instruction>\"",
+        crate::util::shell_quote(id)
+    );
+    cv_core::harness::resume_in(cwd, command)
 }
 
 /// Emit an IR session as Claude JSONL to `target`, with the elided outputs as its sidecar.

@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Claude, Gemini and Qwen port resume hints are one runnable line, `cd <dir> && <harness> --resume <id>`, instead of a command plus prose.
 - Long-running `serve`, `mcp` and followers resolve Gemini/Qwen projects registered after they started, instead of leaving those sessions without a working directory.
 - Qwen checkpoints keep their facts under the `qwen` bag and Qwen part decoding, no longer under `gemini`.
 - Builds without `sqlite` count extracted events instead of spooling them to private memory and temporary files that nothing could publish.

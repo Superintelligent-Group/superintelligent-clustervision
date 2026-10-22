@@ -323,9 +323,9 @@ pub(super) fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Res
     Ok(EmitResult {
         path,
         new_id: new_id.clone(),
-        resume_hint: Some(match cwd {
-            Some(cwd) => format!("gemini --resume {new_id}  (run from {})", cwd.display()),
-            None => format!("gemini --resume {new_id}"),
-        }),
+        resume_hint: Some(crate::harness::resume_in(
+            cwd.as_deref(),
+            format!("gemini --resume {}", crate::harness::shell_quote(&new_id)),
+        )),
     })
 }

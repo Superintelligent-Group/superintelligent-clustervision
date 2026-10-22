@@ -325,6 +325,28 @@ impl<'a> IntoIterator for &'a Discovered {
     }
 }
 
+/// One word for a POSIX shell command line: bare when every byte is inert in a word (letters,
+/// digits, `/ . _ - + : @`), single-quoted otherwise. `~` is not inert: a bare leading `~` expands.
+pub fn shell_quote(s: &str) -> String {
+    if !s.is_empty()
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'/' | b'.' | b'_' | b'-' | b'+' | b':' | b'@'))
+    {
+        s.to_string()
+    } else {
+        format!("'{}'", s.replace('\'', r"'\''"))
+    }
+}
+
+/// The resume hint for a harness that resumes relative to its working directory: one runnable
+/// command line, `cd <dir> && <command>` when the directory is known.
+pub fn resume_in(cwd: Option<&Path>, command: String) -> String {
+    match cwd {
+        Some(dir) => format!("cd {} && {command}", shell_quote(&dir.display().to_string())),
+        None => command,
+    }
+}
+
 /// Result of emitting an IR session into a harness's native on-disk format.
 #[derive(Debug, Clone)]
 pub struct EmitResult {
@@ -1038,6 +1060,16 @@ pub(crate) fn side_entries(path: &std::path::Path) -> Result<Vec<std::fs::DirEnt
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_resume_hint_is_one_runnable_command_line() {
+        assert_eq!(resume_in(None, "qwen --resume x".into()), "qwen --resume x");
+        assert_eq!(
+            resume_in(Some(Path::new("/work/my proj")), "claude --resume x".into()),
+            "cd '/work/my proj' && claude --resume x"
+        );
+        assert_eq!(shell_quote("it's"), "'it'\\''s'");
+    }
+
     use super::*;
 
     #[test]

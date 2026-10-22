@@ -509,7 +509,10 @@ pub fn emit(session: &Session, out_dir: &Path, opts: &EmitOptions) -> Result<Emi
     Ok(EmitResult {
         path,
         new_id: new_id.clone(),
-        resume_hint: Some(format!("qwen --resume {new_id}  (run from {cwd_str})")),
+        resume_hint: Some(crate::harness::resume_in(
+            cwd.as_deref(),
+            format!("qwen --resume {}", crate::harness::shell_quote(&new_id)),
+        )),
     })
 }
 
