@@ -36,6 +36,8 @@
 
 - A watch checkpoint or archive resume state of any size is kept; past 64 KiB or 1 MiB they were silently dropped.
 
+- One changed session rewrites its own catalog row, not its harness's every row; a refreshed harness keeps its place among `cv ls` ties.
+
 - OpenClaw SQLite stores are rediscovered only when the store changes, not on every listing refresh.
 
 - A copied SQLite store with WAL frames is copied once per command, however large, not again whenever another database opens.

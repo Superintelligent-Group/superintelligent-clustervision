@@ -827,6 +827,11 @@ const ORDER: [Harness; Harness::COUNT] = [
     Harness::Devin,
 ];
 
+/// `h`'s place in registration order: where its rows sit in the catalog's listing.
+pub(crate) fn rank(h: Harness) -> usize {
+    ORDER.iter().position(|o| *o == h).expect("ORDER names every harness")
+}
+
 /// All registered adapters.
 pub fn all() -> Vec<Box<dyn Adapter>> {
     ORDER.into_iter().filter_map(for_harness).collect()

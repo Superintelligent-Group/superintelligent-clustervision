@@ -30,8 +30,8 @@ or rewritten. Paths are relative to `crates/`.
 
 | Path | Cold | Warm | One change | Set by |
 |---|---|---|---|---|
-| `discover_all` | O(S_meta + n) | O(n) stats + scan-cache hits | O(n_h) harness refresh, rows rewritten | `lib.rs` discover; `catalog.rs` publish |
-| `sessions()` / `cv ls` | as above | O(n) probe + rows, O(n log n) sort | O(n_h) | `catalog.rs` `probe_stale_in` |
+| `discover_all` | O(S_meta + n) | O(n) stats + scan-cache hits | O(n_h) refresh reads, O(changed rows) writes | `lib.rs` discover; `catalog/order.rs` |
+| `sessions()` / `cv ls` | as above | O(n) probe + rows, O(n log n) sort | as above | `catalog.rs` `probe_stale_in` |
 | Claude discovery | O(S) | O(n) | O(appended) through the continuation | `claude.rs` `cached_metadata` |
 | Codex discovery | O(Σ min(s, 8 MiB)) + zst decode | O(n) | O(min(s, 8 MiB)) | `codex.rs` `scan_rollout` |
 | Claude sub-agent forest, any demand | O(Σ s_k) | O(k) stats | O(appended) for the changed agent | `claude.rs` `agents_in_dir` |
@@ -68,8 +68,6 @@ or rewritten. Paths are relative to `crates/`.
 - **`agent-…` lookups**: rediscover the Claude harness on every call, O(n). Needs an
   agent → parent index (about 100 lines).
 - **`show --tree`**: indents by chain depth, so output is O(e²). Fixing it changes output.
-- **Catalog one-change**: rewrites every row of the harness, O(n_h). Needs per-path refresh
-  (about 150 lines).
 
 ## Surviving thresholds
 
