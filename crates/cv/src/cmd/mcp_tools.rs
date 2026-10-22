@@ -394,9 +394,10 @@ fn property_schema(cmd: &CommandSpec, a: &ArgSpec) -> Value {
     if !a.possible_values.is_empty() {
         p.insert("enum".into(), json!(a.possible_values));
     }
-    if let Some(d) = &a.default {
-        // Typed to match the property, so a client that pre-fills defaults sends a valid value.
-        p.insert("default".into(), default_value(a, d));
+    // Typed to match the property, so a client that pre-fills defaults sends a valid value; a
+    // default that does not parse as the advertised type is left out rather than advertised wrong.
+    if let Some(d) = a.default.as_deref().and_then(|d| default_value(a, d)) {
+        p.insert("default".into(), d);
     }
     if a.multiple {
         // Advertised as a typed array (hosts reject untyped properties); a bare value is
@@ -423,12 +424,13 @@ fn json_type(a: &ArgSpec) -> &'static str {
     }
 }
 
-fn default_value(a: &ArgSpec, raw: &str) -> Value {
+/// `raw` as a value of the property's JSON type, or `None` when it is not one.
+fn default_value(a: &ArgSpec, raw: &str) -> Option<Value> {
     match json_type(a) {
-        "integer" => raw.parse::<i64>().map(Value::from).unwrap_or_else(|_| json!(raw)),
-        "number" => raw.parse::<f64>().map(Value::from).unwrap_or_else(|_| json!(raw)),
-        "boolean" => raw.parse::<bool>().map(Value::from).unwrap_or_else(|_| json!(raw)),
-        _ => json!(raw),
+        "integer" => raw.parse::<i64>().ok().map(Value::from),
+        "number" => raw.parse::<f64>().ok().map(Value::from),
+        "boolean" => raw.parse::<bool>().ok().map(Value::from),
+        _ => Some(json!(raw)),
     }
 }
 
@@ -613,6 +615,33 @@ fn invalid(msg: String) -> anyhow::Error {
 mod tests {
     use super::*;
     use crate::on_main_sized_stack;
+
+    /// Every default in the tree is a value of the type its schema advertises, so none is left
+    /// out; one that is not would be omitted, never advertised as a string of the wrong type.
+    #[test]
+    fn every_advertised_default_has_its_property_type() {
+        on_main_sized_stack(|| {
+            let tools = CliTools::from_tree(&crate::build_cli()).unwrap();
+            for command in tools.commands() {
+                for arg in &command.args {
+                    if let Some(raw) = &arg.default {
+                        assert!(
+                            default_value(arg, raw).is_some(),
+                            "{} --{}: default {raw:?} is not a {}",
+                            command.name,
+                            arg.name,
+                            json_type(arg)
+                        );
+                    }
+                }
+            }
+            let mut arg = tools.commands()[0].args[0].clone();
+            arg.kind = ArgKind::Option;
+            arg.value_type = "integer".into();
+            assert_eq!(default_value(&arg, "12"), Some(json!(12)));
+            assert_eq!(default_value(&arg, "twelve"), None);
+        });
+    }
 
     #[test]
     fn skills_policy_uses_the_same_name_in_mcp_and_cli() {
