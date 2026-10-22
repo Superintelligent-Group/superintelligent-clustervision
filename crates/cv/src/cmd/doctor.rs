@@ -56,8 +56,9 @@ pub(crate) fn cmd_doctor(id: Option<String>, harness: Option<String>, recent: us
     for (r, found) in targets {
         let (rr, adapter) = match found {
             Some(adapter) => (r, adapter),
-            None => cv_core::find(&r.id, Some(r.harness))?
-                .with_context(|| format!("could not load session {}", r.id))?,
+            None => {
+                cv_core::find(&r.id, Some(r.harness))?.with_context(|| format!("could not load session {}", r.id))?
+            }
         };
         // Count decoded text in bounded chunks and request only attribution metadata facts.
         let mut pass = rep.session(Some(rr.path.clone()));

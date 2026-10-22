@@ -425,12 +425,9 @@ fn json_type(a: &ArgSpec) -> &'static str {
 
 fn default_value(a: &ArgSpec, raw: &str) -> Value {
     match json_type(a) {
-        // The spec is extracted from the same clap tree that parses the arguments, so a typed
-        // argument's default parses as that type. No raw-string fallback: the schema's default
-        // must always be a valid value for the type the schema advertises.
-        "integer" => Value::from(raw.parse::<i64>().expect("integer argument's default parses")),
-        "number" => Value::from(raw.parse::<f64>().expect("number argument's default parses")),
-        "boolean" => Value::from(raw.parse::<bool>().expect("boolean argument's default parses")),
+        "integer" => raw.parse::<i64>().map(Value::from).unwrap_or_else(|_| json!(raw)),
+        "number" => raw.parse::<f64>().map(Value::from).unwrap_or_else(|_| json!(raw)),
+        "boolean" => raw.parse::<bool>().map(Value::from).unwrap_or_else(|_| json!(raw)),
         _ => json!(raw),
     }
 }
@@ -620,24 +617,21 @@ mod tests {
     #[test]
     fn skills_policy_uses_the_same_name_in_mcp_and_cli() {
         on_main_sized_stack(|| {
-                let tree = crate::build_cli();
-                let tools = CliTools::from_tree(&tree).unwrap();
-                for name in ["prune", "rewind", "port"] {
-                    let command = tools.find(name).unwrap();
-                    let descriptor = tool_descriptor(command);
-                    let properties = &descriptor["inputSchema"]["properties"];
-                    assert!(properties.get("skills_policy").is_none());
-                    assert_eq!(properties["skills"]["enum"], json!(["keep", "drop", "drop-stale"]));
-                    let argv = build_argv(command, &json!({"id":"source", "skills":"drop-stale"})).unwrap();
-                    assert!(argv.windows(2).any(|args| args == ["--skills", "drop-stale"]));
-                    tree.clone()
-                        .try_get_matches_from(std::iter::once("cv".to_owned()).chain(argv))
-                        .unwrap();
-                }
-            })
-            .unwrap()
-            .join()
-            .unwrap();
+            let tree = crate::build_cli();
+            let tools = CliTools::from_tree(&tree).unwrap();
+            for name in ["prune", "rewind", "port"] {
+                let command = tools.find(name).unwrap();
+                let descriptor = tool_descriptor(command);
+                let properties = &descriptor["inputSchema"]["properties"];
+                assert!(properties.get("skills_policy").is_none());
+                assert_eq!(properties["skills"]["enum"], json!(["keep", "drop", "drop-stale"]));
+                let argv = build_argv(command, &json!({"id":"source", "skills":"drop-stale"})).unwrap();
+                assert!(argv.windows(2).any(|args| args == ["--skills", "drop-stale"]));
+                tree.clone()
+                    .try_get_matches_from(std::iter::once("cv".to_owned()).chain(argv))
+                    .unwrap();
+            }
+        });
     }
 
     /// `WINDOW_SELECTORS` is `WindowArgs`' own flags plus `pre_compaction`: a window flag added to

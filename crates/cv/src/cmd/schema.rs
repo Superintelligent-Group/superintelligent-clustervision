@@ -286,8 +286,7 @@ mod tests {
         for k in MessageKind::ALL {
             let name = k.as_str();
             assert_eq!(serde_json::to_value(k).unwrap(), json!(name), "kind {name}");
-            serde_json::from_value::<MessageKind>(json!(name))
-                .unwrap_or_else(|e| panic!("kind {name}: {e}"));
+            serde_json::from_value::<MessageKind>(json!(name)).unwrap_or_else(|e| panic!("kind {name}: {e}"));
         }
         for o in Origin::ALL {
             let name = o.as_str();

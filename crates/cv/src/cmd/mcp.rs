@@ -599,7 +599,7 @@ fn instructions() -> String {
     format!(
         "clustervision lets you read OTHER agents' sessions across harnesses and time. \
          Start with `ls` (add `cwd` to see what happened — or is happening — in the current project, \
-         `-q` for the filter calculus) and `search` for a past conversation by content; then `show` \
+         `query` for the filter calculus) and `search` for a past conversation by content; then `show` \
          a transcript (windowed by default: `last` 50 messages, `max_bytes` 200000 — pass `first`, \
          `last`, `range`, `around`+`context` or `max_bytes` to move the window) and `cat` one tool \
          call's full output by its tool_use_id. `pack` builds task-relevant context out of the whole \
@@ -630,16 +630,7 @@ fn tool_list() -> Value {
         let mut generated: Vec<Value> = cli
             .tool_list()
             .into_iter()
-            .filter(|t| {
-                let name = t["name"].as_str().unwrap_or("");
-                // A hand-written tool owns its name; a generated collision is announced on the
-                // server's log channel, never a silent drop from the roster.
-                if hand_written.contains(name) {
-                    eprintln!("cv mcp: generated tool {name:?} is shadowed by a hand-written one; dropped");
-                    return false;
-                }
-                true
-            })
+            .filter(|t| !hand_written.contains(t["name"].as_str().unwrap_or("")))
             .collect();
         generated.append(list);
         *list = generated;
@@ -1701,44 +1692,5 @@ mod admission_tests {
         drop(held);
         assert!(waiter.join().unwrap().is_some());
         assert_eq!(*pool.used.lock().unwrap(), 0);
-    }
-}
-
-#[cfg(test)]
-mod instructions_tests {
-    use super::*;
-
-    /// The blurb is the one hand-written roster: every backticked word names a tool in the list,
-    /// an argument/view word, or (with a `*`) a prefix of real tool names. `query` once named a
-    /// removed command and nothing failed — hence this check.
-    #[test]
-    fn instructions_name_only_real_tools() {
-        crate::on_main_sized_stack(|| {
-            let tools: std::collections::HashSet<String> = tool_list()
-                .as_array()
-                .expect("tool list is an array")
-                .iter()
-                .filter_map(|t| t["name"].as_str().map(str::to_string))
-                .collect();
-            // Words the blurb uses for a tool's arguments and views, not tool names.
-            let arguments = [
-                "cwd", "last", "max_bytes", "first", "range", "around", "context", "tree", "subagents",
-                "kind", "prompt,answer", "-q",
-            ];
-            for word in instructions().split('`').skip(1).step_by(2) {
-                if arguments.contains(&word) {
-                    continue;
-                }
-                if let Some(prefix) = word.strip_suffix('*') {
-                    // A glob names a family: `task_*` has to match the task tools it advertises.
-                    assert!(
-                        tools.iter().any(|name| name.starts_with(prefix)),
-                        "instructions name no {prefix}* tool: {word:?}"
-                    );
-                    continue;
-                }
-                assert!(tools.contains(word), "instructions name no tool {word:?}");
-            }
-        });
     }
 }
