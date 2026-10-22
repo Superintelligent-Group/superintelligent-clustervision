@@ -624,7 +624,6 @@ mod tests {
     use crate::ir::*;
     use anyhow::Context as _;
     use serde_json::json;
-    use uuid::Uuid;
 
     #[test]
     fn native_source_validation_checks_complete_record_without_lazy_blocks() -> Result<()> {
@@ -642,10 +641,18 @@ mod tests {
         Ok(())
     }
 
-    fn temp_dir() -> PathBuf {
-        let d = std::env::temp_dir().join(format!("cv-emit-{}", Uuid::new_v4()));
-        fs::create_dir_all(&d).unwrap();
-        d
+    /// A scratch dir removed when the test ends — failed or not — by the same [`World`](cv_testkit::World)
+    /// facility [`crate::test_world`] sits on. The environment stays untouched: these tests read none.
+    struct Scratch(cv_testkit::World);
+    impl std::ops::Deref for Scratch {
+        type Target = PathBuf;
+        fn deref(&self) -> &PathBuf {
+            &self.0.base
+        }
+    }
+
+    fn temp_dir() -> Scratch {
+        Scratch(cv_testkit::World::new("emit"))
     }
 
     fn sample_session(harness: Harness) -> Session {
@@ -833,7 +840,6 @@ mod tests {
             .is_err());
             assert_eq!(fs::read(path)?, bytes);
         }
-        fs::remove_dir_all(out)?;
         Ok(())
     }
 
@@ -1465,7 +1471,6 @@ mod tests {
                         );
                     }
                 }
-                let _ = fs::remove_dir_all(&out);
             }
         }
 
@@ -1474,7 +1479,6 @@ mod tests {
             let out = temp_dir();
             let res = emit(s, Harness::Claude, &out, &EmitOptions::default()).unwrap();
             let text = fs::read_to_string(&res.path).unwrap();
-            let _ = fs::remove_dir_all(&out);
             text
         };
         let t = emit_main(&src);
@@ -2476,7 +2480,6 @@ mod tests {
             }
         }
 
-        fs::remove_dir_all(&out).ok();
     }
 
     // --------------------------------------------------------------------------------------------
@@ -3325,7 +3328,6 @@ mod tests {
                 first.path,
                 "{target}"
             );
-            std::fs::remove_dir_all(&out).ok();
         }
     }
 
