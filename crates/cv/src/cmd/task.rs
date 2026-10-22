@@ -566,6 +566,14 @@ fn resolve_target(id: &str) -> Result<String> {
     Ok(resolve(&outcome.model, id)?.to_string())
 }
 
+/// Resolve a mutation target and the task it names, after reporting replay warnings.
+fn resolve_target_and(id: &str, other: &str) -> Result<(String, String)> {
+    let outcome = replay_loud()?;
+    let id = resolve(&outcome.model, id)?.to_string();
+    let other = resolve(&outcome.model, other)?.to_string();
+    Ok((id, other))
+}
+
 /// Append an agent event, print confirmation and return its task id for follow-up events.
 fn append_event(task_id: Option<&str>, from: &str, kind: TaskEventKind) -> Result<String> {
     let store = TaskStore::default_store();
@@ -593,6 +601,23 @@ fn text_arg(text: Option<String>, file: Option<PathBuf>) -> Result<Option<String
         (None, Some(file)) => read_text_arg(&file).map(Some),
         (None, None) => Ok(None),
     }
+}
+
+/// `--repo`, canonicalized (the record outlives the shell it was typed in).
+fn canonical_repo(repo: Option<PathBuf>) -> Result<Option<PathBuf>> {
+    match repo {
+        Some(r) => Ok(Some(
+            r.canonicalize()
+                .with_context(|| format!("repo {} not found", r.display()))?,
+        )),
+        None => Ok(None),
+    }
+}
+
+/// `--body TEXT` (`-` = stdin) or `--body-file PATH`; the flag has a default when no file is given.
+fn body_arg(body: String, body_file: Option<PathBuf>) -> Result<String> {
+    Ok(text_arg(body_file.is_none().then_some(body), body_file)?
+        .expect("body has a default when no file is supplied"))
 }
 
 /// `--note TEXT` (`-` = stdin) or `--note-file PATH`, whichever was given.
@@ -699,16 +724,9 @@ pub(crate) fn cmd_task(action: TaskCmd) -> Result<()> {
             from,
         } => {
             refuse_channel(channel)?;
-            let repo = match repo {
-                Some(r) => Some(
-                    r.canonicalize()
-                        .with_context(|| format!("repo {} not found", r.display()))?,
-                ),
-                None => None,
-            };
+            let repo = canonical_repo(repo)?;
             let issue = absolutize_issue(issue, repo.as_deref());
-            let body = text_arg(body_file.is_none().then_some(body), body_file)?
-                .expect("body has a default when no file is supplied");
+            let body = body_arg(body, body_file)?;
             let tags = tags.as_deref().map(parse_tags).unwrap_or_default();
             // Relations name other tasks: resolve every prefix BEFORE the open, so a typo refuses
             // the whole command instead of leaving a task opened with half its relations.
@@ -956,9 +974,7 @@ pub(crate) fn cmd_task(action: TaskCmd) -> Result<()> {
             close_with_note(&id, &from_or_cv(from), note, TaskEventKind::Abandoned { reason })
         }
         TaskCmd::Supersede { id, by_task, from } => {
-            let outcome = replay_loud()?;
-            let id = resolve(&outcome.model, &id)?.to_string();
-            let by_task = resolve(&outcome.model, &by_task)?.to_string();
+            let (id, by_task) = resolve_target_and(&id, &by_task)?;
             append_event(Some(&id), &from_or_cv(from), TaskEventKind::Superseded { by_task }).map(|_| ())
         }
         TaskCmd::Tag { id, tags, from } => {
@@ -970,9 +986,7 @@ pub(crate) fn cmd_task(action: TaskCmd) -> Result<()> {
             append_event(Some(&id), &from_or_cv(from), TaskEventKind::Tagged { tags }).map(|_| ())
         }
         TaskCmd::Block { id, by_task, from } => {
-            let outcome = replay_loud()?;
-            let id = resolve(&outcome.model, &id)?.to_string();
-            let by_task = resolve(&outcome.model, &by_task)?.to_string();
+            let (id, by_task) = resolve_target_and(&id, &by_task)?;
             append_event(Some(&id), &from_or_cv(from), TaskEventKind::BlockedBy { task: by_task }).map(|_| ())
         }
         TaskCmd::Sweep { repo, main, json } => cmd_sweep(&repo, main, json),
@@ -1025,15 +1039,8 @@ pub(crate) fn cmd_task(action: TaskCmd) -> Result<()> {
         } => {
             refuse_token(token)?;
             refuse_channel(channel)?;
-            let repo = match repo {
-                Some(r) => Some(
-                    r.canonicalize()
-                        .with_context(|| format!("repo {} not found", r.display()))?,
-                ),
-                None => None,
-            };
-            let body = text_arg(body_file.is_none().then_some(body), body_file)?
-                .expect("body has a default when no file is supplied");
+            let repo = canonical_repo(repo)?;
+            let body = body_arg(body, body_file)?;
             let now = Utc::now();
             let deadline = match by {
                 Some(b) => Some(task::parse_deadline(&b, now).map_err(|e| anyhow::anyhow!(e))?),

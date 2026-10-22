@@ -367,13 +367,15 @@ pub(crate) fn event_json(ev: &TaskEvent, model: &TaskReadModel) -> serde_json::V
                 obj.insert("assignee".into(), serde_json::Value::String(a.clone()));
             }
         }
-        // The same telling detail the text feed prints, so a page need not know every kind.
+        // The telling detail the text feed prints, shaped alike but at this feed's own widths,
+        // so a page need not know every kind.
         obj.insert("detail".into(), serde_json::Value::String(event_detail(ev)));
     }
     v
 }
 
-/// The telling detail of one event (what `event_text` prints after the kind), sanitized.
+/// The telling detail of one event, shaped like the one `event_text` prints after the kind but
+/// at this feed's own widths, sanitized.
 pub(crate) fn event_detail(ev: &TaskEvent) -> String {
     match &ev.kind {
         TaskEventKind::Noted { text, .. } => truncate(&sanitize_line(text), 160),

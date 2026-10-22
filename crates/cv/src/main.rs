@@ -128,7 +128,6 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    // ───────────────────────────── Read ─────────────────────────────
     /// List discovered sessions across all harnesses.
     Ls {
         /// Only this harness (claude, codex, grok, opencode, gemini, cursor, kimi, kimi-code,
@@ -480,7 +479,6 @@ enum Cmd {
         json: bool,
     },
 
-    // ───────────────────────────── Reshape ─────────────────────────────
     /// Custom, lossless compaction of a Claude session into a NEW resumable session: snip bulky old
     /// tool payloads (large reads/logs/screenshots) into a sidecar, leaving a small `[PRUNED]` marker
     /// — your prompts and flow stay verbatim, the recent turns stay sharp. Resume with
@@ -801,7 +799,6 @@ enum Cmd {
         launch: bool,
     },
 
-    // ───────────────────────────── Export ─────────────────────────────
     /// Export a session to markdown or OpenSession JSON (stdout); `cv share` is the HTML artifact.
     Export {
         id: String,
@@ -892,7 +889,6 @@ enum Cmd {
         json: bool,
     },
 
-    // ───────────────────────────── Fleet & live ─────────────────────────────
     /// Fleet task substrate: dispatch, review, and git-observed landing.
     Task {
         #[command(subcommand)]
@@ -994,7 +990,6 @@ enum Cmd {
         no_redact: bool,
     },
 
-    // ───────────────────────────── System ─────────────────────────────
     /// Build/refresh the tantivy full-text index that makes `cv search` instant.
     ///
     /// Incremental by default: only changed/new sessions are re-indexed and vanished ones reaped,
