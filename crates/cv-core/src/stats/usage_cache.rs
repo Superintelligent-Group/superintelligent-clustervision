@@ -418,6 +418,7 @@ impl Publisher {
         }
         if hit.write(self).inspect_err(note).is_err() {
             self.failed = true;
+            return;
         }
         self.rows += 1;
     }

@@ -95,7 +95,10 @@ fn write_parts(writer: &mut dyn Write, parts: &[Part<'_>], resolver: &Resolver) 
             Part::Thinking { text, signature } => {
                 genai::text_fields(&mut row, text, true, signature.as_deref(), resolver)?
             }
-            Part::Other(block @ (Block::Image { .. } | Block::File { .. })) => genai::media_fields(&mut row, block)?,
+            Part::Other(Block::Image { media_type, .. }) => genai::image_fields(&mut row, media_type.as_deref())?,
+            Part::Other(Block::File { mime, path, source }) => {
+                genai::file_fields(&mut row, mime.as_deref(), path.as_deref(), source.as_deref())?
+            }
             Part::Other(Block::ToolUse {
                 id,
                 name,

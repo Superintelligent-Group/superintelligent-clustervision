@@ -88,8 +88,22 @@ fn text(fields: &Fields<'_>, key: &str, spans: bool) -> Result<Option<Text>> {
         .transpose()
         .map(Option::flatten)
 }
-fn nonempty(text: Option<Text>) -> Option<Text> {
-    text.filter(|text| !text.is_empty())
+/// One emptiness rule per type: `Text`'s inherent `is_empty` (span-safe `len`), `String`'s own.
+trait NonEmpty {
+    fn is_nonempty(&self) -> bool;
+}
+impl NonEmpty for Text {
+    fn is_nonempty(&self) -> bool {
+        !self.is_empty()
+    }
+}
+impl NonEmpty for String {
+    fn is_nonempty(&self) -> bool {
+        !self.is_empty()
+    }
+}
+fn nonempty<T: NonEmpty>(text: Option<T>) -> Option<T> {
+    text.filter(|text| text.is_nonempty())
 }
 fn nonnull(fields: &Fields<'_>, key: &str) -> Result<Option<Value>> {
     let Some(value) = fields.get(key) else { return Ok(None) };
@@ -413,12 +427,7 @@ fn agent_block(view: JsonView<'_>, spans: bool) -> Result<Option<Block>> {
                 .transpose()?
                 .flatten()
                 .unwrap_or_default(),
-            signature: fields
-                .as_ref()
-                .map(|v| v.string("signature"))
-                .transpose()?
-                .flatten()
-                .filter(|s| !s.is_empty()),
+            signature: nonempty(fields.as_ref().map(|v| v.string("signature")).transpose()?.flatten()),
             encrypted: None,
             redacted: false,
         }));

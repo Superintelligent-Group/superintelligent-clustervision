@@ -14,6 +14,8 @@ pub(crate) trait Record: Sized {
     fn heap_bytes(&self) -> usize;
     fn write(&self, writer: &mut impl Write) -> Result<()>;
     /// Read exactly one record. Codecs must preserve their consumer's exact wire/value contract.
+    /// `state` is per-reader carry state — a scratch buffer or a read budget; `Default` arms
+    /// nothing, the contract under which the ordered spool re-reads its own staged bytes.
     fn read(reader: &mut impl BufRead, state: &mut Self::ReadState) -> Result<Self>;
 }
 

@@ -2324,12 +2324,19 @@ fn assert_frozen_plan(key: &str, plan: Option<&SourcePrune>) {
         for payload in &p.payloads {
             write_source_payload(payload, &mut sidecar).unwrap();
         }
-        let hash = |bytes: &[u8]| {
-            let mut h = crate::digest::Sha256::new();
-            h.update(bytes);
-            h.finish_hex()
+        // Bounded bytes read as text in a failure diff; output and payloads past the bound keep a
+        // hash so the committed fixture stays small.
+        let frozen = |bytes: &[u8]| {
+            const INLINE_BYTES: usize = 4096;
+            if bytes.len() <= INLINE_BYTES {
+                serde_json::Value::String(String::from_utf8(bytes.to_vec()).expect("frozen output is UTF-8"))
+            } else {
+                let mut h = crate::digest::Sha256::new();
+                h.update(bytes);
+                serde_json::Value::String(h.finish_hex())
+            }
         };
-        serde_json::json!({"key": key, "output": hash(&output), "sidecar": hash(&sidecar), "count":p.payloads.len(), "images":p.images,"saved":p.saved,"estimate":[p.estimate.tokens,p.estimate.signature,p.estimate.images]})
+        serde_json::json!({"key": key, "output": frozen(&output), "sidecar": frozen(&sidecar), "count":p.payloads.len(), "images":p.images,"saved":p.saved,"estimate":[p.estimate.tokens,p.estimate.signature,p.estimate.images]})
     } else {
         serde_json::json!({"key":key,"none":true})
     };
