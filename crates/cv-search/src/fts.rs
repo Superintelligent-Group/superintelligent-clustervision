@@ -3071,7 +3071,6 @@ mod tests {
             "heap":heap,"wall_seconds":wall,"unchanged_wall_seconds":repeat_started.elapsed().as_secs_f64(),
             "tantivy_tokenization":true,"commits_and_compaction":true})
         );
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -3156,7 +3155,6 @@ mod tests {
             assert!(cv_core::catalog::AffordanceTable::load().counts(r).is_some());
         }
         assert_eq!(sweep(&dir, refs, false, false).unwrap().changed, 0);
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     /// Every stored document of the index at `dir`, canonically ordered.
@@ -3217,7 +3215,6 @@ mod tests {
             let reference = tmpdir();
             sweep(&reference, refs, false, false).unwrap();
             assert_eq!(all_docs(dir), all_docs(&reference));
-            std::fs::remove_dir_all(reference).unwrap();
             assert_eq!(text_search(dir, "zqcopy", 5).unwrap()[0].id, "zqa");
             assert!(text_search(dir, "zqorig", 5).unwrap().is_empty());
             let catalog = rusqlite::Connection::open(w.cv_home.join("catalog.db")).unwrap();
@@ -3256,7 +3253,6 @@ mod tests {
         std::fs::write(&preferred, rollout("zqa", "2026-08-01T12:00:00Z", "zqcopy again")).unwrap();
         check(&dir, true, 1);
         assert!(text_search(&dir, "zqbee", 5).unwrap().is_empty());
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -3304,7 +3300,6 @@ mod tests {
         ));
         assert!(cv_core::resume::MarkTable::load().get(&r).is_none());
         assert!(cv_core::catalog::AffordanceTable::load().counts(&r).is_none());
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -3404,7 +3399,6 @@ mod tests {
             std::fs::write(&conditional, "conditional appeared or changed").unwrap();
             assert!(!stored.fresh(&mut cv_core::source::Probe::default()));
         }
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -3442,7 +3436,6 @@ mod tests {
                 assert!(emitted > 0);
             }
         }
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -3487,13 +3480,11 @@ mod tests {
         assert!(sink.finish().is_err());
         drop(sink);
         assert!(emitted > 0);
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
     fn tool_input_source_json_matches_canonical_body_and_reports_staleness() {
-        let dir = std::env::temp_dir().join(format!("cv-fts-json-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir(&dir).unwrap();
+        let dir = tmpdir();
         let path = dir.join("input.json");
         let raw = format!("{{\"arg\":\"{}\",\"tail\":true}}", "\\u00e9\\n\\\"".repeat(CHUNK_BYTES));
         std::fs::write(&path, &raw).unwrap();
@@ -3524,7 +3515,6 @@ mod tests {
         let mut sink = ChunkSink::new(&mut ignore, &f, &r, 1, 1, Default::default());
         sink.append_block(&cv_core::Resolver::new(None), &block);
         assert!(format!("{:#}", sink.finish().unwrap_err()).contains("JSON source changed"));
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -3630,10 +3620,24 @@ mod tests {
         );
     }
 
-    fn tmpdir() -> std::path::PathBuf {
+    /// A temp directory that removes itself on drop: the hand-rolled `remove_dir_all` teardown
+    /// this replaces only ran on success, so any failing assert leaked the directory.
+    struct TmpDir(std::path::PathBuf);
+    impl std::ops::Deref for TmpDir {
+        type Target = std::path::Path;
+        fn deref(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+    impl Drop for TmpDir {
+        fn drop(&mut self) {
+            std::fs::remove_dir_all(&self.0).ok();
+        }
+    }
+    fn tmpdir() -> TmpDir {
         let d = std::env::temp_dir().join(format!("cv-search-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&d).unwrap();
-        d
+        TmpDir(d)
     }
 
     /// Indexing tees events into the catalog, whose path comes from `CLUSTERVISION_HOME`. Tests
@@ -3641,19 +3645,14 @@ mod tests {
     /// (and remove the home on drop), never at the shared real catalog.
     struct IsolatedHome {
         _scope: cv_core::env::Scope,
-        home: std::path::PathBuf,
+        home: TmpDir,
     }
     impl IsolatedHome {
         fn new() -> Self {
             let home = tmpdir();
             let scope = (*cv_core::env::Env::current()).clone().enter();
-            scope.set("CLUSTERVISION_HOME", &home);
+            scope.set("CLUSTERVISION_HOME", &*home);
             IsolatedHome { _scope: scope, home }
-        }
-    }
-    impl Drop for IsolatedHome {
-        fn drop(&mut self) {
-            std::fs::remove_dir_all(&self.home).ok();
         }
     }
 
@@ -3730,8 +3729,6 @@ mod tests {
         let mut broken = fields.clone();
         broken.id = fields.preview; // Stored-only field: a term lookup must fail.
         assert!(meta_doc(&searcher, &broken, "metadata-error").is_err());
-        std::fs::remove_dir_all(dir).unwrap();
-        std::fs::remove_dir_all(source).unwrap();
     }
 
     #[test]
@@ -3797,8 +3794,6 @@ mod tests {
         writer.commit().unwrap();
         assert_eq!(text_search_ids(&dir, "allmatches").unwrap(), expected);
         drop(writer);
-        std::fs::remove_dir_all(dir).ok();
-        std::fs::remove_dir_all(sdir).ok();
     }
 
     /// Run in an isolated process. Prepare once, then compare full/head modes under `/usr/bin/time`.
@@ -3936,7 +3931,6 @@ mod tests {
             text_search_indexed(&dir, "needle", 3).unwrap()[1].snippet,
             "dominant preview"
         );
-        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]
@@ -3951,7 +3945,6 @@ mod tests {
         assert!(crate::is_invalid_text_query(batch[1].as_ref().unwrap_err()));
         let setup = text_search_ids(&dir.join("missing"), "needle").unwrap_err();
         assert!(!crate::is_invalid_text_query(&setup));
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -3991,7 +3984,6 @@ mod tests {
                 assert_eq!(hits[0].harness, "codex");
                 assert_eq!(hits[0].snippet, "right");
             }
-            std::fs::remove_dir_all(dir).unwrap();
         }
     }
 
@@ -4039,7 +4031,6 @@ mod tests {
             actual.iter().find(|hit| hit.id == "duplicate-meta").unwrap().snippet,
             "matching meta"
         );
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -4125,7 +4116,6 @@ mod tests {
         )
         .unwrap()
         .is_empty());
-        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]
@@ -4184,7 +4174,6 @@ mod tests {
             .unwrap()
             .is_empty());
         }
-        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]
@@ -4207,8 +4196,6 @@ mod tests {
         assert!(hits[0].snippet.contains("replacementbody"));
         assert_eq!(hits[1].snippet, untouched);
         assert!(hits[1].snippet.contains("originalbody"));
-        std::fs::remove_dir_all(dir).ok();
-        std::fs::remove_dir_all(sdir).ok();
     }
 
     #[test]
@@ -4249,8 +4236,6 @@ mod tests {
         // Conjunction-by-default: a term present in neither yields nothing.
         assert!(text_search(&dir, "kubernetes", 10).unwrap().is_empty());
 
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::remove_dir_all(&sdir).ok();
     }
 
     #[test]
@@ -4296,8 +4281,6 @@ mod tests {
             "the live snippet scans the file too: {:?}",
             hits[0].snippet
         );
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::remove_dir_all(&sdir).ok();
     }
 
     #[test]
@@ -4355,9 +4338,6 @@ mod tests {
         assert_eq!(refresh().changed, 1);
         assert_eq!(text_search(&dir, "zanzibar", 10).unwrap().len(), 1);
         assert_eq!(refresh().changed, 0);
-        for d in [dir, sdir, external] {
-            std::fs::remove_dir_all(d).unwrap();
-        }
     }
 
     #[test]
@@ -4375,7 +4355,7 @@ mod tests {
             "message":{"role":"user","content":"zanzibar"}})
         );
         std::fs::write(&wire, line.repeat(8192)).unwrap();
-        let r = cv_core::SessionRef::new("directory", cv_core::Harness::KimiCode, &sdir);
+        let r = cv_core::SessionRef::new("directory", cv_core::Harness::KimiCode, &*sdir);
         let refresh = |rebuild| sweep(&dir, vec![r.clone()], rebuild, false).unwrap();
         assert_eq!(refresh(false).changed, 1);
         assert_eq!(refresh(false).changed, 0);
@@ -4411,8 +4391,6 @@ mod tests {
         let changed = refresh(false);
         assert_eq!((changed.changed, changed.resumed), (1, 0));
         assert_eq!(refresh(false).changed, 0);
-        std::fs::remove_dir_all(dir).unwrap();
-        std::fs::remove_dir_all(sdir).unwrap();
     }
 
     #[test]
@@ -4435,15 +4413,12 @@ mod tests {
         assert_eq!(refresh().changed, 1);
         assert_eq!(counts().get(&cv_core::affordance::Kind::Fork), Some(&1));
         assert_eq!(refresh().changed, 0);
-        let directory_mtime = std::fs::metadata(&sdir).unwrap().modified().unwrap();
+        let directory_mtime = std::fs::metadata(&*sdir).unwrap().modified().unwrap();
         std::fs::write(&sibling, format!("{copied}\n").replace("shared", "other!")).unwrap();
-        assert_eq!(std::fs::metadata(&sdir).unwrap().modified().unwrap(), directory_mtime);
+        assert_eq!(std::fs::metadata(&*sdir).unwrap().modified().unwrap(), directory_mtime);
         assert_eq!(refresh().changed, 1);
         assert_eq!(counts().get(&cv_core::affordance::Kind::Fork).copied().unwrap_or(0), 0);
         assert_eq!(refresh().changed, 0);
-        for d in [dir, sdir] {
-            std::fs::remove_dir_all(d).unwrap();
-        }
     }
 
     #[test]
@@ -4490,9 +4465,6 @@ mod tests {
             observe(&dir, std::slice::from_ref(&r), &[]),
             whole_sweep(std::slice::from_ref(&r), &[])
         );
-        for path in [dir, base] {
-            std::fs::remove_dir_all(path).unwrap();
-        }
     }
 
     #[test]
@@ -4511,8 +4483,6 @@ mod tests {
         assert!(text_search(&dir, "alpha", 10).unwrap().is_empty());
         assert_eq!(text_search(&dir, "delta", 10).unwrap().len(), 1);
 
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::remove_dir_all(&sdir).ok();
     }
 
     /// Rewrite a file with its own byte-identical content — bumping mtime (the OS stamps "now" on
@@ -4606,8 +4576,6 @@ mod tests {
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].id, "s2");
 
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::remove_dir_all(&sdir).ok();
     }
 
     #[test]
@@ -4669,8 +4637,6 @@ mod tests {
         );
         std::fs::remove_file(&older.path).unwrap();
         assert_eq!(sweep(&dir, vec![older, newer], false, false).unwrap().errors, 1);
-        std::fs::remove_dir_all(dir).unwrap();
-        std::fs::remove_dir_all(oracle).unwrap();
     }
 
     #[test]
@@ -4760,8 +4726,6 @@ mod tests {
             text_search_ids(&dir, "amber").unwrap(),
             text_search_ids(&oracle, "amber").unwrap()
         );
-        std::fs::remove_dir_all(dir).unwrap();
-        std::fs::remove_dir_all(oracle).unwrap();
     }
 
     #[test]
@@ -4841,8 +4805,6 @@ mod tests {
             text_search_ids(&dir, "sapphire").unwrap(),
             text_search_ids(&oracle, "sapphire").unwrap()
         );
-        std::fs::remove_dir_all(dir).unwrap();
-        std::fs::remove_dir_all(oracle).unwrap();
     }
 
     #[test]
@@ -4858,7 +4820,7 @@ mod tests {
         std::fs::write(&transcript, "{\"type\":\"user\",\"content\":\"zqbeforechild\"}\n").unwrap();
         let r = cv_core::SessionRef {
             harness: cv_core::Harness::Grok,
-            path: sdir.clone(),
+            path: std::path::PathBuf::from(&*sdir),
             ..sref("grok-child", "child", "unused".into())
         };
         sweep(&dir, vec![r.clone()], false, false).unwrap();
@@ -4889,9 +4851,6 @@ mod tests {
         );
         assert!(!cv_core::events::needs_ingest(&r));
         assert!(!cv_core::catalog::AffordanceTable::load().stale(&r));
-        for d in [dir, sdir] {
-            std::fs::remove_dir_all(d).ok();
-        }
     }
 
     #[test]
@@ -4925,9 +4884,6 @@ mod tests {
         );
         assert!(!cv_core::catalog::AffordanceTable::load().stale(&r));
         assert_eq!(sweep(&dir, vec![r], false, false).unwrap().changed, 0);
-        for d in [dir, sdir] {
-            std::fs::remove_dir_all(d).ok();
-        }
     }
 
     #[test]
@@ -4964,9 +4920,6 @@ mod tests {
         );
         assert!(!cv_core::events::needs_ingest(&r));
         assert!(!cv_core::catalog::AffordanceTable::load().stale(&r));
-        for d in [dir, sdir] {
-            std::fs::remove_dir_all(d).ok();
-        }
     }
 
     /// The core invariant of `ChunkSink`: a body larger than [`CHUNK_BYTES`] is flushed into several
@@ -4995,8 +4948,6 @@ mod tests {
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].id, "big");
 
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::remove_dir_all(&sdir).ok();
     }
 
     /// A session with no discovery title labels itself from the first user message, and the body
@@ -5022,8 +4973,6 @@ mod tests {
         // No ai-title → label is the first user message's text.
         assert_eq!(hits[0].title.as_deref(), Some("alpha question about tantivy"));
 
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::remove_dir_all(&sdir).ok();
     }
 
     /// `live_snippet` must stay O(cap) on a session fronted by one giant field: a term within the
@@ -5047,7 +4996,6 @@ mod tests {
             "beyond-cap term must fall back to the head, got: {snip:?}"
         );
 
-        std::fs::remove_dir_all(&sdir).ok();
     }
 
     #[test]
@@ -5076,7 +5024,7 @@ mod tests {
             .unwrap();
         writer.commit().unwrap();
         drop(writer);
-        let store = std::fs::read_dir(&dir)
+        let store = std::fs::read_dir(&*dir)
             .unwrap()
             .map(|entry| entry.unwrap().path())
             .find(|path| path.extension().is_some_and(|ext| ext == "store"))
@@ -5086,7 +5034,6 @@ mod tests {
         assert!(read_indexed_metadata(&index, &f, true).is_err());
         assert!(sweep(&dir, Vec::new(), false, false).is_err());
         assert_eq!(std::fs::read(dir.join("meta.json")).unwrap(), before);
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -5133,7 +5080,6 @@ mod tests {
         let before = std::fs::read(dir.join("meta.json")).unwrap();
         assert!(sweep(&dir, Vec::new(), false, false).is_err());
         assert_eq!(std::fs::read(dir.join("meta.json")).unwrap(), before);
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -5174,8 +5120,6 @@ mod tests {
             "head fallback snippet expected: {:?}",
             hits[0].snippet
         );
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::remove_dir_all(&sdir).ok();
     }
 
     /// Fix for the blank-snippet hole: when a hit's source file has been deleted since indexing,
@@ -5213,8 +5157,6 @@ mod tests {
             hits[0].snippet
         );
 
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::remove_dir_all(&sdir).ok();
     }
 
     /// The event ride-along, end to end through the production `index_session` tee: one indexing
@@ -5269,7 +5211,6 @@ mod tests {
         assert_eq!(touched[0].session_id, "tee-evt");
         assert_eq!(touched[0].edits, 1);
 
-        std::fs::remove_dir_all(&dir).ok();
         // `h` drops here: removes CLUSTERVISION_HOME, deletes the temp home, releases the lock.
     }
 
@@ -5310,8 +5251,6 @@ mod tests {
         write_subagent(&pp, "count-child", "a substantially longer changed child body");
         let changed = sweep(&dir, vec![parent], false, true).unwrap();
         assert_eq!((changed.changed, changed.unchanged), (1, 1));
-        std::fs::remove_dir_all(dir).ok();
-        std::fs::remove_dir_all(sdir).ok();
     }
 
     /// `cv index --subagents` end to end: a string living ONLY inside a sub-agent transcript is
@@ -5361,8 +5300,6 @@ mod tests {
         assert_eq!(scoped.len(), 1);
         assert_eq!(scoped[0].id, "agent-child9");
 
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::remove_dir_all(&sdir).ok();
     }
 
     /// Regression for the truncated-fresh hole: a parse error *after* chunk docs were already
@@ -5459,7 +5396,6 @@ mod tests {
                 .is_empty());
             assert!(cv_core::events::needs_ingest(&r));
             assert!(cv_core::resume::MarkTable::load().get(&r).is_none());
-            std::fs::remove_dir_all(dir).unwrap();
         }
     }
 
@@ -5565,7 +5501,6 @@ mod tests {
             .is_empty());
         assert!(cv_core::events::needs_ingest(&r));
         assert!(cv_core::resume::MarkTable::load().get(&r).is_none());
-        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]
@@ -5631,7 +5566,6 @@ mod tests {
             "a failed session must not enter the freshness skip-set (B1)"
         );
 
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// The sweep reads on every core and writes on one: over many sessions, two of them files under
@@ -5677,9 +5611,6 @@ mod tests {
             };
             assert_eq!(ids(&seq), ids(&par), "{q}");
         }
-        for d in [seq, par, sdir, dup] {
-            std::fs::remove_dir_all(d).ok();
-        }
     }
 
     /// Equal scores rank by session id, whatever order the index was written in.
@@ -5698,8 +5629,6 @@ mod tests {
             .map(|h| h.id)
             .collect();
         assert_eq!(ids, ["aa", "mm", "zz"]);
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::remove_dir_all(&sdir).ok();
     }
 
     /// Regression: an FTS-fresh sub-agent whose *catalog* is stale (e.g. first run after an
@@ -5757,8 +5686,6 @@ mod tests {
             "an FTS-fresh, events-stale sub-agent must keep its docs (B2)"
         );
 
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::remove_dir_all(&sdir).ok();
     }
 
     /// A catalog wipe removes FTS's independent dependency baselines too. Existing documents
@@ -5790,8 +5717,6 @@ mod tests {
             0,
             "one incremental reread establishes the new baselines"
         );
-        std::fs::remove_dir_all(dir).ok();
-        std::fs::remove_dir_all(sdir).ok();
     }
 
     /// Regression: a plain (no `--subagents`) refresh after `cv index --subagents` must NOT
@@ -5820,8 +5745,6 @@ mod tests {
         );
         assert_eq!(text_search(&dir, "orchestrator", 10).unwrap().len(), 1);
 
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::remove_dir_all(&sdir).ok();
     }
 
     #[test]
@@ -5882,7 +5805,6 @@ mod tests {
         std::fs::remove_file(top.path).unwrap();
         assert_eq!(sweep(&dir, vec![b, a], false, true).unwrap().changed, 1);
         assert!(text_search_ids(&dir, "topaz").unwrap().is_empty());
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -5969,7 +5891,6 @@ mod tests {
             sweep(&dir, vec![parent], false, true).unwrap().observed.work,
             SweepWork::default()
         );
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     /// The forest fold also tees sub-agent events into the catalog WITH provenance: a file the
@@ -6015,7 +5936,6 @@ mod tests {
         assert_eq!(edit.parent_id.as_deref(), Some("evt-parent"));
         assert_eq!(edit.agent_id.as_deref(), Some("ed1"));
 
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// The preview rides only the session's *first* chunk doc, but a hit can score on a *later*
@@ -6047,8 +5967,6 @@ mod tests {
         let stored = hits[0].snippet.trim_end_matches(" (source file moved)").chars().count();
         assert!(stored <= PREVIEW_CHARS, "preview over cap: {stored} chars");
 
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::remove_dir_all(&sdir).ok();
     }
 
     /// A hit shows the session's current label, from its meta doc, even when the body doc that
@@ -6065,8 +5983,6 @@ mod tests {
         let hits = text_search(&dir, "zqearly", 10).unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].title.as_deref(), Some("zqlabel hello"));
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::remove_dir_all(&sdir).ok();
     }
 
     /// The claude transcripts and plain codex rollouts of the cv-core corpus: the adapters whose
@@ -6198,15 +6114,12 @@ mod tests {
     fn whole_sweep_with_work(refs: &[cv_core::SessionRef], words: &[String]) -> (Vec<String>, SweepWork) {
         let (dir, home) = (tmpdir(), tmpdir());
         let scope = (*cv_core::env::Env::current()).clone().enter();
-        scope.set("CLUSTERVISION_HOME", &home);
+        scope.set("CLUSTERVISION_HOME", &*home);
         let swept = sweep(&dir, refs.to_vec(), false, false).unwrap();
         assert_eq!((swept.resumed, swept.errors), (0, 0));
         let seen = observe(&dir, refs, words);
         drop(scope);
 
-        for d in [dir, home] {
-            std::fs::remove_dir_all(d).ok();
-        }
         (seen, swept.observed.work)
     }
 
@@ -6277,9 +6190,6 @@ mod tests {
                 swept.observed.work,
                 work
             );
-        }
-        for d in [dir, sdir] {
-            std::fs::remove_dir_all(d).ok();
         }
     }
 
@@ -6405,9 +6315,6 @@ mod tests {
         );
         assert!(text_search(&dir, "sapphire", 100).unwrap().is_empty());
         assert!(!text_search(&dir, "amber", 100).unwrap().is_empty());
-        for d in [dir, root] {
-            std::fs::remove_dir_all(d).ok();
-        }
     }
 
     #[test]
@@ -6420,19 +6327,16 @@ mod tests {
         assert_eq!(sweep(&dir, refs.clone(), false, false).unwrap().changed, refs.len());
         // The catalog and index travel together; the copy's path differs, its identity does not.
         let copy = tmpdir();
-        std::fs::remove_dir_all(&copy).unwrap();
+        std::fs::remove_dir_all(&*copy).unwrap();
         assert!(std::process::Command::new("cp")
             .arg("-R")
-            .arg(&dir)
-            .arg(&copy)
+            .arg(&*dir)
+            .arg(&*copy)
             .status()
             .unwrap()
             .success());
         assert_eq!(source_consumer(&copy).unwrap(), source_consumer(&dir).unwrap());
         assert_eq!(sweep(&copy, refs.clone(), false, false).unwrap().changed, 0);
-        for d in [dir, copy, sdir] {
-            std::fs::remove_dir_all(d).ok();
-        }
     }
 
     #[test]
@@ -6463,9 +6367,6 @@ mod tests {
         );
         let words = some_words(&refs);
         assert_eq!(observe(&dir, &refs, &words), whole_sweep(&refs, &words));
-        for d in [dir, sdir] {
-            std::fs::remove_dir_all(d).ok();
-        }
     }
 
     #[test]
@@ -6532,9 +6433,6 @@ mod tests {
         }
         let words = some_words(&refs);
         assert_eq!(observe(&dir, &refs, &words), whole_sweep(&refs, &words));
-        for d in [dir, sdir] {
-            std::fs::remove_dir_all(d).ok();
-        }
     }
 
     /// One row's baseline publication failing loses that row only: the other sessions' baselines
@@ -6586,9 +6484,6 @@ mod tests {
         assert_eq!((again.changed, again.observed.work.callbacks), (0, 0));
         let words = some_words(&refs);
         assert_eq!(observe(&dir, &refs, &words), whole_sweep(&refs, &words));
-        for d in [dir, sdir] {
-            std::fs::remove_dir_all(d).ok();
-        }
     }
 
     #[test]
@@ -6599,7 +6494,7 @@ mod tests {
             .unwrap()
             .retain(|field| field["name"] != "discovery_metadata");
         let old: Schema = serde_json::from_value(old).unwrap();
-        let index = Index::create_in_dir(&dir, old.clone()).unwrap();
+        let index = Index::create_in_dir(&*dir, old.clone()).unwrap();
         let mut writer = index.writer(15_000_000).unwrap();
         let mut doc = TantivyDocument::default();
         doc.add_text(old.get_field("id").unwrap(), "old");
@@ -6611,14 +6506,13 @@ mod tests {
         drop(index);
         // A query cannot silently trust old stale postings, and never clears them.
         assert!(open_existing(&dir).err().unwrap().to_string().contains("cv index"));
-        let existing = Index::open_in_dir(&dir).unwrap();
+        let existing = Index::open_in_dir(&*dir).unwrap();
         assert_eq!(existing.reader().unwrap().searcher().num_docs(), 1);
         drop(existing);
         let (new, _) = open_or_create(&dir).unwrap();
         assert!(schema_current(&new.schema()));
         assert_eq!(new.reader().unwrap().searcher().num_docs(), 0);
         drop(new);
-        std::fs::remove_dir_all(dir).ok();
     }
 
     /// A title-changing append cannot keep prefix title postings: Boolean clauses are
@@ -6676,9 +6570,6 @@ mod tests {
         let swept = sweep(&dir, vec![r.clone()], false, false).unwrap();
         assert_eq!((swept.changed, swept.resumed, swept.errors), (1, 1, 0));
         assert_eq!(observe(&dir, &[r.clone()], &words), whole_sweep(&[r], &words));
-        for d in [dir, sdir] {
-            std::fs::remove_dir_all(d).ok();
-        }
     }
 
     /// Discovery inputs can change without changing the transcript tuple (sidecar metadata,
@@ -6750,9 +6641,6 @@ mod tests {
             base,
             "a count filled after the pass leaves the docs fresh"
         );
-        for d in [dir, sdir] {
-            std::fs::remove_dir_all(d).ok();
-        }
     }
 
     #[cfg(unix)]
@@ -6815,9 +6703,6 @@ mod tests {
         );
         let unchanged = sweep(&dir, vec![r], false, false).unwrap();
         assert_eq!((unchanged.changed, unchanged.observed.work.callbacks), (0, 0));
-        for d in [dir, sdir] {
-            std::fs::remove_dir_all(d).ok();
-        }
     }
 
     /// A pass that fails while its source changes is read again, whole, once; one that fails on
@@ -6887,9 +6772,6 @@ mod tests {
         let swept = sweep(&dir, refs, false, false).unwrap();
         assert_eq!((swept.changed, swept.errors), (1, 0), "a later pass retries it");
         assert_eq!(text_search(&dir, "zqrewritten", 10).unwrap().len(), 1);
-        for d in [dir, sdir] {
-            std::fs::remove_dir_all(d).ok();
-        }
     }
 
     #[test]
@@ -6963,9 +6845,6 @@ mod tests {
         .unwrap();
         assert_eq!((repaired.changed, repaired.errors), (1, 0));
         assert_eq!(text_search(&dir, "zqhiddenoutput", 10).unwrap().len(), 1);
-        for d in [dir, sdir] {
-            std::fs::remove_dir_all(d).ok();
-        }
     }
 
     /// A same-shaped file renamed over the transcript after a pass read it must not take that
@@ -7022,9 +6901,6 @@ mod tests {
         assert_eq!((swept.changed, swept.resumed), (1, 0));
         assert!(text_search(&dir, "zqoldword", 10).unwrap().is_empty());
         assert_eq!(text_search(&dir, "zqnewword", 10).unwrap().len(), 1);
-        for d in [dir, sdir] {
-            std::fs::remove_dir_all(d).ok();
-        }
     }
 
     /// Equal-size edits require a whole pass even when the old checkpoint's samples match.
@@ -7064,9 +6940,6 @@ mod tests {
         assert_eq!((swept.changed, swept.resumed), (1, 0));
         assert!(text_search(&dir, "zqoldone", 10).unwrap().is_empty());
         assert_eq!(text_search(&dir, "zqnewone", 10).unwrap().len(), 1);
-        for d in [dir, sdir] {
-            std::fs::remove_dir_all(d).ok();
-        }
     }
 
     /// A mark whose sampled bytes no longer match is never resumed from: an edit near the mark,
@@ -7109,9 +6982,6 @@ mod tests {
         assert_eq!((swept.changed, swept.resumed), (3, 0));
         let words = some_words(&refs);
         assert_eq!(observe(&dir, &refs, &words), whole_sweep(&refs, &words));
-        for d in [dir, sdir] {
-            std::fs::remove_dir_all(d).ok();
-        }
     }
 
     #[test]
@@ -7318,7 +7188,6 @@ mod tests {
         );
         let hits = text_search(&dir, "common", 50).unwrap();
         assert_eq!(hits.len(), TIER_FANOUT);
-        std::fs::remove_dir_all(&dir).ok();
     }
     #[derive(Default, Debug)]
     struct MergeBytes {
@@ -7484,7 +7353,6 @@ mod tests {
             .merges,
             0
         );
-        std::fs::remove_dir_all(dir).ok();
         (total, ids, reads)
     }
     #[test]
@@ -7706,8 +7574,6 @@ mod tests {
         assert!(note.contains("behind for 1 session"), "{note}");
         assert!(note.contains("cv index"), "{note}");
 
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::remove_dir_all(&sdir).ok();
     }
 
     /// A session the index has never seen counts as stale too — a hit list that can't contain it
@@ -7724,7 +7590,5 @@ mod tests {
         let refs = vec![sref("old", "one", p), sref("new", "two", p2)];
         assert_eq!(staleness_over(&dir, &refs).map(|s| s.stale_sessions), Some(1));
 
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::remove_dir_all(&sdir).ok();
     }
 }
