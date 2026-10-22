@@ -265,6 +265,7 @@ mod tests {
             golden,
             include_str!("../../../tests/fixtures/emit-frozen/fidelity-features.txt")
         );
+        session.model = None;
         let facts = source_features(Harness::Claude, ThinkingMode::Native, &session)?;
         assert_eq!(facts.tool_use, 1, "only the answered call survives");
         assert_eq!(facts.tool_result, 1);

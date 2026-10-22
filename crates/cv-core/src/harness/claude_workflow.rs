@@ -980,7 +980,7 @@ pub fn ghost_launches(session_path: &Path) -> Vec<WorkflowLaunch> {
     let states = crate::par_filter_map(state_paths(session_path), |path| {
         let source = crate::json::JsonSource::capture(&path).ok()?;
         source
-            .read_document(|view| {
+            .read(ReadInput::Document, Validation::Value, |view| {
                 let mut fields = serde_json::Map::new();
                 for key in ["runId", "workflowName", "resumeFromRunId"] {
                     if let Some(value) = crate::affordance::input::field_string(view, key)? {

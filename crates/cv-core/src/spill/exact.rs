@@ -1,6 +1,6 @@
 //! Exact equality with a bounded in-memory fast path and a portable disk hash table.
 use crate::harness::store::bytes::Spill as Owner;
-#[cfg(all(test, feature = "sqlite"))]
+#[cfg(test)]
 use crate::json::{ReadInput, Validation};
 use anyhow::{bail, Context, Result};
 use std::borrow::Cow;

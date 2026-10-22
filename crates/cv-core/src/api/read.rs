@@ -252,10 +252,7 @@ fn value(
     let (before, mut reads) = captured(r, primary);
     let value = read(&mut reads)?;
     let source = before.with_reads(&reads);
-    anyhow::ensure!(
-        fresh(r, &source, primary) && reads.fresh(&mut Probe::default()),
-        "API source changed before publication"
-    );
+    anyhow::ensure!(fresh(r, &source, primary), "API source changed before publication");
     if let Some(key) = key.filter(|_| bounded_size(&value).is_some()) {
         cache.insert(Entry {
             key,

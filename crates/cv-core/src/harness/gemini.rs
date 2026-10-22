@@ -579,7 +579,7 @@ fn read_jsonl(
     let mut published = false;
     // The effective records are read again by range between callbacks: under the guard, a slow
     // callback's backing check stops the read before the next range is touched.
-    let session = crate::stream::guarded(sink, &read, |sink| {
+    crate::stream::guarded(sink, &read, |sink| {
         replay.emit(
             record::Demand::of(harness, opts, read.source(), &resolver),
             Some(path),
@@ -587,12 +587,7 @@ fn read_jsonl(
             sink,
             &mut published,
         )
-    });
-    if published {
-        // Completion validates the source even when the consumer stopped with an error.
-        read.check()?;
-    }
-    session
+    })
 }
 
 /// Where a retained message lives: a byte range of the source, or an owned value (records of a

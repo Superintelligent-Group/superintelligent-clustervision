@@ -2683,13 +2683,22 @@ mod tests {
     #[test]
     fn zst_without_decoder_is_an_error_not_jsonl() {
         let world = crate::test_world("codex-no-decoder");
-        let path = world.base.join("rollout.jsonl.zst");
+        let path = world.base.join("rollout-no-decoder.jsonl.zst");
         std::fs::write(&path, b"\x28\xb5\x2f\xfd").unwrap();
         let error = match Rollout::open(&path) {
             Ok(_) => panic!("compressed input must require a decoder"),
             Err(error) => error,
         };
         assert!(error.to_string().contains("zstd"));
+        let found = Codex {
+            roots: vec![world.base.clone()],
+        }
+        .discover()
+        .unwrap();
+        assert!(found.refs.is_empty());
+        assert_eq!(found.skipped.len(), 1);
+        assert_eq!(found.skipped[0].path, path);
+        assert!(found.skipped[0].why.contains("zstd"));
     }
 
     #[cfg(feature = "zstd")]
