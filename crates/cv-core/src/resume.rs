@@ -47,15 +47,16 @@ impl MarkHead {
     pub fn of_file(file: &std::fs::File, cp: &Checkpoint, version: &str) -> Option<MarkHead> {
         // Without a stable file identity (off Unix), prefer a whole read.
         #[cfg(not(unix))]
-        {
+        let mark = {
             let _ = (file, cp, version);
-            return None;
-        }
+            None
+        };
         #[cfg(unix)]
-        Some(MarkHead {
+        let mark = Some(MarkHead {
             prefix: Prefix::of(file, cp.offset)?,
             version: version.to_string(),
-        })
+        });
+        mark
     }
 
     pub fn offset(&self) -> u64 {
