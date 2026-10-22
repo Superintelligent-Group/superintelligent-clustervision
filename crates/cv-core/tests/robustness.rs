@@ -317,7 +317,9 @@ fn real_corpus_discovery_metadata_quality() {
 #[test]
 fn claude_parse_str_never_panics() {
     for (label, input) in hostile_inputs() {
-        // catch_unwind so a panic surfaces as a clean assertion failure naming the input.
+        // catch_unwind so a panic surfaces as a clean assertion failure naming the input. It can
+        // only catch unwinding panics: runaway recursion aborts the process and is out of reach
+        // here (the adapters parse with bounded demand, so hostile inputs stay shallow).
         let res = std::panic::catch_unwind(|| cv_core::harness::claude::parse_str("hostile-id", &input, None));
         assert!(res.is_ok(), "claude::parse_str panicked on input `{label}`");
     }

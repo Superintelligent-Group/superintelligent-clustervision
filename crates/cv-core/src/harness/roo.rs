@@ -176,9 +176,6 @@ mod tests {
     /// message count + roles + tool blocks survive the round-trip.
     #[test]
     fn emit_round_trips_through_parser() {
-        use std::sync::atomic::{AtomicU32, Ordering};
-        static COUNTER: AtomicU32 = AtomicU32::new(0);
-
         // ── build a small session ──
         let mut user = Message::new(Role::User);
         user.content = vec![Block::Text {
@@ -219,10 +216,8 @@ mod tests {
             ..Session::new("src", Harness::Roo)
         };
 
-        // ── emit to a unique temp dir (no tempfile crate) ──
-        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let out_dir = std::env::temp_dir().join(format!("cv-roo-emit-{}-{}", std::process::id(), n));
-        let _ = fs::remove_dir_all(&out_dir);
+        // ── emit to a unique temp dir ──
+        let out_dir = cv_testkit::temp_dir("roo-emit");
 
         let result = emit(&session, &out_dir, &crate::emit::EmitOptions::default()).expect("emit roo session");
 

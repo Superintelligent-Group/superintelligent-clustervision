@@ -32,7 +32,7 @@ pub use inbox::{
     deadline_phrase, decisions_from_notes, inbox_page, inbox_page_brief, DecisionView, InboxCounts, InboxItem,
     InboxPage, NoteView, ResolutionView,
 };
-pub use model::{RetiredEvent, TaskEvent, TaskEventKind, TaskState, RETIRED_TAGS};
+pub use model::{RetiredEvent, TaskEvent, TaskEventKind, TaskState, LIVE_TAGS, RETIRED_TAGS};
 pub use project::{
     age_short, blocks, effective_display, in_scope, inbox, involves, is_blocked, list, parse_deadline, parse_duration,
     parse_since, resolve_id, same_actor, unique_prefix_len, uuid_v7_timestamp, InboxEntry, InboxReason, TaskFilter,

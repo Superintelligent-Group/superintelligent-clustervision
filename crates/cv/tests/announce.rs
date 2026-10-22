@@ -146,7 +146,7 @@ fn world(tag: &str) -> World {
     let w = World::new(tag);
     w.write_session(
         "alphasess",
-        &[claude::user("u1", "2026-01-01T10:00:00Z", "hello there")],
+        &[claude::user("s1", "u1", "2026-01-01T10:00:00Z", "hello there")],
     );
     w
 }

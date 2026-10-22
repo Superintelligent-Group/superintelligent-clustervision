@@ -29,6 +29,7 @@ use cv_core::harness::openclaw::OpenClaw;
 use cv_core::harness::opencode::OpenCode;
 use cv_core::harness::qwen::Qwen;
 use cv_core::harness::roo::Roo;
+use cv_core::ir::Harness;
 use cv_core::ir::{Block, MessageKind};
 use cv_core::{Adapter, SessionRef};
 use cv_testkit::World;
@@ -345,6 +346,14 @@ fn every_corpus_version_reads_as_its_golden_summary() {
             continue;
         }
         assert!(known.contains(&name), "tests/corpus/{name} has no row in HARNESSES");
+    }
+    // And the roster names only harnesses the registry knows: a renamed variant must land here.
+    for h in HARNESSES {
+        assert!(
+            Harness::ALL.iter().any(|known| known.as_str() == h.name),
+            "HARNESSES row {:?} names no harness in the registry",
+            h.name
+        );
     }
     let mut failures = Vec::new();
     for h in HARNESSES {

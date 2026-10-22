@@ -616,8 +616,7 @@ fn canonical_repo(repo: Option<PathBuf>) -> Result<Option<PathBuf>> {
 
 /// `--body TEXT` (`-` = stdin) or `--body-file PATH`; the flag has a default when no file is given.
 fn body_arg(body: String, body_file: Option<PathBuf>) -> Result<String> {
-    Ok(text_arg(body_file.is_none().then_some(body), body_file)?
-        .expect("body has a default when no file is supplied"))
+    Ok(text_arg(body_file.is_none().then_some(body), body_file)?.expect("body has a default when no file is supplied"))
 }
 
 /// `--note TEXT` (`-` = stdin) or `--note-file PATH`, whichever was given.

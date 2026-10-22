@@ -2705,9 +2705,6 @@ mod tests {
     fn parses_fixture_legacy_flat_session() {
         let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures/kimi/legacy/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
-        if !dir.exists() {
-            return;
-        }
         let id = "22222222-2222-2222-2222-222222222222";
         let r = SessionRef::new(id, Harness::Kimi, dir.clone());
         let s = Kimi {

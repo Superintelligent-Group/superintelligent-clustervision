@@ -14,24 +14,34 @@ fn state_version(adapter: &dyn Adapter) -> String {
     crate::resume::version(adapter, CONSUMER)
 }
 
-/// True when `value` serializes within `limit` bytes. A value that cannot serialize at all also
-/// reads as not-fitting — on purpose: a checkpoint or metadata blob cv cannot serialize is no
-/// storable state, so both causes share the one boolean answer.
+/// True when `value` serializes within `limit` bytes.
 fn fits(value: &impl Serialize, limit: usize) -> bool {
-    struct Limited(usize);
+    struct Limited {
+        budget: usize,
+        overflowed: bool,
+    }
     impl std::io::Write for Limited {
         fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-            if bytes.len() > self.0 {
-                return Err(std::io::Error::other("value exceeds the size budget"));
+            if bytes.len() > self.budget {
+                self.overflowed = true;
+                return Err(std::io::Error::other("checkpoint exceeds cache budget"));
             }
-            self.0 -= bytes.len();
+            self.budget -= bytes.len();
             Ok(bytes.len())
         }
         fn flush(&mut self) -> std::io::Result<()> {
             Ok(())
         }
     }
-    serde_json::to_writer(Limited(limit), value).is_ok()
+    let mut limited = Limited {
+        budget: limit,
+        overflowed: false,
+    };
+    let result = serde_json::to_writer(&mut limited, value);
+    // Only the budget may decline a checkpoint; a serialization failure is a bug and must not
+    // read as "too big" (loud in test builds, same answer in production).
+    debug_assert!(result.is_ok() || limited.overflowed, "checkpoint failed to serialize");
+    result.is_ok()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -738,8 +738,7 @@ mod tests {
 
     #[test]
     fn lead_and_child_sessions_with_tool_results_and_a_display_error() {
-        let root = std::env::temp_dir().join(format!("cv-cline-sdk-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
+        let root = cv_testkit::temp_dir("cline-sdk");
         let dir = root.join("100_abcde");
         fs::create_dir_all(&dir).unwrap();
         write(
@@ -809,8 +808,7 @@ mod tests {
 
     #[test]
     fn native_raw_messages_preserve_full_codec_and_wrapper_validation() {
-        let dir = std::env::temp_dir().join(format!("cv-sdk-raw-{}", uuid::Uuid::new_v4()));
-        fs::create_dir_all(&dir).unwrap();
+        let dir = cv_testkit::temp_dir("sdk-raw");
         let path = dir.join("sdk.messages.json");
         let body = "a\n\"é😀".repeat(8192);
         let doc = json!({"messages":[
@@ -962,8 +960,7 @@ mod tests {
     #[test]
     fn schedule_fires_and_team_runs_from_the_side_databases() {
         use crate::affordance::Kind;
-        let root = std::env::temp_dir().join(format!("cv-cline-sdk-dbs-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
+        let root = cv_testkit::temp_dir("cline-sdk-dbs");
         let sid = "200_fghij";
         let dir = root.join("sessions").join(sid);
         fs::create_dir_all(&dir).unwrap();

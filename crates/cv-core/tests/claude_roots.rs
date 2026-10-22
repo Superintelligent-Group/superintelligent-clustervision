@@ -33,11 +33,7 @@ fn write_session_at(projects: &Path, proj: &str, sid: &str, ts: &str) -> PathBuf
     let dir = projects.join(proj);
     fs::create_dir_all(&dir).unwrap();
     let path = dir.join(format!("{sid}.jsonl"));
-    let line = serde_json::json!({
-        "type": "user", "uuid": format!("{sid}-u0"), "sessionId": sid, "timestamp": ts,
-        "cwd": "/work/proj",
-        "message": {"role": "user", "content": format!("hello from {sid}")}
-    });
+    let line = cv_testkit::claude::user(sid, &format!("{sid}-u0"), ts, &format!("hello from {sid}"));
     fs::write(&path, format!("{line}\n")).unwrap();
     path
 }
