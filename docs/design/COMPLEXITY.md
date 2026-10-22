@@ -34,7 +34,7 @@ or rewritten. Paths are relative to `crates/`.
 | `sessions()` / `cv ls` | as above | O(n) probe + rows, O(n log n) sort | as above | `catalog.rs` `probe_stale_in` |
 | Claude discovery | O(S) | O(n) | O(appended) through the continuation | `claude.rs` `cached_metadata` |
 | Codex discovery | O(S) + zst decode | O(n) | O(appended) through the continuation | `codex.rs` `cached_metadata` |
-| Claude sub-agent forest, any demand | O(Σ s_k) | O(k) stats | O(appended) for the changed agent | `claude.rs` `agents_in_dir` |
+| Claude sub-agent forest, any demand | O(Σ s_k) | O(k) stats, in any later process | O(appended) for the changed agent | `claude.rs` `agents_in_dir`, saved by `subagent_tree_inner` |
 | Codex hook forest | O(L) index + that forest's rows | same | same | `codex.rs` `hook_forest`, `lanes::ledger_index` |
 | Edit guard, per edit | O(touching sessions × hops) lookups | same | same | `hooks.rs` `lineage_root` |
 | `lanes_of` / `cv lanes` | O(the parent's rows + Σ s_k) | same | same | `lanes.rs` `lanes_of` |

@@ -764,6 +764,20 @@ fn subagent_tree_inner(
     workflow: Option<&str>,
     select: &(impl Fn(&str, Option<&str>) -> bool + Sync),
 ) -> Result<Vec<AgentRef>> {
+    let forest = subagent_forest(parent_path, demand, workflow, select);
+    // The agents this read scanned are saved by the read itself, as discovery saves its own:
+    // `show --tree`, lanes and `events --subagents` in a later process reuse them instead of
+    // rescanning every transcript. A save that fails is said once and retried next time.
+    crate::discover_cache::persist(false);
+    forest
+}
+
+fn subagent_forest(
+    parent_path: &Path,
+    demand: crate::SubagentDemand,
+    workflow: Option<&str>,
+    select: &(impl Fn(&str, Option<&str>) -> bool + Sync),
+) -> Result<Vec<AgentRef>> {
     let Some(base) = sidecar::subagents_dir(parent_path) else {
         return Ok(vec![]);
     };
@@ -2382,6 +2396,24 @@ mod tests {
         let before = FOREST_READS.lock().unwrap().1.len();
         subagent_tree(&parent).unwrap();
         assert_eq!(scans(before), std::slice::from_ref(&a1), "one change, one rescan");
+        std::fs::write(&a1, &unchanged).unwrap();
+        // A second process starts with no scan cache of its own: it reads the rows the first
+        // one saved, and one change is still one rescan.
+        subagent_tree(&parent).unwrap();
+        crate::discover_cache::forget_process_cache();
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&a1)
+            .unwrap()
+            .write_all(b"{\"type\":\"user\",\"uuid\":\"z2\",\"parentUuid\":\"u\",\"message\":{\"role\":\"user\",\"content\":\"later\"}}\n")
+            .unwrap();
+        let before = FOREST_READS.lock().unwrap().1.len();
+        subagent_tree(&parent).unwrap();
+        assert_eq!(
+            scans(before),
+            std::slice::from_ref(&a1),
+            "a new process: one change, one rescan"
+        );
         std::fs::write(&a1, unchanged).unwrap();
 
         let before = FOREST_READS.lock().unwrap().1.len();

@@ -133,6 +133,17 @@ pub(crate) fn invalidate_interpretation(path: &Path) {
     }
 }
 
+/// Drop this process's scan-cache entries, as a new process starts: later scans see only the
+/// rows the catalog holds.
+#[cfg(test)]
+pub(crate) fn forget_process_cache() {
+    let context = read::Context::current();
+    if let Some(cache) = context.path().and_then(existing_cache) {
+        cache.entries.write().unwrap().clear();
+        cache.any_dirty.store(false, Ordering::Relaxed);
+    }
+}
+
 fn clear_invalidated(cache: &Cache) {
     if cache.invalidated.load(Ordering::Acquire) {
         let mut entries = cache.entries.write().unwrap();

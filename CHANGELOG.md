@@ -48,6 +48,8 @@
 
 - The prompt hook, task mutations, `cv task list` and `GET /api/tasks` resume from a stored fold of the task log, parsing only events appended since.
 
+- A sub-agent tree read saves its agent scans: a later `show --tree`, lanes or `events --subagents` rescans only changed agents.
+
 - OpenClaw SQLite stores are rediscovered only when the store changes, not on every listing refresh.
 
 - A copied SQLite store with WAL frames is copied once per command, however large, not again whenever another database opens.
