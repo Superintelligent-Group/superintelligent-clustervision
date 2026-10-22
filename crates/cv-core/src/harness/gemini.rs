@@ -102,7 +102,18 @@ impl Adapter for Gemini {
             deps.directories.push(project.join(&r.id).join("tracker"));
             deps.directories.push(project.join(&r.id).join("plans"));
         }
+        deps.files.extend(registry_files(&r.path).into_iter().flatten());
         Some(())
+    }
+
+    /// A `logs.json` holds a whole project's sessions: each is certified by its own entries.
+    fn certifies_rows(&self, r: &SessionRef) -> bool {
+        is_logs(&r.path)
+    }
+
+    /// Every session's certificate in the `logs.json` at `store` ([`logs`]).
+    fn rows(&self, store: &Path) -> Option<std::collections::HashMap<String, crate::source::Rows>> {
+        is_logs(store).then(|| Some(logs(store).ok()?.rows.clone())).flatten()
     }
 
     fn roots(&self) -> Vec<PathBuf> {
@@ -246,6 +257,12 @@ fn chats_project(from: &Path) -> Option<&Path> {
 }
 
 fn project_cwd(path: &Path) -> Option<PathBuf> {
+    let (runtime, identifier) = project_of(path)?;
+    registry_for(&runtime).get(identifier).cloned()
+}
+
+/// `<runtime>` and the project identifier of a file under `<runtime>/tmp/<id>/`.
+fn project_of(path: &Path) -> Option<(PathBuf, &str)> {
     let comps: Vec<&std::ffi::OsStr> = path.components().map(|c| c.as_os_str()).collect();
     // The INNERMOST `tmp`, not the first: the layout is `<runtime>/tmp/<id>/chats/<file>`, and a
     // runtime root can itself sit under a directory called `tmp` — `/tmp/...` on Linux, or a
@@ -258,7 +275,18 @@ fn project_cwd(path: &Path) -> Option<PathBuf> {
     if runtime.as_os_str().is_empty() {
         return None;
     }
-    registry_for(&runtime).get(identifier).cloned()
+    Some((runtime, identifier))
+}
+
+/// What [`project_cwd`] reads for `path`'s project: the registry's `projects.json` and the
+/// project's two `.project_root` markers. The certificate of every session whose cwd it gives.
+pub(crate) fn registry_files(path: &Path) -> Option<[PathBuf; 3]> {
+    let (runtime, identifier) = project_of(path)?;
+    Some([
+        runtime.join("projects.json"),
+        runtime.join("tmp").join(identifier).join(".project_root"),
+        runtime.join("history").join(identifier).join(".project_root"),
+    ])
 }
 
 /// `short-id → project path`, one map per runtime root.
@@ -333,10 +361,14 @@ pub(crate) fn scan_session_file(path: &Path, harness: Harness) -> Result<Vec<Ses
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
     if name == "logs.json" {
-        let text = fs::read_to_string(path)?;
-        return Ok(parse_logs_str(&text, Some(path.to_path_buf()))
+        let cwd = project_cwd(path);
+        return Ok(logs(path)?
+            .sessions
             .iter()
-            .map(|s| session_ref(s, path, harness))
+            .map(|s| SessionRef {
+                cwd: cwd.clone(),
+                ..session_ref(s, path, harness)
+            })
             .collect());
     } else if is_chat_recording(path) {
         let mut turns = 0usize;
@@ -410,6 +442,20 @@ pub(crate) fn stream_for(
 /// `logs.json` (many sessions per file — picks the one matching `r.id`). These are small enough
 /// to materialize.
 fn parse_bounded(harness: Harness, r: &SessionRef, name: &str) -> Result<Session> {
+    if name == "logs.json" {
+        let logs = logs(&r.path).with_context(|| format!("reading {}", r.path.display()))?;
+        if let Some(s) = logs.sessions.iter().find(|s| s.id == r.id) {
+            return Ok(Session {
+                cwd: project_cwd(&r.path),
+                ..s.clone()
+            });
+        }
+        anyhow::bail!(
+            "could not parse Gemini-format session {} from {}",
+            r.id,
+            r.path.display()
+        )
+    }
     let text = fs::read_to_string(&r.path).with_context(|| format!("reading {}", r.path.display()))?;
     // Checkpoint: one session per file.
     if is_checkpoint(name) {
@@ -444,6 +490,11 @@ fn is_chat_recording(path: &Path) -> bool {
         return false;
     }
     matches!(path.extension().and_then(|e| e.to_str()), Some("json") | Some("jsonl"))
+}
+
+/// A gemini-cli `logs.json`: every session of a project in one file.
+pub(crate) fn is_logs(path: &Path) -> bool {
+    path.file_name().is_some_and(|n| n == "logs.json")
 }
 
 fn is_checkpoint(name: &str) -> bool {
@@ -879,7 +930,70 @@ fn parse_logs_str(text: &str, source_path: Option<PathBuf>) -> Vec<Session> {
     parse_logs(value, source_path)
 }
 
+/// One `logs.json`, parsed: its sessions (`cwd` unset: the registry gives it per read, see
+/// [`project_cwd`]) and each session's [`Rows`](crate::source::Rows) certificate.
+pub(crate) struct Logs {
+    sessions: Vec<Session>,
+    pub(crate) rows: std::collections::HashMap<String, crate::source::Rows>,
+}
+
+/// The `logs.json` at `path`, parsed once per file state ([`crate::source::FileId`]) in this
+/// process. One file holds a whole project's sessions, so a read of each session parsed the whole
+/// file again, and discovery once more; one parse now serves them all until the file moves.
+/// Memory: the latest parse of each `logs.json` read (a few KB to MB each).
+pub(crate) fn logs(path: &Path) -> Result<std::sync::Arc<Logs>> {
+    use crate::source::FileId;
+    use std::sync::{Arc, LazyLock, Mutex};
+    type Memo = Mutex<std::collections::HashMap<PathBuf, (FileId, Arc<Logs>)>>;
+    static MEMO: LazyLock<Memo> = LazyLock::new(Default::default);
+    let lock = || MEMO.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let before = FileId::at(path);
+    if let Some(state) = before {
+        let hit = lock()
+            .get(path)
+            .filter(|(at, _)| *at == state)
+            .map(|(_, logs)| logs.clone());
+        if let Some(hit) = hit {
+            return Ok(hit);
+        }
+    }
+    #[cfg(test)]
+    LOGS_PARSED.lock().unwrap().push(path.to_path_buf());
+    let text = fs::read_to_string(path)?;
+    let value = serde_json::from_str::<Value>(&text).unwrap_or_default();
+    drop(text);
+    let mut rows = std::collections::HashMap::new();
+    if let Value::Array(entries) = &value {
+        use crate::source::Rows;
+        for (at, e) in entries.iter().enumerate() {
+            let sid = e.get("sessionId").and_then(Value::as_str).unwrap_or("").to_string();
+            let cert = rows.entry(sid).or_insert(Rows {
+                count: 0,
+                high: 0,
+                digest: Rows::SEED,
+            });
+            cert.count += 1;
+            cert.high = i64::try_from(at).unwrap_or(i64::MAX);
+            cert.digest = Rows::fold(cert.digest, &serde_json::to_vec(e).unwrap_or_default());
+        }
+    }
+    let sessions = parse_logs_with(value, Some(path.to_path_buf()), |_| None);
+    let logs = Arc::new(Logs { sessions, rows });
+    // Kept only when the file did not move while it was read.
+    if let Some(state) = before.filter(|state| FileId::at(path) == Some(*state)) {
+        lock().insert(path.to_path_buf(), (state, logs.clone()));
+    }
+    Ok(logs)
+}
+
+#[cfg(test)]
+static LOGS_PARSED: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
+
 fn parse_logs(value: Value, source_path: Option<PathBuf>) -> Vec<Session> {
+    parse_logs_with(value, source_path, project_cwd)
+}
+
+fn parse_logs_with(value: Value, source_path: Option<PathBuf>, cwd: fn(&Path) -> Option<PathBuf>) -> Vec<Session> {
     // Consumed entry by entry: the file's tree and the built sessions never both stand complete.
     let entries = match value {
         Value::Array(entries) => entries,
@@ -911,7 +1025,7 @@ fn parse_logs(value: Value, source_path: Option<PathBuf>) -> Vec<Session> {
             .collect();
 
         let mut s = Session {
-            cwd: source_path.as_deref().and_then(project_cwd),
+            cwd: source_path.as_deref().and_then(cwd),
             title,
             created_at: times.iter().min().copied(),
             updated_at: times.iter().max().copied(),
@@ -1635,6 +1749,59 @@ mod tests {
         assert!(json_inputs(&lazy)[0].resolve().is_err());
         let mut events = crate::events::EventSink::new(None);
         assert!(events.try_message(lazy.messages[0].clone()).is_err());
+    }
+
+    /// One `logs.json` holds three sessions: discovery, every session's read and the store's
+    /// certificates share one parse per file state; an entry appended to one session moves its
+    /// certificate alone, and the others read exactly as before (their cwd from the registry).
+    #[test]
+    fn a_logs_json_append_moves_one_certificate_and_parses_once_per_state() {
+        let world = crate::test_world("gemini-logs-rows");
+        let runtime = world.base.join(".gemini");
+        let file = runtime.join("tmp/proj/logs.json");
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(runtime.join("projects.json"), r#"{"projects":{"/work/proj":"proj"}}"#).unwrap();
+        let entry = |sid: &str, id: i64, text: &str| {
+            serde_json::json!({"sessionId":sid,"messageId":id,"type":"user","message":text,
+                "timestamp":"2026-01-01T00:00:00Z"})
+        };
+        let mut entries: Vec<Value> = ["a", "b", "c"]
+            .iter()
+            .flat_map(|sid| {
+                [
+                    entry(sid, 0, &format!("{sid} first")),
+                    entry(sid, 1, &format!("{sid} second")),
+                ]
+            })
+            .collect();
+        fs::write(&file, serde_json::to_string_pretty(&entries).unwrap()).unwrap();
+        let parsed = || {
+            let mut all = LOGS_PARSED.lock().unwrap();
+            let mine = all.iter().filter(|p| **p == file).count();
+            all.retain(|p| *p != file);
+            mine
+        };
+        let gemini = Gemini::with_home(&runtime);
+        let read = |r: &SessionRef| serde_json::to_string(&gemini.parse(r).unwrap()).unwrap();
+        let refs = gemini.discover().unwrap().refs;
+        assert_eq!(refs.len(), 3);
+        let before = gemini.rows(&file).unwrap();
+        let reads: Vec<String> = refs.iter().map(read).collect();
+        assert_eq!(parsed(), 1, "discovery, three reads and the certificates");
+        assert!(refs.iter().all(|r| r.cwd.as_deref() == Some(Path::new("/work/proj"))));
+        entries.push(entry("b", 2, "b third"));
+        fs::write(&file, serde_json::to_string_pretty(&entries).unwrap()).unwrap();
+        let after = gemini.rows(&file).unwrap();
+        for (r, old) in refs.iter().zip(&reads) {
+            if r.id == "b" {
+                assert_ne!(after[&r.id], before[&r.id]);
+                assert_ne!(read(r), *old);
+            } else {
+                assert_eq!(after[&r.id], before[&r.id], "{}", r.id);
+                assert_eq!(read(r), *old, "{}", r.id);
+            }
+        }
+        assert_eq!(parsed(), 1, "one parse of the new state");
     }
 
     #[test]

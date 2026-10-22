@@ -1013,7 +1013,8 @@ impl Probe {
         }
     }
 
-    /// `r`'s [`Rows`] certificate, when its adapter keeps it in a shared SQLite store: every
+    /// `r`'s [`Rows`] certificate, when its adapter keeps it in a shared store (a SQLite database,
+    /// a gemini-cli `logs.json`; [`crate::harness::Adapter::certifies_rows`]): every
     /// session of that store is certified at once, from one consistent read, once per store state
     /// in this process (the state is the database's, WAL's and journal's identities, the ones a
     /// write moves) and once per probe.
@@ -1027,9 +1028,7 @@ impl Probe {
                 .adapters
                 .entry(r.harness)
                 .or_insert_with(|| crate::harness::for_harness(r.harness));
-            let adapter = adapter
-                .as_ref()
-                .filter(|adapter| adapter.sqlite_source(r) == Some(true));
+            let adapter = adapter.as_ref().filter(|adapter| adapter.certifies_rows(r));
             let state = |path: &Path| -> State {
                 let mut files: Vec<PathBuf> = sqlite_sidecars(path).into();
                 files.push(path.to_path_buf());

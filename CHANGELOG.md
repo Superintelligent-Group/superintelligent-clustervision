@@ -34,6 +34,8 @@
 
 - A Grok turn resumes from its mark instead of rereading the session; a new session in a cwd group no longer rereads its sub-agents.
 
+- A write to a Gemini or Qwen `logs.json` rereads only the sessions whose entries changed, and the file is parsed once per state.
+
 - Search staleness counts the preferred copy of each session, avoiding false drift from older duplicates.
 
 - `cv search`, `/api/search` and `-q text:` read what the index has not seen live, from its resume mark, within `--live-bytes` (256 MiB); `--frozen` reads none.

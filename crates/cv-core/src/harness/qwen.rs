@@ -88,6 +88,11 @@ impl Adapter for Qwen {
 
     fn dependencies(&self, r: &SessionRef, _probe: &mut Probe, deps: &mut Dependencies) -> Option<()> {
         deps.files.push(r.path.with_extension("meta.json"));
+        if !is_session_jsonl(&r.path) {
+            // A gemini-cli shape takes its cwd from the registry beside it.
+            deps.files
+                .extend(crate::harness::gemini::registry_files(&r.path).into_iter().flatten());
+        }
         if let Some(chats) = r.path.parent().filter(|p| p.file_name().is_some_and(|n| n == "chats")) {
             if let (Some(root), Some(cwd)) = (
                 chats.parent().and_then(Path::parent).and_then(Path::parent),
@@ -105,6 +110,18 @@ impl Adapter for Qwen {
 
     fn roots(&self) -> Vec<PathBuf> {
         self.projects.iter().chain(self.root.iter()).cloned().collect()
+    }
+
+    /// A gemini-cli `logs.json` holds a whole project's sessions: each is certified by its own
+    /// entries ([`crate::harness::gemini::logs`]).
+    fn certifies_rows(&self, r: &SessionRef) -> bool {
+        crate::harness::gemini::is_logs(&r.path)
+    }
+
+    fn rows(&self, store: &Path) -> Option<std::collections::HashMap<String, crate::source::Rows>> {
+        crate::harness::gemini::is_logs(store)
+            .then(|| Some(crate::harness::gemini::logs(store).ok()?.rows.clone()))
+            .flatten()
     }
 
     fn discover(&self) -> Result<crate::Discovered> {

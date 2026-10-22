@@ -5400,6 +5400,38 @@ mod tests {
         assert_eq!(sweep(&dir, refs, false, false).unwrap().changed, 0);
     }
 
+    /// A gemini-cli `logs.json` holds a whole project's sessions: an entry appended to one
+    /// rereads that session alone, for search, events and counts alike.
+    #[test]
+    fn a_logs_json_append_rereads_only_its_session() {
+        let _home = IsolatedHome::new();
+        let (dir, sdir) = (tmpdir(), tmpdir());
+        let file = sdir.join(".gemini/tmp/proj/logs.json");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        let entry = |sid: &str, id: i64, text: &str| {
+            serde_json::json!({"sessionId":sid,"messageId":id,"type":"user","message":text,
+                "timestamp":"2026-01-01T00:00:00Z"})
+        };
+        let mut entries: Vec<serde_json::Value> = (0..6)
+            .map(|i| entry(&format!("s{i}"), 0, &format!("zqlogs{i}")))
+            .collect();
+        std::fs::write(&file, serde_json::to_string(&entries).unwrap()).unwrap();
+        let refs: Vec<_> = (0..6)
+            .map(|i| cv_core::SessionRef::new(format!("s{i}"), cv_core::Harness::Gemini, &file))
+            .collect();
+        let refresh = || sweep(&dir, refs.clone(), false, false).unwrap().changed;
+        assert_eq!(refresh(), 6);
+        assert_eq!(refresh(), 0);
+        entries.push(entry("s3", 1, "zqlogslate"));
+        std::fs::write(&file, serde_json::to_string(&entries).unwrap()).unwrap();
+        assert!(cv_core::events::needs_ingest(&refs[3]));
+        assert!(!cv_core::events::needs_ingest(&refs[2]));
+        assert!(!cv_core::catalog::AffordanceTable::load().stale(&refs[2]));
+        assert_eq!(refresh(), 1);
+        assert_eq!(text_search(&dir, "zqlogslate", 10).unwrap().len(), 1);
+        assert_eq!(refresh(), 0);
+    }
+
     /// The core invariant of `ChunkSink`: a body larger than [`CHUNK_BYTES`] is flushed into several
     /// tantivy docs that all share the session id. Search must (a) still find a term living only in a
     /// late chunk, and (b) dedup a term present in *every* chunk back to a single row per id.

@@ -612,6 +612,12 @@ pub trait Adapter: Send + Sync {
         None
     }
 
+    /// Whether `r` is one session of a store shared by many, certified by [`Self::rows`].
+    /// Default: a SQLite store ([`Self::sqlite_source`]).
+    fn certifies_rows(&self, r: &SessionRef) -> bool {
+        self.sqlite_source(r) == Some(true)
+    }
+
     /// The key of `r`'s certificate in [`Self::rows`]: its id, unless its read is wholly another
     /// session's rows (a sub-agent chain stored in its parent session's forest). Default: its id.
     fn rows_key<'a>(&self, r: &'a SessionRef) -> &'a str {
