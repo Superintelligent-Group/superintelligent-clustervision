@@ -279,7 +279,7 @@ agents and Codex/Devin forests.
 
 #### The threading: `--tree`
 
-`cv show <id> --tree` shows how a session's messages thread together. If any message carries a `parent_id`, you get an indented DAG; otherwise a clean numbered list. Tool turns and sub-agent spawns are flagged, and the sub-agent forest follows. It covers the whole session; with `--json` you get the IR itself, whose messages carry the same `parent_id`.
+`cv show <id> --tree` shows how a session's messages thread together. If any message carries a `parent_id`, you get the DAG, indented once per fork above a message (a straight run stays flat); otherwise a clean numbered list. Tool turns and sub-agent spawns are flagged, and the sub-agent forest follows. It covers the whole session; with `--json` you get the IR itself, whose messages carry the same `parent_id`.
 
 ```sh
 cv show da9174f4 --tree

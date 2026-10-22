@@ -49,6 +49,7 @@ or rewritten. Paths are relative to `crates/`.
 | `events ingest` | O(S) | O(n) | one reparse | `events.rs` `ingest_all` |
 | Workflow listing | O(r) state parses + r stats | same | same | `claude_workflow.rs` |
 | `agent-…` lookup, workflow by name | O(n) catalog rows + a sidecar readdir per session | same | same | `lib.rs` `workflow_sessions` |
+| `show --tree` | O(e) rows, indented by forks above each | — | — | `view.rs` `walk_tree` |
 | distill | O(s) | — | — | `distill.rs` (commit set) |
 | prune / rewind / emit / dataset | O(s) per session | — | — | linear passes, hashed sets |
 | Task log, model readers (hook, mutations, list) | O(E) | O(state) fold load | O(state) + the appended events | `task/store.rs` `Fold` |
@@ -61,14 +62,8 @@ or rewritten. Paths are relative to `crates/`.
   open-cliffs lane (the exports offset index), as are that lane's other items.
 
 - **`agent-…` lookups** read the catalog, not a rediscovery, but still list each session's
-  sidecar dir. A by-id index cannot replace that: the scan cache holds an agent only after its
-  forest was read and flushed, and an agent written since (or a copy) is in no record.
-- **`show --tree`** (`cv/src/cmd/view.rs` `print_tree`): each row is indented two spaces per
-  ancestor, and a transcript's parent links form one chain, so row i sits at depth i and the
-  indentation alone is e(e-1) bytes: about 1 MB for 1,000 messages beside ~100 KB of preview,
-  100 MB for 10,000. Indenting only below a fork (an only child keeps its parent's depth) makes
-  it O(e·line + e·forks). That changes the leading spaces of every `•` row under a parent link
-  (the threaded view of every harness that records parents); flat lists are unchanged.
+  sidecar dir. A by-id index cannot replace that: the scan cache holds an agent only after a
+  forest holding it was read, and an agent written since (or a copy) is in no record.
 
 ## Surviving thresholds
 

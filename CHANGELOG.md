@@ -52,6 +52,8 @@
 
 - A followed session with over 16 KiB of metadata no longer rereads to its end on every bounded watch read.
 
+- `cv show --tree` indents once per fork above a message, not per ancestor: a straight chain prints flat, linear in the session.
+
 - OpenClaw SQLite stores are rediscovered only when the store changes, not on every listing refresh.
 
 - A copied SQLite store with WAL frames is copied once per command, however large, not again whenever another database opens.

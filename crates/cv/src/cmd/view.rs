@@ -952,7 +952,9 @@ fn subagent_line(s: &cv_core::AgentRef) -> String {
     )
 }
 
-/// Render messages as an indented DAG by `parent_id`. Roots (no/unknown parent) sit at depth 0.
+/// Render messages as a DAG by `parent_id`, indented by the forks above each row: an only child
+/// keeps its parent's depth and each child of a fork sits one deeper, so a straight chain is flat
+/// and the output stays linear in the session. Roots (no/unknown parent) sit at depth 0.
 fn walk_tree(rows: &[TreeRow], mut visit: impl FnMut(usize, usize)) {
     let mut by_id = std::collections::HashMap::new();
     for (i, row) in rows.iter().enumerate() {
@@ -986,7 +988,8 @@ fn walk_tree(rows: &[TreeRow], mut visit: impl FnMut(usize, usize)) {
                 continue;
             }
             visit(index, depth);
-            stack.extend(children[index].iter().rev().map(|&child| (child, depth + 1)));
+            let below = depth + usize::from(children[index].len() > 1);
+            stack.extend(children[index].iter().rev().map(|&child| (child, below)));
         }
     }
 }
@@ -1745,9 +1748,11 @@ mod tests {
         ];
         let mut order = Vec::new();
         walk_tree(&rows, |index, depth| order.push((index, depth)));
+        // `root` forks (a, b sit one deeper); `a`'s only child keeps its depth; `cycle2` forks
+        // into `cycle1` (already visited) and `tail`.
         assert_eq!(
             order,
-            [(0, 0), (1, 1), (3, 2), (2, 1), (4, 0), (5, 0), (6, 0), (7, 1), (8, 2)]
+            [(0, 0), (1, 1), (3, 1), (2, 1), (4, 0), (5, 0), (6, 0), (7, 0), (8, 1)]
         );
         let rows = (0..5000)
             .map(|i| TreeRow {
@@ -1757,9 +1762,10 @@ mod tests {
             })
             .collect::<Vec<_>>();
         let mut count = 0;
+        // A straight chain is flat: no row is indented, so the output is linear in the chain.
         walk_tree(&rows, |index, depth| {
             assert_eq!(index, count);
-            assert_eq!(depth, count);
+            assert_eq!(depth, 0);
             count += 1;
         });
         assert_eq!(count, rows.len());
