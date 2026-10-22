@@ -17,8 +17,11 @@ Both are exposed through the everyday [`cv`](cli.md) CLI (`cv index`, `cv search
 
 ## Building the index
 
-Search runs against a prebuilt index, so build it once (and refresh it whenever
-you've accumulated new sessions):
+The index is a cache and the transcripts are the truth: `cv search` answers from the
+index plus a bounded live read of whatever the index has not seen (see
+[How `cv search` resolves](#how-cv-search-resolves)). Building and refreshing it pre-pays
+that read, so build it once and refresh it when convenient; no timer or cron job is needed
+for fresh results:
 
 ```sh
 cv index              # build/refresh the full-text index
@@ -103,12 +106,29 @@ full-text and semantic mode.
 
 ### How `cv search` resolves
 
-`cv search` answers from the tantivy index, and the index is *authoritative*: an empty
-result means "no match", not "go scan everything." A missing or unusable index is an error
-that names the index path, the cause and the fix (`cv index`); it never silently turns into a
-scan of every transcript, which takes minutes on a large corpus. Reading needs no write: a
-home the process may not write (a sandbox's deny-write rule, a read-only copy) is searched,
-listed and shown from the index and catalog already there.
+`cv search` answers from the tantivy index **plus the unindexed suffix**: every session the
+index does not describe as it is now (grown, rewritten or new since `cv index`) is read live,
+newest first, into a private in-memory index and ranked by the same BM25 scorer, with corpus
+statistics taken over both. A session that grew is read from where the index stopped (its
+resume mark, taken every 4 MiB of indexed text), so it costs only its new bytes; a smaller,
+rewritten or new one is read whole, exactly as `cv index` would read it. The read is
+bounded by `--live-bytes` (default 256 MiB, about a day of new transcript on a busy machine):
+a session that does not fit is left to what the index last saw of it. The footer says what was
+read live and what the budget left out:
+
+```text
+(live: read 3 session(s) the index has not seen live (2.1 MiB of the 256.0 MiB --live-bytes budget, 2 from where the index stopped))
+(note: the index is ~2h behind for 1 session(s) not read live: 1 over the --live-bytes budget (412.0 MiB) — run `cv index`)
+```
+
+With no index at all every session is unindexed: the newest are read live within the budget
+and the footer counts the rest. Global `--frozen` (or `--live-bytes 0`) answers from the index
+alone and says how far behind it is; with no index, `--frozen` is an error naming the index path
+and the fix (`cv index`). An index that exists but is unusable is always an error. Nothing is
+written by the live read (no index, catalog or mark), so a home the process may not write (a
+sandbox's deny-write rule, a read-only copy) is searched, listed and shown from the index and
+catalog already there, its suffix included. The same index-plus-suffix answers a `-q text:`
+predicate; without an index there it must cover every session, or the query exits 2.
 
 `--scan` asks for the live scan instead, and says so on stderr: case-insensitive substring
 matching over only the first 256 KiB of exchange content per session, in discovery order,
@@ -191,7 +211,7 @@ cv index --semantic
 | -------------------------------- | --------------------------------------------------- | -------------------- |
 | `cv index`                       | Build/refresh the full-text index                   | —                    |
 | `cv index --semantic`            | Also build semantic embeddings                      | —                    |
-| `cv search <query>`              | Full-text search (BM25)                             | `--limit` (20)       |
+| `cv search <query>`              | Full-text search (BM25), index plus unindexed suffix | `--limit` (20), `--live-bytes` (256 MiB) |
 | `cv search <query> --semantic`   | Semantic search (no keyword fallback)               | `--limit` (20)       |
 | `cv pack <task>`                 | Fused ranking → relevant spans, as a context bundle | `--limit` (8)        |
 

@@ -585,7 +585,11 @@ fn search(params: &Query, searcher: &cv_search::Searcher) -> Reply {
         cwd: cwd.as_deref(),
         scope,
     };
-    let found = match searcher.search(&q, filter, limit, source) {
+    let live_bytes = match params.unsigned("live_bytes") {
+        Ok(bytes) => bytes.map_or(cv_search::LIVE_BYTES, |b| b as u64),
+        Err(error) => return bad(400, &error),
+    };
+    let found = match searcher.search(&q, filter, limit, source, live_bytes) {
         Ok(found) => found,
         // A live scan cannot stand in for semantic ranking, so this is an error, exactly as
         // `cv search --semantic` exits non-zero rather than quietly changing mode.
@@ -621,6 +625,7 @@ fn search(params: &Query, searcher: &cv_search::Searcher) -> Reply {
     for n in &found.notes {
         let s = match n {
             Note::Stale(s) => s.clone(),
+            Note::Live(s) => s.clone(),
             Note::SnippetsUnavailable(e) => format!("live snippets unavailable ({e}); showing indexed previews"),
             Note::Unscanned(s) => s.clone(),
             Note::NoSubagents => "sub-agent transcripts aren't searched yet — rebuild with `cv index --subagents` to \

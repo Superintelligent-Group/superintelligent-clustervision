@@ -132,7 +132,7 @@ impl Winners {
 }
 
 /// Whether a session is admitted, decided by its metadata: one answer per session id.
-type SessionFilter = std::sync::Arc<dyn Fn(&str) -> tantivy::Result<bool> + Send + Sync>;
+pub(crate) type SessionFilter = std::sync::Arc<dyn Fn(&str) -> tantivy::Result<bool> + Send + Sync>;
 
 pub(crate) struct TopSessions {
     pub(crate) filter: Option<SessionFilter>,

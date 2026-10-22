@@ -355,7 +355,7 @@ claude    da9174f4  2026-05-28  the flux inference refactor
           … so the new flux inference path replaces the old type-walker …
 ```
 
-`cv search` answers from the tantivy full-text index (real tokenization + BM25, instant), and the index is authoritative: no matches means no matches, not "scan harder." With no index, or one it cannot open, it fails at once naming the cause and the fix ([`cv index`](#cv-index)); `--scan` asks for a slow, head-capped live scan instead and says so on stderr. It matches the exchange (prompts, replies, tool calls and results); `--kind context` matches the injected instruction files, system prompts, hook output and notices around it instead, and `--kind all` both.
+`cv search` answers from the tantivy full-text index (real tokenization + BM25) plus a live read of every session the index has not seen as it is now, from where the index stopped, newest first and bounded by `--live-bytes` (default 256 MiB): no matches means no matches, not "scan harder." The footer says what was read live and what the budget left out; `--frozen` answers from the index alone. One it cannot open fails at once naming the cause and the fix ([`cv index`](#cv-index)); `--scan` asks for a slow, head-capped live scan instead and says so on stderr. It matches the exchange (prompts, replies, tool calls and results); `--kind context` matches the injected instruction files, system prompts, hook output and notices around it instead, and `--kind all` both.
 
 `--semantic` ranks by *meaning* using stored embeddings (`cv index --semantic` first; a small
 model downloads on first use). Unlike full-text it does **not** silently degrade: with no
@@ -1012,7 +1012,7 @@ cv's own state, and the reference material.
 
 ### `cv index`
 
-Build (or refresh) the search index. Run it once, re-run it whenever you want fresh sessions to be searchable.
+Build (or refresh) the search index. Search is fresh without it: `cv search` reads what the index has not seen live, within `--live-bytes`. `cv index` pre-pays that read, so re-run it when convenient; no timer is needed.
 
 ```sh
 cv index                # full-text (tantivy) index (top-level sessions)
@@ -1103,8 +1103,12 @@ The `thread:` message-path language and the `~` regex operator were removed in 0
 errors with a pointer. Select the session with `tool:`, `text:` and `has:`, then read the turns
 with [`cv show`](#cv-show).
 
-A `-q` containing `text:` requires an existing full-text index: without one the CLI exits 2
-and points at `cv index`; `/api/stats` returns 503 instead of treating it as no matches.
+A `-q` containing `text:` matches as `cv search` does: the full-text index plus a live read of
+the sessions it has not seen, within the default 256 MiB budget (none under `--frozen`); a stale
+session the budget leaves out keeps what the index last saw, with a note on stderr. Without an
+index the live read must cover every session, since a partial membership would turn `NOT text:`
+into "everything unread": otherwise the CLI exits 2 and points at `cv index`, and `/api/stats`
+returns 503 instead of treating it as no matches.
 
 ### `cv formats`
 

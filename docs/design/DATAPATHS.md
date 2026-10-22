@@ -113,7 +113,7 @@ Compressed, encoded, scanned, decoded and emitted bytes must be labeled separate
 | Doctor | Facts projection; checked text lengths and JSON writer counts | Attribution state, unsupported adapter rich/fallback parsing and demanded structured arguments |
 | Query text predicate | Exact index-only matching IDs; cheap tri-state evaluation before parse | Mixed predicates still parse when cheap facts cannot decide |
 | Other rich predicates | Predicate-sized streamed tool/model facts and shared source probes | Distinct unresolved relative paths retained until final cwd; compaction uses its existing separate boundary |
-| FTS | Chunked text, bounded event spool and byte-capacity permits held through Tantivy document consumption; counts/checkpoints and one catalog connection per sweep | Writer arenas coexist with admitted documents |
+| FTS | Chunked text, bounded event spool and byte-capacity permits held through Tantivy document consumption; counts/checkpoints and one catalog connection per sweep. A query adds the stale suffix, read live from each mark into an in-memory index | Writer arenas coexist with admitted documents; the live suffix's index is heap, bounded by `--live-bytes` |
 | Semantic indexing | Shares discovery inventory; source/model identity enables unchanged-vector reuse and deferred model load; atomic streamed save | Requested vector-store storage grows with session count; ranking candidate retention is now limited by requested result count |
 | API pagination / HTTP windows | Verified page checkpoints and head metadata cache; selected HTTP JSON stages bounded frames through shared window selection | Window JSON parsing, demanded metadata and individual visible-message payloads remain; complete downloads use staged native writers |
 | Watch | Verified checkpoints and bounded EOF metadata reused across tail polls | Strict source identity and dependencies; replay-only formats retain fallback parsing |
@@ -229,6 +229,10 @@ Audited against `git log v0.17.0..HEAD` on 2026-10-21; a closure below names its
   Cursor CLI counts to exclude empty stores. Removing these reads needs to preserve inclusion and exact metadata.
   Shared selections landed for OpenClaw/Hermes/Qwen tasks/Goose/exports (`62f0ccda`, `0a6a3b22`,
   `7475e978`, `20980e64`, `646b8fb6`); native allocations and validation still cost work.
+- **Search freshness, closed.** A query is the index plus a bounded live read of what it has
+  not seen (`cv-search/src/fts/live.rs`): stale sessions read from their FTS mark into a private
+  in-memory index, ranked by the same BM25 over summed statistics, within `--live-bytes`. No timer
+  keeps search fresh; `cv index` pre-pays. `--frozen` reads nothing live.
 - **Archive inventory.** `archive sync` uses `index_all`'s references; `cv/src/cmd/archive` owns
   its checked artifact projection. An unavailable index falls back to discovery with a diagnostic.
 - **Three message windowings, closed.** JSON, text rendering and pack relevance excerpts share

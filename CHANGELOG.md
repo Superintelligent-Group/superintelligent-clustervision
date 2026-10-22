@@ -32,6 +32,10 @@
 
 - Search staleness counts the preferred copy of each session, avoiding false drift from older duplicates.
 
+- `cv search`, `/api/search` and `-q text:` read what the index has not seen live, from its resume mark, within `--live-bytes` (256 MiB); `--frozen` reads none.
+
+- `cv search` without an index answers from that live read instead of exiting 1; `--frozen` without an index still names `cv index`.
+
 ## 0.18.0-rc.1 — 2026-10-22 — the release an agent can trust
 
 **Breaking: commands, MCP, HTTP and JSON.** A removed name exits 2 with a pointer to its replacement; a changed shape is named here.

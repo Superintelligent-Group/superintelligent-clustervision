@@ -267,6 +267,12 @@ enum Cmd {
         /// `all`. Context repeats across sessions, so it is matched only when asked for.
         #[arg(long, value_name = "exchange|context|all", conflicts_with_all = ["semantic", "scan"])]
         kind: Option<String>,
+        /// The index answers plus a live read of the sessions it has not seen as they are now
+        /// (grown, rewritten, new since `cv index`), from where the index stopped: at most this
+        /// many bytes of source, newest sessions first. The footer says what was read and what
+        /// the budget left out; 0 (or global --frozen) answers from the index alone.
+        #[arg(long, value_name = "BYTES", default_value_t = cv_search::LIVE_BYTES, conflicts_with_all = ["semantic", "scan"])]
+        live_bytes: u64,
         /// Emit the hits as one JSON array instead of the table — the same hits in the same
         /// order (--harness/--limit/--semantic respected): a session row (`id, harness, path, cwd,
         /// title, created_at, updated_at, message_count, size_bytes`) plus `score`, `snippet`, and
@@ -1268,8 +1274,9 @@ fn run() -> Result<()> {
             semantic,
             scan,
             kind,
+            live_bytes,
             json,
-        } => search::cmd_search(&query, harness, limit, semantic, scan, kind, json),
+        } => search::cmd_search(&query, harness, limit, semantic, scan, kind, live_bytes, json),
         Cmd::Show {
             id,
             harness,

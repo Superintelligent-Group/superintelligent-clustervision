@@ -42,7 +42,9 @@
 mod observe;
 #[cfg(test)]
 use observe::{body_hash, SweepWork};
+mod live;
 mod sweep;
+pub use live::{Suffix, LIVE_BYTES};
 use sweep::*;
 
 use crate::ingest::{Admission, AdmittedDocument, Writer};
@@ -731,14 +733,7 @@ enum Delete {
 fn source_consumer(dir: &Path) -> Result<String> {
     use std::io::Write;
     let file = dir.join("cv-index-id");
-    let read = |file: &Path| -> Result<Option<String>> {
-        match std::fs::read_to_string(file) {
-            Ok(id) if !id.trim().is_empty() => Ok(Some(format!("fts:{}", id.trim()))),
-            Ok(_) => Ok(None),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(e).with_context(|| format!("reading {}", file.display())),
-        }
-    };
+    let read = |file: &Path| indexed_consumer(file);
     if let Some(consumer) = read(&file)? {
         return Ok(consumer);
     }
@@ -774,6 +769,16 @@ fn source_consumer(dir: &Path) -> Result<String> {
             read(&file)?.with_context(|| format!("reading {}", file.display()))
         }
         Err(e) => Err(e).with_context(|| format!("recording {}", file.display())),
+    }
+}
+
+/// The consumer an index's identity file names, read only: `None` when it has none yet.
+fn indexed_consumer(file: &Path) -> Result<Option<String>> {
+    match std::fs::read_to_string(file) {
+        Ok(id) if !id.trim().is_empty() => Ok(Some(format!("fts:{}", id.trim()))),
+        Ok(_) => Ok(None),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e).with_context(|| format!("reading {}", file.display())),
     }
 }
 
@@ -1070,18 +1075,12 @@ impl PlanState {
             ..
         } = self;
         let source = probe.snapshot(r);
-        let (mtime, size) = sig(source.primary);
-        // Auxiliary inputs are judged across primary growth, against the tuple the docs were
-        // indexed at; the adapter's checkpoint then decides whether the growth resumes.
-        let baseline = dependencies.get(r).map(|record| &record.baseline);
-        let indexed = existing.get(&r.id).copied().unwrap_or((mtime, size));
-        let dependencies_fresh =
-            baseline.is_some_and(|old| sig(old.primary) == indexed && old.dependencies_fresh(&source, probe));
-        // The docs' stamp is the current tuple, then the captured source authority holds.
-        let fts_fresh = mtime != 0
-            && existing.get(&r.id) == Some(&(mtime, size))
-            && dependencies.admit(r, &source, probe).is_some()
-            && metadata.get(&r.id) == Some(&DiscoveryMetadata::new(r, prov));
+        let Freshness {
+            mtime,
+            size,
+            fresh: fts_fresh,
+            dependencies_fresh,
+        } = Freshness::of(existing, metadata, dependencies, probe, r, prov, &source);
         let events = event_sync.needs_ingest(r, &source, prov, probe);
         // Unchanged on every axis → skip entirely (no re-parse beyond the metadata scan).
         // Folded subagents have no independent catalog affordance row; their FTS/event
@@ -1113,6 +1112,48 @@ impl PlanState {
             fts_fresh,
             cv_core::harness::for_harness(r.harness).is_some().then_some(job),
         )
+    }
+}
+
+/// Whether a session's FTS docs are current, as both the sweep and a search's live read judge it.
+struct Freshness {
+    mtime: i64,
+    size: i64,
+    /// The docs' stamp is the current tuple, the captured source authority holds and discovery
+    /// describes the session as the docs do.
+    fresh: bool,
+    /// The auxiliary inputs still match the tuple the docs were indexed at, so a grown primary
+    /// may resume from its mark.
+    dependencies_fresh: bool,
+}
+
+impl Freshness {
+    fn of(
+        existing: &HashMap<String, (i64, i64)>,
+        metadata: &HashMap<String, DiscoveryMetadata>,
+        dependencies: &cv_core::source::Table<InIndex>,
+        probe: &mut cv_core::source::Probe,
+        r: &cv_core::SessionRef,
+        prov: &cv_core::events::Provenance,
+        source: &cv_core::source::Baseline,
+    ) -> Self {
+        let (mtime, size) = sig(source.primary);
+        // Auxiliary inputs are judged across primary growth, against the tuple the docs were
+        // indexed at; the adapter's checkpoint then decides whether the growth resumes.
+        let baseline = dependencies.get(r).map(|record| &record.baseline);
+        let indexed = existing.get(&r.id).copied().unwrap_or((mtime, size));
+        let dependencies_fresh =
+            baseline.is_some_and(|old| sig(old.primary) == indexed && old.dependencies_fresh(source, probe));
+        let fresh = mtime != 0
+            && existing.get(&r.id) == Some(&(mtime, size))
+            && dependencies.admit(r, source, probe).is_some()
+            && metadata.get(&r.id) == Some(&DiscoveryMetadata::new(r, prov));
+        Freshness {
+            mtime,
+            size,
+            fresh,
+            dependencies_fresh,
+        }
     }
 }
 
@@ -2306,67 +2347,6 @@ pub fn newest_indexed_mtime(dir: &Path) -> Option<i64> {
     sigs.values().filter(|(_, size)| *size >= 0).map(|&(mt, _)| mt).max()
 }
 
-/// How far the index at `dir` trails the live session corpus — the data the search footer's
-/// staleness disclosure names. `stale_sessions` counts sessions whose primary source signature no
-/// longer matches their indexed stamp (grew, rewrote, or arrived since the last pass); `behind_ns`
-/// is the gap between the index's newest stamp and the newest session file on disk. `None` when
-/// the index can't be opened or holds no meta docs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Staleness {
-    pub stale_sessions: usize,
-    pub behind_ns: i64,
-}
-
-/// The staleness probe. The sessions come from the catalog ([`cv_core::sessions`], which probes
-/// its freshness and rescans only what changed), then one stat each — the same cost this call's
-/// miss-path predecessor paid; a full `discover_all` here made every miss pay a fleet scan.
-pub fn staleness(dir: &Path) -> Option<Staleness> {
-    staleness_over(dir, &cv_core::sessions())
-}
-
-/// [`staleness`] over a caller-supplied inventory — the split that lets a unit test feed the
-/// fixture's refs rather than a real corpus discovery.
-fn staleness_over(dir: &Path, refs: &[cv_core::SessionRef]) -> Option<Staleness> {
-    let (sigs, _) = probe_indexed_sigs(dir)?;
-    let indexed = sigs.values().filter(|(_, size)| *size >= 0).map(|&(mt, _)| mt).max()?;
-    // Count against the same preferred-candidate set the sweep indexes: a second on-disk
-    // copy of one session is not another stale session.
-    let prov = cv_core::events::Provenance::default();
-    let mut stale_sessions = 0usize;
-    let mut newest_on_disk = 0i64;
-    for (r, _) in preferred_index_candidates(refs.iter().map(|r| (r, &prov)).collect()) {
-        let cur = sig(cv_core::source::FileId::at(&cv_core::source::primary_path(r)));
-        newest_on_disk = newest_on_disk.max(cur.0);
-        if cur.0 == 0 || sigs.get(&r.id) != Some(&cur) {
-            stale_sessions += 1;
-        }
-    }
-    Some(Staleness {
-        stale_sessions,
-        behind_ns: newest_on_disk.saturating_sub(indexed),
-    })
-}
-
-/// The one-sentence staleness disclosure every search surface prints — on a hit list it warns the
-/// rows may be behind, on a miss it names the likely reason a recent conversation wasn't found.
-/// `None` when the index is caught up (or unmeasurable).
-pub fn staleness_note(dir: &Path) -> Option<String> {
-    staleness(dir).as_ref().and_then(staleness_line)
-}
-
-/// The note text for a measured [`Staleness`], `None` when caught up — the pure split the unit
-/// test asserts on (`staleness` itself goes through the fleet catalog's discovery).
-fn staleness_line(s: &Staleness) -> Option<String> {
-    if s.stale_sessions == 0 {
-        return None;
-    }
-    Some(format!(
-        "the index is ~{} behind for {} session(s) — run `cv index`",
-        fmt_age_ns(s.behind_ns),
-        s.stale_sessions
-    ))
-}
-
 /// `7s` / `14m` / `9h` / `3d` — the compact age the staleness note carries.
 fn fmt_age_ns(ns: i64) -> String {
     let secs = (ns / 1_000_000_000).max(0);
@@ -2499,6 +2479,56 @@ pub fn text_search_ids_batch(dir: &Path, queries: &[&str]) -> Result<Vec<Result<
         .collect())
 }
 
+/// [`text_search_ids_batch`] over the index plus the live suffix of `refs` it has not seen,
+/// within `budget` source bytes (`None`: the index alone). Membership is exact for every session
+/// the index describes as it is now or the suffix read; the returned [`Suffix`] names the rest.
+/// No index at `dir` is an empty index.
+pub fn text_search_ids_suffixed(
+    dir: &Path,
+    queries: &[&str],
+    budget: Option<u64>,
+    refs: &[cv_core::SessionRef],
+) -> Result<(Vec<Result<HashSet<String>>>, Suffix)> {
+    let indexed = if dir.join("meta.json").exists() || budget.is_none() {
+        Some(query_index(dir)?)
+    } else {
+        None
+    };
+    let (live, suffix) = live::read(
+        dir,
+        indexed.as_ref().map(|(index, f, _)| live::Indexed { index, f }),
+        refs,
+        budget,
+    )?;
+    let empty = HashMap::new();
+    let shadows = live.as_ref().map_or(&empty, |l| &l.shadows);
+    let matches = queries
+        .iter()
+        .map(|query| -> Result<HashSet<String>> {
+            let mut ids = HashSet::new();
+            if let Some((index, f, searcher)) = &indexed {
+                let parsed = parse_text_query(index, f, query, crate::Scope::Exchange)?;
+                let parsed = live::without_shadowed(f, parsed, shadows);
+                ids.extend(
+                    searcher
+                        .search(&*parsed, &crate::session_collector::SessionIds(f.id))
+                        .context("matching session IDs")?,
+                );
+            }
+            if let Some(l) = &live {
+                let parsed = parse_text_query(l.searcher.index(), &l.f, query, crate::Scope::Exchange)?;
+                ids.extend(
+                    l.searcher
+                        .search(&*parsed, &crate::session_collector::SessionIds(l.f.id))
+                        .context("matching live session IDs")?,
+                );
+            }
+            Ok(ids)
+        })
+        .collect();
+    Ok((matches, suffix))
+}
+
 fn matching_ids(index: &Index, f: &Fields, searcher: &tantivy::Searcher, query: &str) -> Result<HashSet<String>> {
     let parsed = parse_text_query(index, f, query, crate::Scope::Exchange)?;
     searcher
@@ -2526,13 +2556,29 @@ fn enrich_snippets(
     scope: crate::Scope,
     hits: &mut [Hit],
 ) -> Result<Option<String>> {
+    enrich_snippets_from(|id| source_path(searcher, f, id), query, scope, hits)
+}
+
+/// The source path session `id`'s meta doc in `searcher` names.
+fn source_path(searcher: &tantivy::Searcher, f: &Fields, id: &str) -> Result<String> {
+    let doc = meta_doc(searcher, f, id)?.ok_or_else(|| missing_meta(id))?;
+    doc.get_first(f.path)
+        .and_then(|v| v.as_str())
+        .map(str::to_owned)
+        .with_context(|| format!("search metadata for {id} names no source path"))
+}
+
+/// [`enrich_snippets`] with each hit's source path from `path_of`.
+fn enrich_snippets_from(
+    path_of: impl Fn(&str) -> Result<String>,
+    query: &str,
+    scope: crate::Scope,
+    hits: &mut [Hit],
+) -> Result<Option<String>> {
     let (mut unreadable, mut first) = (0usize, None);
     for hit in hits {
-        let doc = meta_doc(searcher, f, &hit.id)?.ok_or_else(|| missing_meta(&hit.id))?;
-        let path = doc
-            .get_first(f.path)
-            .and_then(|v| v.as_str())
-            .with_context(|| format!("search metadata for {} names no source path", hit.id))?;
+        let path = path_of(&hit.id)?;
+        let path = path.as_str();
         // The stored preview stands in when the live read cannot: marked when the source is
         // gone, returned as the search's note when it is there but cannot be read.
         match live_snippet(path, &hit.harness, query, scope) {
@@ -2618,6 +2664,98 @@ pub(crate) fn search_with_snippets(
     Ok((hits, note))
 }
 
+/// Search the index plus the live suffix of `refs` it has not seen ([`live`]), within `budget`
+/// source bytes (`None`: the index alone, the suffix only counted). No index at `dir` is an
+/// empty index: every session is unindexed. An index that is there but unusable is an error.
+pub(crate) fn search_suffixed(
+    dir: &Path,
+    query: &str,
+    limit: usize,
+    filter: crate::SearchFilter<'_>,
+    budget: Option<u64>,
+    refs: &[cv_core::SessionRef],
+) -> Result<(Vec<Hit>, Option<String>, Suffix)> {
+    let indexed = if dir.join("meta.json").exists() || budget.is_none() {
+        Some(query_index(dir)?)
+    } else {
+        None
+    };
+    let (live, suffix) = live::read(
+        dir,
+        indexed.as_ref().map(|(index, f, _)| live::Indexed { index, f }),
+        refs,
+        budget,
+    )?;
+    let empty = HashMap::new();
+    let shadows = live.as_ref().map_or(&empty, |l| &l.shadows);
+    let stats = live::Union(
+        indexed.as_ref().map(|(_, _, searcher)| searcher),
+        live.as_ref().map(|l| &l.searcher),
+    );
+    let live_decisions = live
+        .as_ref()
+        .map(|l| std::sync::Arc::new(MetadataDecisions::new(&l.searcher, &l.f, filter)));
+    // One answer per session: the live meta doc describes a session the suffix read.
+    let accept = |decisions: &std::sync::Arc<MetadataDecisions>| {
+        filtered(filter).then(|| {
+            let (own, live, shadows) = (decisions.clone(), live_decisions.clone(), shadows.clone());
+            std::sync::Arc::new(move |id: &str| match &live {
+                Some(live) if shadows.contains_key(id) => live.resolve(id).map(|d| d.accepted),
+                _ => own.resolve(id).map(|d| d.accepted),
+            }) as crate::session_collector::SessionFilter
+        })
+    };
+    // (score, from the live side, candidate), best first, one per session.
+    let mut ranked: HashMap<String, (crate::session_collector::Candidate, bool)> = HashMap::new();
+    let mut keep = |candidate: crate::session_collector::Candidate, is_live: bool| match ranked.get(&candidate.id) {
+        Some((best, _)) if best.score >= candidate.score => {}
+        _ => {
+            ranked.insert(candidate.id.clone(), (candidate, is_live));
+        }
+    };
+    let indexed_decisions = indexed
+        .as_ref()
+        .map(|(_, f, searcher)| std::sync::Arc::new(MetadataDecisions::new(searcher, f, filter)));
+    if let (Some((index, f, searcher)), Some(decisions)) = (&indexed, &indexed_decisions) {
+        let parsed = live::without_shadowed(f, parse_text_query(index, f, query, filter.scope)?, shadows);
+        for candidate in rank(f, searcher, &*parsed, limit, accept(decisions), &stats)? {
+            keep(candidate, false);
+        }
+    }
+    if let (Some(l), Some(decisions)) = (&live, &live_decisions) {
+        let parsed = parse_text_query(l.searcher.index(), &l.f, query, filter.scope)?;
+        for candidate in rank(&l.f, &l.searcher, &*parsed, limit, accept(decisions), &stats)? {
+            keep(candidate, true);
+        }
+    }
+    let mut ranked: Vec<_> = ranked.into_values().collect();
+    ranked.sort_by(|a, b| a.0.cmp(&b.0));
+    ranked.truncate(limit);
+    let mut hits = Vec::with_capacity(ranked.len());
+    for (candidate, is_live) in ranked {
+        let described_live = shadows.contains_key(&candidate.id);
+        hits.push(match (&indexed, &indexed_decisions, &live, &live_decisions) {
+            (_, _, Some(l), Some(d)) if is_live => indexed_hit(&l.searcher, &l.f, candidate, d)?,
+            (_, _, Some(l), Some(d)) if described_live => {
+                meta_hit(&l.searcher, &l.f, candidate.id, candidate.score, d)?
+            }
+            (Some((_, f, searcher)), Some(d), _, _) => indexed_hit(searcher, f, candidate, d)?,
+            _ => unreachable!("a candidate comes from a side that exists"),
+        });
+    }
+    let note = enrich_snippets_from(
+        |id| match (&live, &indexed) {
+            (Some(l), _) if shadows.contains_key(id) => source_path(&l.searcher, &l.f, id),
+            (_, Some((_, f, searcher))) => source_path(searcher, f, id),
+            _ => Err(missing_meta(id).into()),
+        },
+        query,
+        filter.scope,
+        &mut hits,
+    )?;
+    Ok((hits, note, suffix))
+}
+
 fn ranked_search(
     index: &Index,
     f: &Fields,
@@ -2628,78 +2766,123 @@ fn ranked_search(
     decisions: std::sync::Arc<MetadataDecisions>,
 ) -> Result<Vec<Hit>> {
     let parsed = parse_text_query(index, f, query, filter.scope)?;
+    let accept = filtered(filter).then(|| {
+        let shared = decisions.clone();
+        std::sync::Arc::new(move |id: &str| shared.resolve(id).map(|decision| decision.accepted))
+            as crate::session_collector::SessionFilter
+    });
+    rank(f, searcher, &*parsed, limit, accept, searcher)?
+        .into_iter()
+        .map(|candidate| indexed_hit(searcher, f, candidate, &decisions))
+        .collect()
+}
 
+/// Whether a filter needs each session's metadata before ranking.
+fn filtered(filter: crate::SearchFilter<'_>) -> bool {
+    filter.harness.is_some() || filter.cwd.is_some()
+}
+
+/// The top `limit` sessions `query` matches in `searcher`, each ranked by its best chunk under
+/// BM25 with the corpus statistics `stats` supplies (the searcher's own, or the index and the live
+/// suffix together), admitted by `accept` when given.
+fn rank(
+    f: &Fields,
+    searcher: &tantivy::Searcher,
+    query: &dyn tantivy::query::Query,
+    limit: usize,
+    accept: Option<crate::session_collector::SessionFilter>,
+    stats: &dyn tantivy::query::Bm25StatisticsProvider,
+) -> Result<Vec<crate::session_collector::Candidate>> {
     // Collect sessions rather than chunks. Each segment's top `limit` sessions contains every
     // possible global winner, even when one session has arbitrarily many matching chunks.
     let mut collector = crate::session_collector::TopSessions::new(f.id, limit);
-    if filter.harness.is_some() || filter.cwd.is_some() {
-        let shared = decisions.clone();
-        // Resumed chunks can retain older labels/cwd: filter the same current meta doc that
-        // describes the returned hit.
-        collector.filter = Some(std::sync::Arc::new(move |id| {
-            shared.resolve(id).map(|decision| decision.accepted)
-        }));
-    }
-    let ranked = searcher.search(&parsed, &collector).context("running search")?;
+    // Resumed chunks can retain older labels/cwd: filter the same current meta doc that
+    // describes the returned hit.
+    collector.filter = accept;
+    searcher
+        .search_with_statistics_provider(query, &collector, stats)
+        .context("running search")
+}
 
-    let mut hits = Vec::with_capacity(ranked.len());
-    for candidate in ranked {
-        let (score, id) = (candidate.score, candidate.id);
-        let head: crate::session_collector::StoredHead<2> =
-            searcher.doc(candidate.addr).context("loading stored doc header")?;
-        let load_candidate = || -> Result<TantivyDocument> {
-            #[cfg(test)]
-            decisions
-                .observed
-                .winner_body_reads
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            searcher.doc(candidate.addr).context("loading stored doc")
+/// A ranked candidate as a hit, described by its session's meta doc in `searcher`.
+fn indexed_hit(
+    searcher: &tantivy::Searcher,
+    f: &Fields,
+    candidate: crate::session_collector::Candidate,
+    decisions: &MetadataDecisions,
+) -> Result<Hit> {
+    let (score, id) = (candidate.score, candidate.id);
+    let head: crate::session_collector::StoredHead<2> =
+        searcher.doc(candidate.addr).context("loading stored doc header")?;
+    let load_candidate = || -> Result<TantivyDocument> {
+        #[cfg(test)]
+        decisions
+            .observed
+            .winner_body_reads
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        searcher.doc(candidate.addr).context("loading stored doc")
+    };
+    // A meta winner is its own metadata; a body winner reads its session's meta document.
+    let is_meta = head
+        .value(f.kind)
+        .with_context(|| {
+            format!("search index document of {id} carries no kind; rebuild it with `cv index --rebuild`")
+        })?
+        .as_str()
+        == Some(KIND_META);
+    let doc = if is_meta {
+        load_candidate()?
+    } else {
+        let address = match decisions.cached(&id) {
+            Some(decision) => {
+                #[cfg(test)]
+                decisions
+                    .observed
+                    .winner_metadata_reads
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                decision.address
+            }
+            None => meta_addr(searcher, f, &id)?.ok_or_else(|| missing_meta(&id))?,
         };
-        // A meta winner is its own metadata; a body winner reads its session's meta document.
-        let is_meta = head
-            .value(f.kind)
-            .with_context(|| {
-                format!("search index document of {id} carries no kind; rebuild it with `cv index --rebuild`")
-            })?
-            .as_str()
-            == Some(KIND_META);
-        let doc = if is_meta {
-            load_candidate()?
-        } else {
-            let address = match decisions.cached(&id) {
-                Some(decision) => {
-                    #[cfg(test)]
-                    decisions
-                        .observed
-                        .winner_metadata_reads
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    decision.address
-                }
-                None => meta_addr(searcher, f, &id)?.ok_or_else(|| missing_meta(&id))?,
-            };
-            searcher.doc(address).context("reading search metadata")?
-        };
-        let get_str =
-            |field: Field| -> Option<String> { doc.get_first(field).and_then(|v| v.as_str()).map(|s| s.to_string()) };
-        let harness = get_str(f.harness).unwrap_or_default();
-        let snippet = get_str(f.preview).unwrap_or_default();
+        searcher.doc(address).context("reading search metadata")?
+    };
+    Ok(hit_of(&doc, f, id, score))
+}
 
-        hits.push(Hit {
-            id,
-            harness,
-            cwd: get_str(f.cwd),
-            title: get_str(f.title),
-            created_at: doc.get_first(f.created_at).and_then(|v| v.as_i64()),
-            updated_at: doc.get_first(f.updated_at).and_then(|v| v.as_i64()),
-            score,
-            snippet,
-            parent_id: get_str(f.parent_id),
-            agent_id: get_str(f.agent_id),
-            workflow: get_str(f.workflow),
-            session: None,
-        });
+/// Session `id`'s hit at `score`, described by its meta doc in `searcher` (the live suffix's
+/// current description of a session whose older chunks ranked it).
+fn meta_hit(
+    searcher: &tantivy::Searcher,
+    f: &Fields,
+    id: String,
+    score: f32,
+    decisions: &MetadataDecisions,
+) -> Result<Hit> {
+    let address = match decisions.cached(&id) {
+        Some(decision) => decision.address,
+        None => meta_addr(searcher, f, &id)?.ok_or_else(|| missing_meta(&id))?,
+    };
+    let doc: TantivyDocument = searcher.doc(address).context("reading search metadata")?;
+    Ok(hit_of(&doc, f, id, score))
+}
+
+fn hit_of(doc: &TantivyDocument, f: &Fields, id: String, score: f32) -> Hit {
+    let get_str =
+        |field: Field| -> Option<String> { doc.get_first(field).and_then(|v| v.as_str()).map(|s| s.to_string()) };
+    Hit {
+        id,
+        harness: get_str(f.harness).unwrap_or_default(),
+        cwd: get_str(f.cwd),
+        title: get_str(f.title),
+        created_at: doc.get_first(f.created_at).and_then(|v| v.as_i64()),
+        updated_at: doc.get_first(f.updated_at).and_then(|v| v.as_i64()),
+        score,
+        snippet: get_str(f.preview).unwrap_or_default(),
+        parent_id: get_str(f.parent_id),
+        agent_id: get_str(f.agent_id),
+        workflow: get_str(f.workflow),
+        session: None,
     }
-    Ok(hits)
 }
 
 /// Most text we'll scan from a session to find a snippet window. Matches are almost always early;
@@ -2940,6 +3123,7 @@ mod tests {
                 },
                 2,
                 crate::Source::Index,
+                crate::LIVE_BYTES,
             )
             .unwrap();
         assert_eq!(found.hits.iter().map(|h| h.id.as_str()).collect::<Vec<_>>(), ["b", "c"]);
@@ -2958,6 +3142,48 @@ mod tests {
         assert!(identities.iter().all(|id| id == &identities[0]));
         assert!(uuid::Uuid::parse_str(identities[0].strip_prefix("fts:").unwrap()).is_ok());
         assert_eq!(source_consumer(&dir).unwrap(), identities[0]);
+    }
+
+    /// The live suffix a search reads beside the index holds a private in-memory index: its heap
+    /// is bounded by the budget's text, not by what the unindexed sessions hold. The sweep
+    /// fixture, unindexed, searched with a budget that admits two of its four giant sessions.
+    #[cfg(feature = "probe-heap")]
+    #[test]
+    #[ignore = "explicit synthetic CV_SWEEP_INPUT_PROBE and CV_SWEEP_INPUT_BYTES, one isolated process"]
+    fn production_live_suffix_heap_probe() {
+        let _home = IsolatedHome::new();
+        let fixture = std::fs::canonicalize(std::env::var_os("CV_SWEEP_INPUT_PROBE").unwrap()).unwrap();
+        let len = std::fs::metadata(&fixture).unwrap().len();
+        let refs: Vec<_> = (0..4)
+            .map(|n| cv_core::SessionRef::new(format!("large{n}"), cv_core::Harness::Claude, &fixture))
+            .collect();
+        let dir = tmpdir();
+        let baseline = cv_testkit::heap::begin();
+        let started = std::time::Instant::now();
+        let (hits, _, suffix) = search_suffixed(
+            &dir.join("absent"),
+            "Inspect",
+            10,
+            crate::SearchFilter::default(),
+            Some(2 * len),
+            &refs,
+        )
+        .unwrap();
+        let wall = started.elapsed().as_secs_f64();
+        let heap = cv_testkit::heap::end(baseline);
+        assert_eq!((hits.len(), suffix.read, suffix.cut), (2, 2, 2));
+        assert_eq!((suffix.bytes, suffix.cut_bytes), (2 * len, 2 * len));
+        // Two 100 MB sessions indexed in memory: their tokens, not their text, plus one writer.
+        assert!(
+            heap.peak_above_baseline_bytes < 384 * 1024 * 1024,
+            "{}",
+            heap.peak_above_baseline_bytes
+        );
+        eprintln!(
+            "{}",
+            serde_json::json!({"session_bytes":len,"read":suffix.read,"cut":suffix.cut,"wall_s":wall,
+                "peak_heap":heap.peak_above_baseline_bytes})
+        );
     }
 
     #[cfg(feature = "probe-heap")]
@@ -7546,48 +7772,142 @@ mod tests {
         );
     }
 
-    /// Regression for the live-staleness disclosure: a session that grows after indexing must be
-    /// counted by [`staleness_over`], and a fresh index must report none — the footer `cv search`
-    /// appends is only honest if both directions hold.
-    #[test]
-    fn staleness_counts_grown_sessions_then_goes_quiet() {
-        let _home = IsolatedHome::new();
-        let dir = tmpdir();
-        let sdir = tmpdir();
-        let p = write_claude(&sdir, "s1", "alpha corpus seed");
-        let refs = vec![sref("s1", "one", p.clone())];
-
-        index_refs(&dir, &refs, false).unwrap();
-        // A fresh index over the same files reports no staleness — the footer stays off.
-        assert_eq!(staleness_over(&dir, &refs).map(|s| s.stale_sessions), Some(0));
-        assert_eq!(staleness_line(&staleness_over(&dir, &refs).unwrap()), None);
-
-        // Grow the transcript on disk: its signature no longer matches its stamp → counted, and
-        // the note names the count and the cure.
-        let mut f = std::fs::OpenOptions::new().append(true).open(&p).unwrap();
-        use std::io::Write as _;
-        writeln!(f, "{}", serde_json::json!({"type":"user","uuid":"u2","sessionId":"s1","message":{"role":"user","content":"beta appended"}})).unwrap();
-        let s = staleness_over(&dir, &refs).expect("index present");
-        assert_eq!(s.stale_sessions, 1, "the grown session must count as stale");
-        assert!(s.behind_ns >= 0);
-        let note = staleness_line(&s).expect("a stale session must produce the note");
-        assert!(note.contains("behind for 1 session"), "{note}");
-        assert!(note.contains("cv index"), "{note}");
+    /// A session's grown suffix, searched without `cv index`: read live from its mark (the
+    /// unread suffix only), ranked like the index ranks, and the footer says so.
+    fn suffix_search(
+        dir: &Path,
+        query: &str,
+        budget: Option<u64>,
+        refs: &[cv_core::SessionRef],
+    ) -> (Vec<(String, f32)>, Suffix) {
+        let (hits, _, suffix) = search_suffixed(dir, query, 10, crate::SearchFilter::default(), budget, refs).unwrap();
+        (hits.into_iter().map(|h| (h.id, h.score)).collect(), suffix)
     }
 
-    /// A session the index has never seen counts as stale too — a hit list that can't contain it
-    /// must disclose the gap.
-    #[test]
-    fn staleness_counts_unindexed_sessions() {
-        let _home = IsolatedHome::new();
-        let dir = tmpdir();
-        let sdir = tmpdir();
-        let p = write_claude(&sdir, "old", "alpha already indexed");
-        let p2 = write_claude(&sdir, "new", "beta never indexed");
-        index_refs(&dir, &[sref("old", "one", p.clone())], false).unwrap();
+    fn append_claude(path: &str, id: &str, n: usize, text: &str) {
+        use std::io::Write as _;
+        let mut f = std::fs::OpenOptions::new().append(true).open(path).unwrap();
+        for i in 0..n {
+            let line = serde_json::json!({"type":"user","uuid":format!("{id}-late-{i}"),"sessionId":id,
+                "message":{"role":"user","content":format!("{text} {i} {}", "filler words ".repeat(12))}});
+            writeln!(f, "{line}").unwrap();
+        }
+    }
 
-        let refs = vec![sref("old", "one", p), sref("new", "two", p2)];
-        assert_eq!(staleness_over(&dir, &refs).map(|s| s.stale_sessions), Some(1));
+    #[test]
+    fn grown_session_is_found_live_from_its_mark_without_cv_index() {
+        let _home = IsolatedHome::new();
+        let (dir, sdir) = (tmpdir(), tmpdir());
+        let msgs: Vec<_> = (0..40)
+            .map(|i| ("user", format!("seed alpha {i} {}", "padding text ".repeat(12))))
+            .collect();
+        let msgs: Vec<_> = msgs.iter().map(|(r, t)| (*r, t.as_str())).collect();
+        let p = write_claude_msgs(&sdir, "grow", &msgs);
+        let other = write_claude(&sdir, "other", "alpha only here");
+        let refs = vec![sref("grow", "one", p.clone()), sref("other", "two", other)];
+        sweep(&dir, refs.clone(), false, false).unwrap();
+        let mark = cv_core::resume::MarkTable::load()
+            .get(&refs[0])
+            .cloned()
+            .expect("a mark");
+
+        // Fresh: nothing is read live and the footer is quiet.
+        let (_, suffix) = suffix_search(&dir, "alpha", Some(LIVE_BYTES), &refs);
+        assert_eq!((suffix.stale, suffix.read), (0, 0));
+        assert_eq!((suffix.read_line(), suffix.unread_line()), (None, None));
+
+        append_claude(&p, "grow", 3, "zanzibar");
+        let len = std::fs::metadata(&p).unwrap().len();
+        let (hits, suffix) = suffix_search(&dir, "zanzibar", Some(LIVE_BYTES), &refs);
+        assert_eq!(hits.iter().map(|h| h.0.as_str()).collect::<Vec<_>>(), ["grow"]);
+        assert_eq!((suffix.stale, suffix.read, suffix.resumed, suffix.cut), (1, 1, 1, 0));
+        assert_eq!(
+            suffix.bytes,
+            len - mark.offset(),
+            "a stale session costs its unread suffix"
+        );
+        assert!(suffix.read_line().unwrap().contains("1 session(s)"), "{suffix:?}");
+        assert_eq!(suffix.unread_line(), None);
+        // The prefix the index holds still answers for the same session: one hit, not two.
+        let (hits, _) = suffix_search(&dir, "alpha", Some(LIVE_BYTES), &refs);
+        assert_eq!(hits.iter().filter(|h| h.0 == "grow").count(), 1, "{hits:?}");
+
+        // --frozen: the index alone, and the footer says how far behind.
+        let (hits, suffix) = suffix_search(&dir, "zanzibar", None, &refs);
+        assert!(hits.is_empty(), "{hits:?}");
+        assert_eq!((suffix.stale, suffix.read), (1, 0));
+        let note = suffix.unread_line().unwrap();
+        assert!(
+            note.contains("--frozen") && note.contains("behind for 1 session"),
+            "{note}"
+        );
+        // Nothing was written: the sweep still finds the session stale and resumes it.
+        let swept = sweep(&dir, refs.clone(), false, false).unwrap();
+        assert_eq!((swept.changed, swept.resumed), (1, 1));
+        let (_, suffix) = suffix_search(&dir, "zanzibar", Some(LIVE_BYTES), &refs);
+        assert_eq!(suffix.stale, 0);
+    }
+
+    #[test]
+    fn the_budget_cuts_a_delta_too_large_and_the_footer_names_it() {
+        let _home = IsolatedHome::new();
+        let (dir, sdir) = (tmpdir(), tmpdir());
+        let small = write_claude(&sdir, "small", "seed");
+        let big = write_claude(&sdir, "big", "seed");
+        let refs = vec![sref("small", "one", small.clone()), sref("big", "two", big.clone())];
+        index_refs(&dir, &refs, false).unwrap();
+        append_claude(&small, "small", 1, "quokka");
+        append_claude(&big, "big", 60, "quokka");
+        let (small_len, big_len) = (
+            std::fs::metadata(&small).unwrap().len(),
+            std::fs::metadata(&big).unwrap().len(),
+        );
+        // No marks (index_refs takes none): both are read whole. The budget fits only the small.
+        let (hits, suffix) = suffix_search(&dir, "quokka", Some(small_len + 1), &refs);
+        assert_eq!(hits.iter().map(|h| h.0.as_str()).collect::<Vec<_>>(), ["small"]);
+        assert_eq!((suffix.stale, suffix.read, suffix.cut), (2, 1, 1));
+        assert_eq!((suffix.bytes, suffix.cut_bytes), (small_len, big_len));
+        let note = suffix.unread_line().unwrap();
+        assert!(
+            note.contains("1 over the --live-bytes budget") && note.contains("cv index"),
+            "{note}"
+        );
+        // The cut session keeps what the index last saw of it.
+        let (hits, _) = suffix_search(&dir, "seed", Some(small_len + 1), &refs);
+        assert_eq!(hits.len(), 2, "{hits:?}");
+        // A zero budget reads nothing live but still says what it left out.
+        let (hits, suffix) = suffix_search(&dir, "quokka", Some(0), &refs);
+        assert!(hits.is_empty());
+        assert_eq!((suffix.read, suffix.cut), (0, 2));
+    }
+
+    /// One scorer: a session read live ranks exactly as it would had `cv index` read it.
+    #[test]
+    fn live_hits_score_as_the_index_scores_them() {
+        let _home = IsolatedHome::new();
+        let (full, part, sdir) = (tmpdir(), tmpdir(), tmpdir());
+        let refs: Vec<_> = [
+            ("a", "lynx lynx otter"),
+            ("b", "lynx heron"),
+            ("c", "otter otter heron"),
+        ]
+        .into_iter()
+        .map(|(id, body)| sref(id, id, write_claude(&sdir, id, body)))
+        .collect();
+        index_refs(&full, &refs, false).unwrap();
+        index_refs(&part, &refs[..1], false).unwrap();
+        for query in ["lynx", "otter", "heron", "lynx OR heron"] {
+            let (indexed, _) = suffix_search(&full, query, None, &refs);
+            let (merged, suffix) = suffix_search(&part, query, Some(LIVE_BYTES), &refs);
+            assert_eq!(suffix.read, 2);
+            assert_eq!(merged, indexed, "{query}");
+        }
+        // No index at all: every session is unindexed and read live, newest first.
+        let none = tmpdir();
+        let (hits, suffix) = suffix_search(&none.join("absent"), "heron", Some(LIVE_BYTES), &refs);
+        assert_eq!(hits.len(), 2);
+        assert!(suffix.no_index && suffix.read == 3, "{suffix:?}");
+        assert!(suffix.read_line().unwrap().starts_with("no index yet"), "{suffix:?}");
     }
 
     /// Discovery can report the same session twice (overlapping roots, a copy under another
@@ -7601,7 +7921,7 @@ mod tests {
         let p = write_claude(&sdir, "s1", "alpha corpus seed");
         let r1 = sref("s1", "one", p); // updated_at = 2s
         index_refs(&dir, std::slice::from_ref(&r1), false).unwrap();
-        let stale = |refs: &[cv_core::SessionRef]| staleness_over(&dir, refs).map(|s| s.stale_sessions);
+        let stale = |refs: &[cv_core::SessionRef]| Some(suffix_search(&dir, "alpha", None, refs).1.stale);
 
         // An older duplicate at a different path loses preference → not drift.
         let mut old = sref("s1", "one", write_claude(&sdir, "s1dup", "different, older copy"));

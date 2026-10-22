@@ -161,14 +161,21 @@ fn ls_json_emits_the_same_rows_machine_readably() {
     assert!(rows.is_empty(), "{out}");
 }
 
-/// `text:` with no full-text index has no answer: exit 2 naming `cv index`, never an empty
-/// (or, under `NOT`, a full) listing that looks like one.
+/// `text:` with no full-text index answers from the live read when it covers every session, as
+/// it does here; with nothing read live (`--frozen`) there is no answer: exit 2 naming `cv index`,
+/// never an empty (or, under `NOT`, a full) listing that looks like one.
 #[test]
-fn a_text_query_with_no_index_is_a_usage_error() {
+fn a_text_query_with_no_index_reads_live_or_exits_2() {
     let w = World::new("ls-text-no-index");
     standard_corpus(&w);
+    let (out, _) = w.cv_ok(&["ls", "--json", "-q", "text:zebrafish"]);
+    let rows: Vec<serde_json::Value> = serde_json::from_str(out.trim()).unwrap();
+    assert_eq!(
+        rows.iter().map(|r| r["id"].as_str().unwrap()).collect::<Vec<_>>(),
+        ["alphasess"]
+    );
     for query in ["text:needle", "NOT text:needle"] {
-        let (ok, code, out, err) = w.cv(&["ls", "--json", "-q", query]);
+        let (ok, code, out, err) = w.cv(&["--frozen", "ls", "--json", "-q", query]);
         assert!(!ok && code == 2, "{query}: exit {code}\n{out}\n{err}");
         assert!(out.trim().is_empty(), "{query}: {out}");
         assert!(err.contains("cv index"), "{query}: {err}");
@@ -340,8 +347,13 @@ fn search_fallback_messaging_and_index_path() {
     let w = World::new("search");
     standard_corpus(&w);
 
-    // No index yet: an error naming the cause and both ways forward, never an unasked scan.
-    let (out, err) = w.cv_fails(&["search", "zebrafish"]);
+    // No index yet: every session is unindexed, so the live read answers within its budget and
+    // the footer says so; never an unasked scan.
+    let (out, err) = w.cv_ok(&["search", "zebrafish"]);
+    assert!(out.contains("alphases") && out.contains("no index yet"), "{out}");
+    assert!(!err.contains("scanning"), "{err}");
+    // --frozen reads nothing live: no index is then an error naming the cause and both cures.
+    let (out, err) = w.cv_fails(&["--frozen", "search", "zebrafish"]);
     assert!(err.contains("no full-text index") && err.contains("cv index"), "{err}");
     assert!(err.contains("--scan"), "{err}");
     assert!(out.is_empty(), "{out}");
@@ -475,28 +487,39 @@ fn search_discloses_index_staleness() {
         .unwrap();
     }
 
-    // The human hit list carries the footer…
-    let (out, _) = w.cv_ok(&["search", "zebrafish"]);
-    assert!(out.contains("behind for 1 session"), "{out}");
-    // …--json keeps the array pure and puts the note on stderr…
-    let (out, err) = w.cv_ok(&["search", "zebrafish", "--json"]);
+    // The grown suffix is read live: the hit list finds the new text and says what it read…
+    let (out, _) = w.cv_ok(&["search", "tail"]);
+    assert!(out.contains("alphases") && out.contains("read 1 session(s)"), "{out}");
+    assert!(!out.contains("behind"), "{out}");
+    // …--json keeps the array pure and puts the footer on stderr…
+    let (out, err) = w.cv_ok(&["search", "tail", "--json"]);
     let rows: Vec<serde_json::Value> = serde_json::from_str(out.trim()).expect("stdout must be pure JSON");
     assert_eq!(rows.len(), 1, "{out}");
-    assert!(err.contains("behind for 1 session"), "{err}");
-    // …and a miss names it too.
-    let (out, _) = w.cv_ok(&["search", "xyzzyplugh"]);
-    assert!(out.contains("behind for 1 session"), "{out}");
+    assert!(err.contains("read 1 session(s)"), "{err}");
+    // …a budget too small for the delta leaves it to the index, and a hit list or a miss says so…
+    for query in ["zebrafish", "xyzzyplugh"] {
+        let (out, _) = w.cv_ok(&["search", query, "--live-bytes", "10"]);
+        assert!(
+            out.contains("behind for 1 session") && out.contains("over the --live-bytes budget"),
+            "{out}"
+        );
+    }
+    let (out, _) = w.cv_ok(&["search", "tail", "--live-bytes", "10"]);
+    assert!(out.contains("no matches"), "{out}");
+    // …and --frozen answers from the index alone and says so.
+    let (out, _) = w.cv_ok(&["--frozen", "search", "tail"]);
+    assert!(out.contains("no matches") && out.contains("--frozen"), "{out}");
 
     // A fresh pass quiets it again.
     w.cv_ok(&["index"]);
     let (_, err) = w.cv_ok(&["search", "zebrafish", "--json"]);
-    assert!(!err.contains("behind"), "{err}");
+    assert!(!err.contains("behind") && !err.contains("live:"), "{err}");
 }
 
 /// A sandbox that denies writes to the cv home (here the home made read-only, as a deny-write
 /// profile makes it) still searches, lists and shows from the index and catalog it finds there.
-/// Text appended after indexing proves which answered: a live scan would find it, the index does
-/// not, and nothing announces a scan.
+/// Text appended after indexing is found by the live read of the suffix, which writes nothing;
+/// `--frozen` answers from the index alone. Nothing announces a scan.
 #[cfg(unix)]
 #[test]
 fn read_only_home_answers_from_the_index() {
@@ -528,6 +551,7 @@ fn read_only_home_answers_from_the_index() {
     set_mode(0o555);
     let found = w.cv(&["search", "zebrafish", "--json"]);
     let late = w.cv(&["search", "zqlatecomer"]);
+    let frozen = w.cv(&["--frozen", "search", "zqlatecomer"]);
     let listed = w.cv(&["ls", "--json"]);
     let shown = w.cv(&["show", "alphasess"]);
     set_mode(0o755);
@@ -544,8 +568,13 @@ fn read_only_home_answers_from_the_index() {
     assert!(!err.contains("scanning") && !err.contains("unusable"), "{err}");
     let (ok, _, out, err) = late;
     assert!(
+        ok && out.contains("betases") && out.contains("read 1 session(s)") && !err.contains("scanning"),
+        "the live suffix answered, not a scan:\n{out}\n{err}"
+    );
+    let (ok, _, out, err) = frozen;
+    assert!(
         ok && out.contains("no matches"),
-        "the index answered, not a scan:\n{out}\n{err}"
+        "the index alone answered:\n{out}\n{err}"
     );
     let (ok, _, out, err) = listed;
     assert!(ok, "{err}");

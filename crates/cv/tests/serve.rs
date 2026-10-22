@@ -1062,19 +1062,28 @@ fn raw_json(raw: &str) -> Value {
     serde_json::from_str(body).unwrap_or_else(|e| panic!("non-JSON body {body:?}: {e}"))
 }
 
-/// `/api/search` over a world with NO full-text index: a 503 naming the cause and the fix unless
-/// the caller asks for the live scan (`scan=1`), which answers in the same row shape and SAYS it
-/// is a scan.
+/// `/api/search` over a world with NO full-text index: every session is unindexed, so the live
+/// read answers within `live_bytes` and the note says so; `scan=1` asks for the head-capped scan
+/// instead, which answers in the same row shape and SAYS it is a scan.
 #[test]
 fn serve_search() {
     let w = world("search");
     let (port, _reaper) = spawn_serve(&w);
 
-    // No index and no `scan=1`: the cause and both ways forward, never an unasked scan.
-    let (status, v) = get_json(port, "/api/search?q=zebrafish");
-    assert_eq!(status, 503, "{v}");
-    let error = v["error"].as_str().unwrap();
-    assert!(error.contains("cv index") && error.contains("scan=1"), "{v}");
+    // No index: the live read finds it, ranked, and the note names what was read and the cure.
+    let raw = raw_get(port, "/api/search?q=zebrafish");
+    assert_eq!(raw_status(&raw), 200, "{raw}");
+    let v = raw_json(&raw);
+    assert_eq!(v.as_array().map(Vec::len), Some(1), "{v}");
+    assert!(v[0]["score"].as_f64().is_some(), "{v}");
+    assert_eq!(header_of(&raw, "X-Cv-Search-Source").as_deref(), Some("index"), "{raw}");
+    let note = header_of(&raw, "X-Cv-Search-Note").unwrap_or_default();
+    assert!(note.contains("no index yet"), "{raw}");
+    // A zero budget reads nothing live, and says what it left out.
+    let raw = raw_get(port, "/api/search?q=zebrafish&live_bytes=0");
+    assert_eq!(raw_json(&raw), serde_json::json!([]), "{raw}");
+    let note = header_of(&raw, "X-Cv-Search-Note").unwrap_or_default();
+    assert!(note.contains("not indexed") && note.contains("cv index"), "{raw}");
 
     // A word only `alphasess` says. One row, and the row is the §3 search row.
     let raw = raw_get(port, "/api/search?scan=1&q=zebrafish");
