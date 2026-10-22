@@ -445,7 +445,7 @@ impl Adapter for Claude {
     ) -> Result<Option<Session>> {
         crate::stream::checked(sink, |sink| {
             let session = match from {
-                Start::Checkpoint(cp) => match jsonl::restore(cp, <Transcript as jsonl::Codec>::VERSION) {
+                Start::Checkpoint(cp) => match jsonl::restore(cp) {
                     Some(session) => session,
                     None => return Ok(None),
                 },
@@ -533,8 +533,6 @@ struct Transcript<'r> {
 }
 
 impl jsonl::Codec for Transcript<'_> {
-    const VERSION: u32 = 1;
-
     fn record(&mut self, view: crate::json::JsonView<'_>, at: u64, sink: &mut dyn MessageSink) -> Result<Flow> {
         record::record(&mut self.session, view, Some(at), self.opts, sink)
     }

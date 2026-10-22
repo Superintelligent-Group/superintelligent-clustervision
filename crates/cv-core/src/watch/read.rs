@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-const CONSUMER: &str = "watch-full1";
+const CONSUMER: &str = "watch-full";
 const CHECKPOINT_EVERY: u64 = 256 * 1024;
 const ANCHOR_BYTES: usize = 64 * 1024;
 const METADATA_BYTES: usize = 16 * 1024;

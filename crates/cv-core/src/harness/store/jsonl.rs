@@ -201,10 +201,6 @@ impl Read {
 /// One JSONL wire format's record codec, as [`drive`] runs it: a record in, messages to the sink,
 /// state carried between records. Everything around the record is the driver's.
 pub(crate) trait Codec {
-    /// The version of what a checkpoint keeps ([`Self::state`]) and of what a record parses to:
-    /// bump it when either changes. A checkpoint of another version is declined ([`restore`]).
-    const VERSION: u32;
-
     /// One accepted record, starting at byte `at`.
     fn record(
         &mut self,
@@ -234,52 +230,41 @@ pub(crate) trait Codec {
     fn finish(self, stopped: bool, sink: &mut dyn crate::stream::MessageSink) -> anyhow::Result<crate::ir::Session>;
 }
 
-/// What a driven read's checkpoint keeps under [`crate::stream::ADAPTER_LAYER`].
+/// What a driven read's checkpoint keeps under [`crate::stream::ADAPTER_LAYER`]. It carries no
+/// version of its own: a stored checkpoint is admitted only under its mark's version
+/// ([`crate::resume::version`]), which is [`crate::source::VERSION`]; a change to what a codec
+/// keeps or what a record parses to bumps that.
 #[derive(serde::Serialize, serde::Deserialize)]
 struct Stamped<S> {
-    version: u32,
     demand: crate::stream::Demand,
     skipped: u64,
     state: S,
 }
 
-/// The codec state `from` holds for a codec of `version`; `None` (decline the resume) for
-/// another version, another state or no state.
-pub(crate) fn restore<S: serde::de::DeserializeOwned>(from: &crate::stream::Checkpoint, version: u32) -> Option<S> {
+/// The codec state `from` holds; `None` (decline the resume) for another state or no state.
+pub(crate) fn restore<S: serde::de::DeserializeOwned>(from: &crate::stream::Checkpoint) -> Option<S> {
     from.get::<Stamped<S>>(crate::stream::ADAPTER_LAYER)
-        .filter(|stamped| stamped.version == version)
         .map(|stamped| stamped.state)
 }
 
 /// [`restore`] at `demand`, with the rejected lines counted before the checkpoint.
 pub(crate) fn restore_at<S: serde::de::DeserializeOwned>(
     from: &crate::stream::Checkpoint,
-    version: u32,
     demand: crate::stream::Demand,
 ) -> Option<(S, u64)> {
     from.get::<Stamped<S>>(crate::stream::ADAPTER_LAYER)
-        .filter(|stamped| stamped.version == version && stamped.demand == demand)
+        .filter(|stamped| stamped.demand == demand)
         .map(|stamped| (stamped.state, stamped.skipped))
 }
 
-/// Put `state` in `cp` as a driven read's checkpoint keeps it: with its codec's `version`, the
-/// `demand` it depends on and the rejected lines before it ([`restore_at`] reads it back).
+/// Put `state` in `cp` as a driven read's checkpoint keeps it: with the `demand` it depends on and the rejected lines before it ([`restore_at`] reads it back).
 pub(crate) fn stamp(
     cp: &mut crate::stream::Checkpoint,
-    version: u32,
     demand: crate::stream::Demand,
     skipped: u64,
     state: &impl serde::Serialize,
 ) {
-    cp.put(
-        crate::stream::ADAPTER_LAYER,
-        &Stamped {
-            version,
-            demand,
-            skipped,
-            state,
-        },
-    );
+    cp.put(crate::stream::ADAPTER_LAYER, &Stamped { demand, skipped, state });
 }
 
 /// A checkpoint at `offset` holding `state` as a driven read of `C` would (tests build marks).
@@ -290,7 +275,7 @@ pub(crate) fn checkpoint<C: Codec>(
     state: &impl serde::Serialize,
 ) -> crate::stream::Checkpoint {
     let mut cp = crate::stream::Checkpoint::new(offset);
-    stamp(&mut cp, C::VERSION, demand, 0, state);
+    stamp(&mut cp, demand, 0, state);
     cp
 }
 
@@ -315,7 +300,7 @@ pub(crate) fn drive<C: Codec>(
         Start::Prefix(to) => (0, to.min(len), 0),
         Start::Checkpoint(_) if read.is_decoded() => return Ok(None),
         Start::Checkpoint(cp) => {
-            let Some((_, skipped)) = restore_at::<serde::de::IgnoredAny>(cp, C::VERSION, codec.demand()) else {
+            let Some((_, skipped)) = restore_at::<serde::de::IgnoredAny>(cp, codec.demand()) else {
                 return Ok(None);
             };
             (cp.offset, len, skipped)
@@ -340,7 +325,7 @@ pub(crate) fn drive<C: Codec>(
             // line is re-read whole next time.
             if line.complete && !read.is_decoded() && codec.settled() && guard.wants_checkpoint(line.end) {
                 let mut cp = crate::stream::Checkpoint::new(line.end);
-                stamp(&mut cp, C::VERSION, codec.demand(), skipped, &codec.state());
+                stamp(&mut cp, codec.demand(), skipped, &codec.state());
                 guard.checkpoint(&mut cp);
             }
             stopped = guard.failed();

@@ -178,12 +178,10 @@ impl Adapter for Qwen {
                 };
             }
             let (s, st) = match from {
-                stream::Start::Checkpoint(cp) => {
-                    match jsonl::restore::<ReplayCheckpoint>(cp, <Replay as jsonl::Codec>::VERSION) {
-                        Some(state) => (state.session, state.replay),
-                        None => return Ok(None),
-                    }
-                }
+                stream::Start::Checkpoint(cp) => match jsonl::restore::<ReplayCheckpoint>(cp) {
+                    Some(state) => (state.session, state.replay),
+                    None => return Ok(None),
+                },
                 _ => (session_shell(&r.path, sink), ReplayState::default()),
             };
             let read = jsonl::Read::open(&r.path)?;
@@ -558,8 +556,6 @@ struct Replay<'r> {
 }
 
 impl jsonl::Codec for Replay<'_> {
-    const VERSION: u32 = 1;
-
     fn record(&mut self, view: crate::json::JsonView<'_>, _: u64, sink: &mut dyn MessageSink) -> Result<Flow> {
         if matches!(self.demand, Demand::Discovery) {
             let seen = &mut self.seen;

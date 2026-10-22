@@ -200,10 +200,12 @@ impl std::hash::Hash for Entry {
 }
 
 /// The one version of everything cv stores about a session: the [`Record`] envelope, the
-/// catalog's discovery interpretation, the affordance view, the usage projection rows and the
-/// semantic store's header. A change to what any of them means bumps it, and every consumer
-/// rereads each session once (0.18 is 6; 0.17 wrote 4). Layout versions of cv's own logs and
-/// cursors (`events` schema, task log, watch cursor) version a byte layout, not an interpretation.
+/// catalog (its schema stamp and discovery interpretation), the affordance view, the usage
+/// projection rows, the semantic store's header, the full-text index, and every resume mark with
+/// the codec checkpoint inside it. A change to what any of them means, or to a rebuildable
+/// table's shape, bumps it, and every consumer rereads each session once (0.18 is 6; 0.17 wrote
+/// 4). Two byte layouts are versioned apart because they are not rebuilt from transcripts: the
+/// task log (durable user data) and a watch cursor (a follower's position).
 pub const VERSION: u32 = 6;
 
 /// Version identity for non-Record read state; keep the same interpretation authority.

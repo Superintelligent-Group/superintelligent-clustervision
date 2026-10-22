@@ -292,12 +292,10 @@ impl Adapter for Codex {
                 return Ok(None);
             }
             let restored = match from {
-                Start::Checkpoint(cp) => {
-                    match jsonl::restore::<ResumeState>(cp, <Transcript as jsonl::Codec>::VERSION) {
-                        Some(state) if state.session.source_path.as_deref() == Some(r.path.as_path()) => Some(state),
-                        _ => return Ok(None),
-                    }
-                }
+                Start::Checkpoint(cp) => match jsonl::restore::<ResumeState>(cp) {
+                    Some(state) if state.session.source_path.as_deref() == Some(r.path.as_path()) => Some(state),
+                    _ => return Ok(None),
+                },
                 _ => None,
             };
             let rollout = Rollout::open(&r.path)?;
@@ -728,10 +726,6 @@ struct Transcript<'r> {
 }
 
 impl jsonl::Codec for Transcript<'_> {
-    /// The adapter state ([`ResumeState`], [`CodexCtx`], what a record parses to) is versioned by
-    /// the one stored-format version: bump [`crate::source::VERSION`] when it changes.
-    const VERSION: u32 = crate::source::VERSION;
-
     fn record(&mut self, view: JsonView<'_>, at: u64, sink: &mut dyn MessageSink) -> Result<Flow> {
         let ResumeState {
             session: s,

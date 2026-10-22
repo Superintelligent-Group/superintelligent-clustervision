@@ -186,7 +186,7 @@ impl Adapter for Grok {
         crate::stream::checked(sink, |sink| {
             let wire = self.resume_source(r);
             if let Start::Checkpoint(cp) = from {
-                match jsonl::restore::<HistoryCheckpoint>(cp, <History as jsonl::Codec>::VERSION) {
+                match jsonl::restore::<HistoryCheckpoint>(cp) {
                     Some(state) if state.wire == wire => {}
                     _ => return Ok(None),
                 }
@@ -412,8 +412,6 @@ struct History<'r> {
 }
 
 impl jsonl::Codec for History<'_> {
-    const VERSION: u32 = 1;
-
     fn record(&mut self, view: JsonView<'_>, _: u64, sink: &mut dyn MessageSink) -> Result<Flow> {
         let (is_reasoning, message) = record::message(view, self.spans, self.enrich, &self.resolver)?;
         let Some(mut m) = message else {

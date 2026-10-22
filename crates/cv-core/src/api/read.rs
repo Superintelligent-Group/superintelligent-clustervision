@@ -153,7 +153,7 @@ pub(super) fn window(
     extra: bool,
 ) -> Result<(Session, WindowSink)> {
     let opts = if extra { Demand::RICH } else { Demand::LEAN }.with_spans();
-    let version = crate::resume::version(adapter, "api-window1");
+    let version = crate::resume::version(adapter, "api-window");
     let primary = adapter.resume_source(r);
     let key = Key::admitted(r, &primary, version, extra);
     let (before, reads) = captured(r, &primary);

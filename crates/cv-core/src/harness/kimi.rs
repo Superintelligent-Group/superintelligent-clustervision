@@ -331,9 +331,6 @@ impl Adapter for Kimi {
     }
 }
 
-/// What a Kimi checkpoint's state means: bump when it, or what a record parses to, changes.
-const CONTEXT_VERSION: u32 = 1;
-
 impl Kimi {
     fn whole(&self, r: &SessionRef, opts: &Demand, sink: &mut dyn MessageSink) -> Result<Session> {
         crate::stream::checked(sink, |sink| {
@@ -373,7 +370,7 @@ impl Kimi {
         from: &Checkpoint,
     ) -> Result<Option<Session>> {
         crate::stream::checked(sink, |sink| {
-            let Some((state, skipped)) = jsonl::restore_at::<ContextCheckpoint>(from, CONTEXT_VERSION, *opts) else {
+            let Some((state, skipped)) = jsonl::restore_at::<ContextCheckpoint>(from, *opts) else {
                 return Ok(None);
             };
             let primary = self.resume_source(r);
@@ -554,7 +551,7 @@ fn stream_context(
                     segments,
                     ctx: &ctx,
                 };
-                jsonl::stamp(&mut cp, CONTEXT_VERSION, *opts, prior_skipped + skipped, &state);
+                jsonl::stamp(&mut cp, *opts, prior_skipped + skipped, &state);
                 sink.checkpoint(&mut cp);
                 ctx.checkpoints += checkpoint_record;
             }
@@ -1823,7 +1820,7 @@ mod tests {
             adapter.try_stream(&reference, &options, &mut full)?;
             let last = full.checkpoints.last().unwrap();
             assert_eq!(
-                jsonl::restore::<ContextCheckpoint>(&last.1, CONTEXT_VERSION)
+                jsonl::restore::<ContextCheckpoint>(&last.1)
                     .unwrap()
                     .ctx
                     .call_names

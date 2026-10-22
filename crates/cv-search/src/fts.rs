@@ -1210,9 +1210,10 @@ const CHECKPOINT_EVERY: u64 = CHUNK_BYTES as u64;
 /// and the shared snapshot-size spacing can delay this request further.
 const CHECKPOINT_AT_MOST: u64 = 8 * CHUNK_BYTES as u64;
 
-/// The version of what a mark's `fts` layer and the docs behind it mean, part of every mark's
-/// version: bump it when [`FtsState`], the doc layout or [`CHECKPOINT_EVERY`] changes.
-const RESUME_TAG: &str = "fts5";
+/// The consumer a mark's `fts` layer belongs to. Its version is the mark's
+/// ([`cv_core::resume::version`], [`cv_core::source::VERSION`]): a change to [`FtsState`], the doc
+/// layout or [`CHECKPOINT_EVERY`] bumps that.
+const RESUME_TAG: &str = "fts";
 
 /// The checkpoint `job` can resume from: the source grew, its sampled mark still matches, and
 /// its state covers every consumer this pass feeds. Growth is interpreted under the adapter's

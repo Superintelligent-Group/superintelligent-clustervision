@@ -290,8 +290,8 @@
 - cv-testkit: `claude::user` takes the session id first: `user(sid, uuid, ts, text)`.
 
 **After upgrading, once.**
-- The first listing rediscovers the fleet (announced on stderr; `cv index` does it ahead): catalog schema 4 drops an older catalog and rebuilds it.
-- Every store, mark and watch state invalidates once: `source::VERSION` 6 is the one interpretation version all check; nothing expires per release.
+- The first listing rediscovers the fleet (announced on stderr; `cv index` does it ahead): a catalog stamped with another `source::VERSION` is dropped and rebuilt.
+- Every store, mark, checkpoint and watch state invalidates once: `source::VERSION` 6 is the one version all check; nothing expires per release.
 
 ## 0.17.0 — 2026-10-17 — stream, never materialize
 

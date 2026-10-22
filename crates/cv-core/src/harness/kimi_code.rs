@@ -308,7 +308,7 @@ impl Adapter for KimiCode {
     ) -> Result<Option<Session>> {
         crate::stream::checked(sink, |sink| {
             let ctx = match from {
-                Start::Checkpoint(cp) => match jsonl::restore::<ResumeState>(cp, <Wire as jsonl::Codec>::VERSION) {
+                Start::Checkpoint(cp) => match jsonl::restore::<ResumeState>(cp) {
                     Some(state) if state.wire == self.resume_source(r) => state.ctx.restore(opts),
                     _ => return Ok(None),
                 },
@@ -523,8 +523,6 @@ struct Wire<'r> {
 }
 
 impl jsonl::Codec for Wire<'_> {
-    const VERSION: u32 = 2;
-
     fn record(&mut self, view: JsonView<'_>, _: u64, sink: &mut dyn MessageSink) -> Result<Flow> {
         self.ctx.record(view, Some(self.input), sink)
     }
@@ -2388,14 +2386,7 @@ mod tests {
                 serde_json::to_value(expected.messages)?
             );
             let last = full.checkpoints.last().unwrap();
-            assert_eq!(
-                jsonl::restore::<ResumeState>(&last.1, <Wire as jsonl::Codec>::VERSION)
-                    .unwrap()
-                    .ctx
-                    .call_names
-                    .len(),
-                96
-            );
+            assert_eq!(jsonl::restore::<ResumeState>(&last.1).unwrap().ctx.call_names.len(), 96);
             assert!(serde_json::to_vec(&last.1)?.len() > 64 * 1024);
             let result_names = full
                 .messages
