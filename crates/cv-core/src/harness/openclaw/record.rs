@@ -615,6 +615,26 @@ fn message(top: &Fields<'_>, common: &Common, spans: bool) -> Result<Vec<Message
     Ok(vec![boundary, m])
 }
 
+/// An assistant reply that is an API failure (`errorMessage`, or `stopReason: "error"`).
+fn failed(body: &Fields<'_>) -> Result<bool> {
+    Ok(string(body.get("errorMessage"))?.is_some_and(|e| !e.is_empty())
+        || string(body.get("stopReason"))?.as_deref() == Some("error"))
+}
+
+/// Whether a `message` entry's body is a turn ([`Message::is_turn`]) as [`message`] kinds it: a
+/// `user` message that [`user_provenance`] leaves a prompt, or an `assistant` reply that is not a
+/// failure. Reads `role`, `provenance`, `errorMessage` and `stopReason`, never content.
+pub(super) fn is_turn(body: &Fields<'_>) -> Result<bool> {
+    Ok(match body.string("role")?.as_deref() {
+        Some("user") => match body.get("provenance") {
+            Some(p) if p.is_object()? => user_provenance(&*p.resolve()?).0 == MessageKind::Prompt,
+            _ => true,
+        },
+        Some("assistant") => !failed(body)?,
+        _ => false,
+    })
+}
+
 /// A user message OpenClaw wrote on someone else's behalf carries `provenance` (`InputProvenance`,
 /// `src/sessions/input-provenance.ts`; not yet in 2026.1.29, present by `0e9181234a`): `inter_session` is a
 /// message from another session (`sourceSessionKey`), and a sub-agent's announce to its requester is
@@ -637,8 +657,7 @@ fn user_provenance(p: &Value) -> (MessageKind, Origin) {
 /// Capture assistant-level metadata (provider/api/model/usage/stop/diagnostics) into the harness
 /// bag, and an API failure into the `Error` kind (`extra["openclaw"]["error"]`).
 fn assistant_meta(m: &mut Message, body: &Fields<'_>) -> Result<()> {
-    let failed = string(body.get("errorMessage"))?.is_some_and(|e| !e.is_empty())
-        || string(body.get("stopReason"))?.as_deref() == Some("error");
+    let failed = failed(body)?;
     let usage = body.value("usage")?;
     if let Some(usage) = &usage {
         m.usage = parse_usage(usage);
