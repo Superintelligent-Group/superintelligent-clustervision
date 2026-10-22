@@ -630,6 +630,10 @@ impl MessageSink for AffordanceSink<'_> {
         !self.latch.failed() && self.open.is_empty() && self.inner.wants_checkpoint(offset)
     }
 
+    fn wants_final_checkpoint(&mut self, offset: u64) -> bool {
+        !self.latch.failed() && self.open.is_empty() && self.inner.wants_final_checkpoint(offset)
+    }
+
     fn checkpoint(&mut self, cp: &mut crate::stream::Checkpoint) {
         if !self.latch.failed() {
             self.inner.checkpoint(cp);

@@ -5,8 +5,8 @@
 //! same freshness judgment `cv index` plans with ([`Freshness`]) names them, and each is read
 //! through the same chunking the index writes ([`index_session`]) into a private in-memory
 //! index, from the session's resume mark when it grew (its unread suffix) and whole otherwise:
-//! `cv index` takes marks at chunk boundaries (every 4 MiB of indexed text, or 32 MiB of source),
-//! so a smaller session is read whole, as `cv index` itself reads it.
+//! `cv index` takes marks at chunk boundaries (every 4 MiB of indexed text, or 32 MiB of source)
+//! and where each read ended, so only what was appended since is read.
 //! Nothing is written: no index, catalog, mark or count; `--frozen` reads nothing live.
 //!
 //! **Ranking.** One scorer: both indexes are ranked by tantivy's BM25 with corpus statistics
@@ -372,7 +372,7 @@ fn read_one(p: &Pending, writer: &Writer, f: &Fields, remaining: &AtomicU64) -> 
     let mut resumed = None;
     let mut result = match &p.from {
         Some(cp) => pass(&mut out, Some(cp)).map(|done| {
-            resumed = done.is_some().then(|| cp.messages().unwrap_or(0));
+            resumed = done.is_some().then(|| resumes_docs_at(cp).unwrap_or(0));
             done.is_some()
         }),
         None => Ok(false),

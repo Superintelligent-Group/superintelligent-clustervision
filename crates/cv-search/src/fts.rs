@@ -1351,6 +1351,9 @@ impl cv_core::MessageSink for CallbackCounter<'_> {
     fn wants_checkpoint(&mut self, offset: u64) -> bool {
         self.inner.wants_checkpoint(offset)
     }
+    fn wants_final_checkpoint(&mut self, offset: u64) -> bool {
+        self.inner.wants_final_checkpoint(offset)
+    }
     fn checkpoint(&mut self, checkpoint: &mut cv_core::stream::Checkpoint) {
         self.inner.checkpoint(checkpoint);
     }
@@ -1396,7 +1399,7 @@ fn job_pass(
     let event_sink: &mut dyn cv_core::MessageSink = &mut events;
     let done = if job.fts {
         let delete = match (from, job.existing) {
-            (Some(_), _) => Delete::From(first),
+            (Some(cp), _) => Delete::From(resumes_docs_at(cp).unwrap_or(first)),
             (None, true) => Delete::All,
             (None, false) => Delete::Nothing,
         };
@@ -1628,6 +1631,8 @@ struct ChunkSink<'w> {
     copied_before: Option<chrono::DateTime<chrono::Utc>>,
     /// A chunk was flushed since the last checkpoint: take the next one offered.
     boundary_due: bool,
+    /// The checkpoint about to be taken is the read's end mark: keep the docs open in it.
+    keep_open: bool,
     /// Where the last checkpoint was taken (the file offset).
     last_checkpoint: u64,
     /// Whitespace-collapsed head of the body, capped at [`PREVIEW_CHARS`]; stored on the meta doc.
@@ -1640,8 +1645,8 @@ struct ChunkSink<'w> {
 /// The [`cv_core::stream::Checkpoint`] layer a [`ChunkSink`] keeps its state under.
 const FTS_LAYER: &str = "fts";
 
-/// What a [`ChunkSink`] holds at a checkpoint (its buffer is empty there: the docs so far are in
-/// the index).
+/// What a [`ChunkSink`] holds at a checkpoint. At a chunk boundary its buffers are empty (the
+/// docs so far are in the index); at the end of a read they hold the open docs ([`Open`]).
 #[derive(serde::Serialize, serde::Deserialize)]
 struct FtsState {
     discovery_metadata: DiscoveryMetadata,
@@ -1652,6 +1657,39 @@ struct FtsState {
     meta_received: bool,
     first_prompt: Option<String>,
     preview: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    open: Option<Open>,
+}
+
+/// The docs still open at a read's end mark ([`cv_core::MessageSink::wants_final_checkpoint`]):
+/// the text of the exchange and context buffers since the last chunk boundary. A pass resumed
+/// there continues them, and replaces the partial docs the marked pass flushed at its end, so
+/// the docs are those a whole pass makes. Bounded by two chunks per buffer.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct Open {
+    /// The last chunk-boundary checkpoint's offset, the schedule a whole pass keeps.
+    last_checkpoint: u64,
+    /// A chunk was flushed since then: the next spaced checkpoint flushes the rest.
+    boundary_due: bool,
+    buf: String,
+    buf_first: usize,
+    in_context: bool,
+    other: String,
+    other_first: usize,
+}
+
+/// The first message whose docs a pass resumed at `cp` replaces: the checkpoint's own, or the
+/// first of the docs it left open.
+fn resumes_docs_at(cp: &cv_core::stream::Checkpoint) -> Option<usize> {
+    let at = cp.messages()?;
+    let open = cp.get::<FtsState>(FTS_LAYER).and_then(|state| state.open);
+    Some(open.map_or(at, |open| {
+        [(&open.buf, open.buf_first), (&open.other, open.other_first)]
+            .into_iter()
+            .filter(|(text, _)| !text.is_empty())
+            .map(|(_, first)| first)
+            .fold(at, usize::min)
+    }))
 }
 
 /// Length cap (chars) of the stored head-of-body preview — the snippet fallback when a hit's
@@ -1695,6 +1733,7 @@ impl<'w> ChunkSink<'w> {
             other_first: 0,
             copied_before: None,
             boundary_due: false,
+            keep_open: false,
             last_checkpoint: 0,
             preview: String::new(),
             docs: 0,
@@ -1728,6 +1767,15 @@ impl<'w> ChunkSink<'w> {
         sink.first_prompt = st.first_prompt;
         sink.preview = st.preview;
         sink.last_checkpoint = cp.offset;
+        if let Some(open) = st.open {
+            sink.last_checkpoint = open.last_checkpoint;
+            sink.boundary_due = open.boundary_due;
+            sink.buf = open.buf;
+            sink.buf_first = open.buf_first;
+            sink.in_context = open.in_context;
+            sink.other = open.other;
+            sink.other_first = open.other_first;
+        }
         Some(sink)
     }
 
@@ -2086,17 +2134,39 @@ impl cv_core::MessageSink for ChunkSink<'_> {
     /// which only a stretch with little text reaches (giant tool outputs, telemetry), so a resumed
     /// pass normally re-reads little. The shared scheduler can delay requests for large states.
     fn wants_checkpoint(&mut self, offset: u64) -> bool {
+        self.keep_open = false;
         !self.failed
             && self.err.is_none()
             && (self.boundary_due || offset >= self.last_checkpoint.saturating_add(CHECKPOINT_AT_MOST))
     }
 
+    /// The read's end, between chunk boundaries: a mark that keeps the open docs' text, so the
+    /// next pass reads only what was appended and still writes the docs a whole pass would.
+    /// Always keeping the docs open, even when a chunk boundary is due: a whole pass flushes at
+    /// its next spaced checkpoint, and so does a pass resumed here.
+    fn wants_final_checkpoint(&mut self, _offset: u64) -> bool {
+        self.keep_open = !self.failed && self.err.is_none();
+        self.keep_open
+    }
+
     /// A checkpoint is a body-doc boundary: every doc lies wholly before it or after it, so a
-    /// pass resumed there replaces exactly the docs from its message on.
+    /// pass resumed there replaces exactly the docs from its message on. The read's end mark
+    /// instead carries the open docs ([`Open`]), which the pass flushes at its end as usual.
     fn checkpoint(&mut self, cp: &mut cv_core::stream::Checkpoint) {
-        self.flush_both();
-        self.boundary_due = false;
-        self.last_checkpoint = cp.offset;
+        let open = std::mem::take(&mut self.keep_open).then(|| Open {
+            last_checkpoint: self.last_checkpoint,
+            boundary_due: self.boundary_due,
+            buf: self.buf.clone(),
+            buf_first: self.buf_first,
+            in_context: self.in_context,
+            other: self.other.clone(),
+            other_first: self.other_first,
+        });
+        if open.is_none() {
+            self.flush_both();
+            self.boundary_due = false;
+            self.last_checkpoint = cp.offset;
+        }
         cp.put(
             FTS_LAYER,
             &FtsState {
@@ -2108,6 +2178,7 @@ impl cv_core::MessageSink for ChunkSink<'_> {
                 meta_received: self.meta_received,
                 first_prompt: self.first_prompt.clone(),
                 preview: self.preview.clone(),
+                open,
             },
         );
     }
@@ -6431,6 +6502,62 @@ mod tests {
                 work
             );
         }
+    }
+
+    /// Every read leaves a mark where it ended: a claude transcript indexed at a line boundary
+    /// and then appended to resumes at exactly the indexed length (the next pass reads only the
+    /// appended bytes), and leaves what a whole sweep of the grown file does. A small transcript
+    /// has no chunk boundary to resume from, so before end marks it was reread whole.
+    #[test]
+    fn an_append_rereads_only_the_appended_bytes() {
+        let _home = IsolatedHome::new();
+        let (dir, sdir) = (tmpdir(), tmpdir());
+        let fleet: Vec<_> = resumable_fleet(&sdir, 12)
+            .into_iter()
+            .filter(|(r, _)| r.harness == cv_core::Harness::Claude)
+            .collect();
+        assert!(fleet.len() > 2);
+        let refs: Vec<_> = fleet.iter().map(|(r, _)| r.clone()).collect();
+        let heads: Vec<usize> = fleet
+            .iter()
+            .map(|(r, bytes)| {
+                let cut = bytes[..bytes.len() * 2 / 3].iter().rposition(|&b| b == b'\n').unwrap() + 1;
+                std::fs::write(&r.path, &bytes[..cut]).unwrap();
+                cut
+            })
+            .collect();
+        let fresh = sweep(&dir, refs.clone(), false, false).unwrap();
+        assert_eq!((fresh.resumed, fresh.errors), (0, 0));
+        // The mark is where the read ended, unless a spaced checkpoint lies closer to the end
+        // than its own encoded state (a mark never costs more to write than the reread it saves).
+        let marks = cv_core::resume::MarkTable::load();
+        let mut ended = 0;
+        for (r, &head) in refs.iter().zip(&heads) {
+            let mark = marks.get(r).unwrap_or_else(|| panic!("{} left no mark", r.id));
+            let state = cv_core::resume::Reader::default().state(r, mark).unwrap();
+            let gap = head as u64 - mark.offset();
+            assert!(
+                gap <= serde_json::to_vec(&state).unwrap().len() as u64,
+                "{}: {gap}",
+                r.id
+            );
+            ended += usize::from(gap == 0);
+        }
+        assert!(ended > 0, "no mark at the end");
+        write_heads(&fleet, 1, 1);
+        let swept = sweep(&dir, refs.clone(), false, false).unwrap();
+        assert_eq!(
+            (swept.changed, swept.resumed, swept.errors),
+            (refs.len(), refs.len(), 0)
+        );
+        let words = some_words(&refs);
+        let (whole, work) = whole_sweep_with_work(&refs, &words);
+        assert_eq!(observe(&dir, &refs, &words), whole);
+        assert!(
+            swept.observed.work.callbacks < work.callbacks,
+            "{:?} {work:?}",
+            swept.observed.work
+        );
     }
 
     /// One native Qwen chat record: the envelope the native parser keys on, plus `body`'s fields.

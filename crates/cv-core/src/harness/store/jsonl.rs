@@ -323,7 +323,11 @@ pub(crate) fn drive<C: Codec>(
             }
             // Only after a line its writer finished (a blank or rejected one too): a partial last
             // line is re-read whole next time.
-            if line.complete && !read.is_decoded() && codec.settled() && guard.wants_checkpoint(line.end) {
+            // The last line of the read is offered as its mark whatever the spacing.
+            let settled = line.complete && !read.is_decoded() && codec.settled();
+            if settled
+                && (guard.wants_checkpoint(line.end) || (line.end >= to && guard.wants_final_checkpoint(line.end)))
+            {
                 let mut cp = crate::stream::Checkpoint::new(line.end);
                 stamp(&mut cp, codec.demand(), skipped, &codec.state());
                 guard.checkpoint(&mut cp);

@@ -36,6 +36,8 @@
 
 - A write to a Hermes, Goose, OpenCode, Devin, Zed, Cursor or OpenClaw store rereads only the sessions whose rows changed.
 
+- `cv index` and the live search read only what was appended since the last index, not every session under 4 MiB of text whole.
+
 - `cv search` without an index answers from that live read instead of exiting 1; `--frozen` without an index still names `cv index`.
 
 ## 0.18.0-rc.1 — 2026-10-22 — the release an agent can trust

@@ -202,6 +202,10 @@ impl MessageSink for SpoolingSink {
         !self.latch.failed() && self.inner.wants_checkpoint(offset)
     }
 
+    fn wants_final_checkpoint(&mut self, offset: u64) -> bool {
+        !self.latch.failed() && self.inner.wants_final_checkpoint(offset)
+    }
+
     fn checkpoint(&mut self, cp: &mut Checkpoint) {
         if !self.latch.failed() {
             self.inner.checkpoint(cp);

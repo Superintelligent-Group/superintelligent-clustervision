@@ -53,9 +53,9 @@ whose purpose is writing stores or sessions (`index`, hook installation/removal,
   `Demand { tier, spans, offsets }` selects extras/carriers, lazy text and offsets.
 - Claude/Codex have lazy source spans and resumable stream state. Codex has a useful direct path
   for giant tool outputs; most unchanged index jobs are skipped.
-- FTS already combines text, event and affordance extraction in one pass, uses one writer,
-  streams body documents through a bounded channel, and publishes resume marks after commit.
-  Its scheduler already admits at most 2 GiB of estimated **source file bytes**.
+- FTS combines text, event and affordance extraction in one pass and one writer, streams body
+  docs through a bounded channel, publishes resume marks (chunk boundaries; each read's end, with
+  its open docs) after commit, and admits at most 2 GiB of estimated **source file bytes**.
 - OpenCode, Goose and Hermes use per-session row iteration and the stores' existing indexes.
   Fixture query plans also support Devin's chain lookups and OpenClaw's event sequence query.
   Do not replace these with speculative PRAGMA tuning.

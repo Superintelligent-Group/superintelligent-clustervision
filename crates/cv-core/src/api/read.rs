@@ -380,6 +380,9 @@ mod tests {
         fn wants_checkpoint(&mut self, offset: u64) -> bool {
             self.sink.wants_checkpoint(offset)
         }
+        fn wants_final_checkpoint(&mut self, offset: u64) -> bool {
+            self.sink.wants_final_checkpoint(offset)
+        }
         fn checkpoint(&mut self, checkpoint: &mut Checkpoint) {
             self.sink.checkpoint(checkpoint);
         }
