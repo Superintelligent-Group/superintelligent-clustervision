@@ -77,7 +77,6 @@ impl EventSpool {
     pub fn temporary_bytes(&self) -> Result<u64> {
         self.ordered.spilled_bytes()
     }
-    #[cfg(any(test, feature = "sqlite"))]
     pub fn push(&mut self, event: Event) -> Result<()> {
         self.ordered.push(event)
     }
@@ -129,11 +128,9 @@ impl SpoolingSink {
         }
         if self.inner.observe_message(message) == Flow::Stop {
             self.latch.capture(&mut self.inner);
-            // The extraction stopped; keep the failure latched even when it named no error.
-            self.latch.fail(anyhow::anyhow!("event extraction has already failed"));
+            self.latch.fail(anyhow::anyhow!("event spool has already failed"));
             return Flow::Stop;
         }
-        #[cfg(any(test, feature = "sqlite"))]
         for event in self.inner.events.drain(..) {
             if let Err(error) = self.spool.push(event) {
                 self.latch.fail(error);

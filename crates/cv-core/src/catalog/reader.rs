@@ -119,7 +119,6 @@ impl Reader {
     }
 
     /// Share this operation's initialized connection with scoped discovery workers.
-    /// Share this operation's initialized connection with scoped discovery workers.
     pub(crate) fn discovery_scope(&self) -> crate::discover_cache::read::Scope {
         crate::discover_cache::read::Context::from_connection(self.conn.clone()).enter()
     }
