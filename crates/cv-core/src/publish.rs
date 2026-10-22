@@ -235,11 +235,12 @@ fn rename_no_replace_using(
     }
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
-        "filesystem does not support an atomic exclusive rename; destination left untouched",
+        "this platform has no atomic exclusive rename; destination left untouched",
     ))
 }
 
-/// `renamex_np` / `renameat2` with `flag`; `None` when this filesystem or kernel rejects the flag.
+/// `renamex_np` / `renameat2` with `flag`. A kernel or filesystem that rejects the flag answers
+/// `Unsupported`, naming the OS error, so the refusal says which of them declined.
 #[cfg(any(target_vendor = "apple", target_os = "linux"))]
 fn rename_with(from: &Path, to: &Path, flag: libc::c_uint) -> Option<io::Result<()>> {
     use std::os::unix::ffi::OsStrExt;
@@ -268,12 +269,24 @@ fn rename_with(from: &Path, to: &Path, flag: libc::c_uint) -> Option<io::Result<
     if status == 0 {
         return Some(Ok(()));
     }
-    let error = io::Error::last_os_error();
+    Some(Err(exclusive_refused(io::Error::last_os_error())))
+}
+
+/// The OS error of a failed exclusive rename, with a refused flag (`EINVAL`, `ENOSYS`, `ENOTSUP`,
+/// `EOPNOTSUPP`: this kernel or filesystem has no exclusive rename) reported as `Unsupported`.
+#[cfg(any(target_vendor = "apple", target_os = "linux"))]
+fn exclusive_refused(error: io::Error) -> io::Error {
     let unsupported = matches!(
         error.raw_os_error(),
         Some(code) if [libc::EINVAL, libc::ENOSYS, libc::ENOTSUP, libc::EOPNOTSUPP].contains(&code)
     );
-    (!unsupported).then_some(Err(error))
+    if !unsupported {
+        return error;
+    }
+    io::Error::new(
+        io::ErrorKind::Unsupported,
+        format!("this kernel or filesystem refuses an atomic exclusive rename ({error}); destination left untouched"),
+    )
 }
 
 /// Publish everything `bytes` yields at `destination` (see [`Staged`]). A new file is created
@@ -663,6 +676,25 @@ pub(crate) mod tests {
             assert!(from.exists());
             assert!(!to.exists());
         }
+    }
+
+    #[test]
+    fn a_refused_exclusive_rename_names_the_os_error_not_the_filesystem_alone() {
+        let error = rename_no_replace_using(Path::new("a"), Path::new("b"), |_, _| None).unwrap_err();
+        assert!(error.to_string().starts_with("this platform has no"), "{error}");
+        #[cfg(any(target_vendor = "apple", target_os = "linux"))]
+        for code in [libc::EINVAL, libc::ENOTSUP] {
+            let error = exclusive_refused(io::Error::from_raw_os_error(code));
+            assert_eq!(error.kind(), io::ErrorKind::Unsupported);
+            let os = io::Error::from_raw_os_error(code).to_string();
+            assert!(error.to_string().contains(&os), "{error}");
+            assert!(error.to_string().contains("kernel or filesystem"), "{error}");
+        }
+        #[cfg(any(target_vendor = "apple", target_os = "linux"))]
+        assert_eq!(
+            exclusive_refused(io::Error::from_raw_os_error(libc::EEXIST)).kind(),
+            io::ErrorKind::AlreadyExists
+        );
     }
 
     #[test]
