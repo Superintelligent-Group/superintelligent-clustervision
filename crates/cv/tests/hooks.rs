@@ -176,7 +176,7 @@ fn install_is_idempotent_show_reports_and_remove_restores_the_file() {
     w.write_session(
         "docsess",
         &[
-            user("u0", "2026-10-01T10:00:00Z", "hi"),
+            user("docsess", "u0", "2026-10-01T10:00:00Z", "hi"),
             assistant("a0", "2026-10-01T10:00:05Z", "hello"),
         ],
     );
@@ -195,7 +195,7 @@ fn each_hook_answers_the_docs_payload_for_its_event() {
         "alphasess",
         &[
             serde_json::json!({"type": "ai-title", "aiTitle": "fix the widget gate", "sessionId": "s"}),
-            user("u0", "2026-10-01T10:00:00Z", "fix the widget gate"),
+            user("alphasess", "u0", "2026-10-01T10:00:00Z", "fix the widget gate"),
             assistant_tool(
                 "a0",
                 "2026-10-01T10:00:05Z",
@@ -222,11 +222,11 @@ fn each_hook_answers_the_docs_payload_for_its_event() {
     w.write_session(
         "hooksess",
         &[
-            user("u0", "2026-10-01T11:00:00Z", "start the swarm"),
+            user("hooksess", "u0", "2026-10-01T11:00:00Z", "start the swarm"),
             assistant("a0", "2026-10-01T11:00:05Z", "starting"),
             boundary("b1", "2026-10-01T11:30:00Z"),
             compact_summary("s1", "2026-10-01T11:30:01Z", "SUMMARY: the early context"),
-            user("u1", "2026-10-01T11:31:00Z", "carry on"),
+            user("hooksess", "u1", "2026-10-01T11:31:00Z", "carry on"),
         ],
     );
     write_agent(
@@ -234,7 +234,7 @@ fn each_hook_answers_the_docs_payload_for_its_event() {
         "hooksess",
         "aaa1",
         &[
-            user("x0", "2026-10-01T11:00:10Z", "You are lane A."),
+            user("hooksess", "x0", "2026-10-01T11:00:10Z", "You are lane A."),
             assistant_tool(
                 "x1",
                 "2026-10-01T11:00:20Z",
@@ -616,7 +616,7 @@ fn codex_trust_is_read_from_the_store_codex_writes() {
     w.write_session(
         "docsess",
         &[
-            user("u0", "2026-10-01T10:00:00Z", "hi"),
+            user("docsess", "u0", "2026-10-01T10:00:00Z", "hi"),
             assistant("a0", "2026-10-01T10:00:05Z", "hello"),
         ],
     );

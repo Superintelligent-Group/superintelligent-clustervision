@@ -12,10 +12,11 @@ use cv_testkit::World;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// The catalog's recorded-watch fudge window (2s) plus margin; see `freshness.rs`.
-const FUDGE: std::time::Duration = std::time::Duration::from_millis(2100);
+/// The shrunken watch-fudge window; a step that must re-record watches sleeps this long.
+const FUDGE: std::time::Duration = std::time::Duration::from_millis(250);
 
 fn world(tag: &str) -> cv_testkit::InProcess<cv_core::env::Scope> {
+    cv_core::catalog::watch_fudge_for_tests(std::time::Duration::from_millis(50));
     World::in_process(tag, cv_core::env::Env::enter_isolated)
 }
 
@@ -33,11 +34,7 @@ fn write_session_at(projects: &Path, proj: &str, sid: &str, ts: &str) -> PathBuf
     let dir = projects.join(proj);
     fs::create_dir_all(&dir).unwrap();
     let path = dir.join(format!("{sid}.jsonl"));
-    let line = serde_json::json!({
-        "type": "user", "uuid": format!("{sid}-u0"), "sessionId": sid, "timestamp": ts,
-        "cwd": "/work/proj",
-        "message": {"role": "user", "content": format!("hello from {sid}")}
-    });
+    let line = cv_testkit::claude::user(sid, &format!("{sid}-u0"), ts, &format!("hello from {sid}"));
     fs::write(&path, format!("{line}\n")).unwrap();
     path
 }

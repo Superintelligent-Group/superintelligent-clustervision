@@ -46,7 +46,7 @@ fn standard_corpus(w: &World) {
         "alphasess",
         &[
             serde_json::json!({"type": "ai-title", "aiTitle": "alpha adventures"}),
-            user_line("u1", "2026-01-01T10:00:00Z", "please fix the zebrafish migration"),
+            user_line("alphasess", "u1", "2026-01-01T10:00:00Z", "please fix the zebrafish migration"),
             assistant_line(
                 "a1",
                 "2026-01-02T10:00:00Z",
@@ -67,13 +67,13 @@ fn standard_corpus(w: &World) {
     w.write_session(
         "betasess",
         &[
-            user_line("b1", "2026-03-01T09:00:00Z", "how many quokkas in the census"),
+            user_line("betasess", "b1", "2026-03-01T09:00:00Z", "how many quokkas in the census"),
             assistant_line(
                 "b2",
                 "2026-03-01T09:05:00Z",
                 serde_json::json!([{"type": "text", "text": "seventeen quokkas"}]),
             ),
-            user_line("b3", "2026-03-02T09:00:00Z", "thanks"),
+            user_line("betasess", "b3", "2026-03-02T09:00:00Z", "thanks"),
             assistant_line(
                 "b4",
                 "2026-03-02T09:01:00Z",
@@ -507,7 +507,7 @@ fn search_discloses_index_staleness() {
         writeln!(
             f,
             "{}",
-            user_line("u9", "2026-06-02T00:00:00Z", "more zebrafish tail work")
+            user_line("new-project-session", "u9", "2026-06-02T00:00:00Z", "more zebrafish tail work")
         )
         .unwrap();
     }
@@ -542,7 +542,7 @@ fn read_only_home_answers_from_the_index() {
     standard_corpus(&w);
     w.cv_ok(&["index"]);
     let mut lines = fs::read_to_string(w.transcript("betasess")).unwrap();
-    lines.push_str(&format!("{}\n", user_line("b9", "2026-03-02T09:00:00Z", "zqlatecomer")));
+    lines.push_str(&format!("{}\n", user_line("new-project-session", "b9", "2026-03-02T09:00:00Z", "zqlatecomer")));
     fs::write(w.transcript("betasess"), lines).unwrap();
     let set_mode = |mode: u32| {
         let mut dirs = vec![w.cv_home.clone()];
@@ -829,7 +829,7 @@ fn export_formats() {
     let (windowed, _) = w.cv_ok(&["export", "alphasess", "--format", "md", "--range", "0.."]);
     assert_eq!(out, windowed);
     let giant = "🌙\\\"\n".repeat(16384);
-    let giant_path = w.write_session("giant-export", &[user_line("g", "2026-01-01T10:00:00Z", &giant)]);
+    let giant_path = w.write_session("giant-export", &[user_line("giant-export", "g", "2026-01-01T10:00:00Z", &giant)]);
     let (full, _) = w.cv_ok(&["export", "giant-export", "--format", "md"]);
     let (windowed, _) = w.cv_ok(&["export", "giant-export", "--format", "md", "--range", "0.."]);
     assert_eq!(full, windowed);
@@ -1713,11 +1713,11 @@ fn show_tree_renders() {
         "cycle-tree",
         &[
             claude::with(
-                user_line("c1", "2026-01-01T10:00:00Z", "first-cycle"),
+                user_line("cycle-tree", "c1", "2026-01-01T10:00:00Z", "first-cycle"),
                 serde_json::json!({"parentUuid":"c2"}),
             ),
             claude::with(
-                user_line("c2", "2026-01-01T10:01:00Z", "second-cycle"),
+                user_line("cycle-tree", "c2", "2026-01-01T10:01:00Z", "second-cycle"),
                 serde_json::json!({"parentUuid":"c1"}),
             ),
         ],
@@ -1812,7 +1812,7 @@ fn stats_tokens_totals_usage_per_model() {
     w.write_session(
         "toksess",
         &[
-            user_line("u1", "2026-03-01T09:00:00Z", "go"),
+            user_line("toksess", "u1", "2026-03-01T09:00:00Z", "go"),
             reply("a1", "msg_1", "claude-opus-5-5"),
             // The same streamed response's second content-block line: one call, not two.
             reply("a2", "msg_1", "claude-opus-5-5"),
@@ -1866,11 +1866,11 @@ fn extra_claude_roots_are_listed_and_read() {
     standard_corpus(&w);
     let seat_proj = w.home.join("seats/bonsai/claude/projects/-work-proj");
     fs::create_dir_all(&seat_proj).unwrap();
-    let seat_line = user_line("s1", "2026-07-01T10:00:00Z", "the seat asks about narwhals");
+    let seat_line = user_line("seatsess", "s1", "2026-07-01T10:00:00Z", "the seat asks about narwhals");
     fs::write(seat_proj.join("seatsess.jsonl"), format!("{seat_line}\n")).unwrap();
     let env_proj = w.base.join("elsewhere/projects/-work-proj");
     fs::create_dir_all(&env_proj).unwrap();
-    let env_line = user_line("e1", "2026-07-02T10:00:00Z", "the env root asks about axolotls");
+    let env_line = user_line("envsess", "e1", "2026-07-02T10:00:00Z", "the env root asks about axolotls");
     fs::write(env_proj.join("envsess.jsonl"), format!("{env_line}\n")).unwrap();
 
     // Not configured yet: the seat session is invisible, exactly as before.
@@ -3613,7 +3613,7 @@ fn doctor_labels_payload_estimates_and_recorded_usage_without_changing_accountin
     w.write_session(
         "accounting",
         &[
-            user_line("u", "2026-01-01T10:00:00Z", "hello"),
+            user_line("accounting", "u", "2026-01-01T10:00:00Z", "hello"),
             claude::with(
                 assistant_line(
                     "a",
@@ -3659,7 +3659,7 @@ fn prune_child_id_and_path_select_child_and_emit_discoverable_standalone() {
     let w = World::new("prune-child-source");
     let parent = w.write_session(
         "prune-parent",
-        &[user_line("parent-u", "2026-01-01T00:00:00Z", "parent-only")],
+        &[user_line("prune-parent", "parent-u", "2026-01-01T00:00:00Z", "parent-only")],
     );
     let child_dir = parent.parent().unwrap().join("prune-parent/subagents");
     fs::create_dir_all(&child_dir).unwrap();
@@ -3754,7 +3754,7 @@ fn splice_rejects_invalid_exports_before_source_reads_or_generation() {
 fn claude_portable_rewind_and_port_handle_proxy_records() {
     let w = World::new("claude-portable-proxy");
     let ids = ["Bash:0#hex", "Bash_0_hex", "cv_tool_0", "Bash#0:hex"];
-    let mut rows = vec![user_line("u", "2026-01-01T00:00:00Z", "continue")];
+    let mut rows = vec![user_line("prune-parent", "u", "2026-01-01T00:00:00Z", "continue")];
     for (index, model) in [Some("gpt-6.1-sol"), Some("claude-proxy"), None]
         .into_iter()
         .enumerate()
@@ -3869,7 +3869,7 @@ fn claude_rewind_and_port_default_to_native_for_genuine_claude_sessions() {
         serde_json::json!({"type":"thinking","thinking":"","signature":"sig-a"}),
         serde_json::json!({"type":"thinking","thinking":"plan","signature":"sig-b"}),
     ];
-    let mut rows = vec![user_line("u", "2026-01-01T00:00:00Z", "continue")];
+    let mut rows = vec![user_line("proxy-source", "u", "2026-01-01T00:00:00Z", "continue")];
     for (index, block) in thinking.iter().enumerate() {
         let parent = if index == 0 {
             "u".to_string()
@@ -3955,7 +3955,7 @@ fn show_and_doctor_read_a_session_its_writer_is_appending_to() {
     let turn = |i: usize| {
         let ts = format!("2026-01-01T10:{:02}:{:02}Z", (i / 60) % 60, i % 60);
         [
-            user_line(&format!("u{i}"), &ts, &format!("prompt {i} {}", "context ".repeat(600))),
+            user_line("livesess", &format!("u{i}"), &ts, &format!("prompt {i} {}", "context ".repeat(600))),
             assistant_line(
                 &format!("a{i}"),
                 &ts,
@@ -4013,7 +4013,7 @@ fn index_json_rejects_unreadable_tool_output_and_retries_after_repair() {
     w.write_session(
         "degraded",
         &[
-            user_line("u1", "2026-01-01T10:00:00Z", "run the big command"),
+            user_line("degraded", "u1", "2026-01-01T10:00:00Z", "run the big command"),
             claude::tool_result("u2", "2026-01-01T10:01:00Z", "t1", &stub),
         ],
     );
@@ -4041,7 +4041,7 @@ fn index_json_rejects_unreadable_tool_output_and_retries_after_repair() {
 fn an_unreadable_project_dir_is_named_by_doctor_not_silently_empty() {
     use std::os::unix::fs::PermissionsExt;
     let w = World::new("skipped-source-doctor");
-    w.write_session("visible", &[user_line("u", "2026-01-01T10:00:00Z", "hello")]);
+    w.write_session("visible", &[user_line("visible", "u", "2026-01-01T10:00:00Z", "hello")]);
     let (healthy, _) = w.cv_ok(&["doctor", "visible", "--json"]);
     let healthy: serde_json::Value = serde_json::from_str(&healthy).unwrap();
     assert!(healthy.get("skipped_sources").is_none(), "{healthy}");
@@ -4050,7 +4050,7 @@ fn an_unreadable_project_dir_is_named_by_doctor_not_silently_empty() {
     fs::create_dir_all(&locked).unwrap();
     fs::write(
         locked.join("hidden.jsonl"),
-        cv_testkit::jsonl(&[user_line("h", "2026-01-01T11:00:00Z", "unseen")]),
+        cv_testkit::jsonl(&[user_line("visible", "h", "2026-01-01T11:00:00Z", "unseen")]),
     )
     .unwrap();
     fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
@@ -4091,7 +4091,7 @@ fn an_unreadable_project_dir_is_named_by_doctor_not_silently_empty() {
 #[test]
 fn a_garbled_catalog_degrades_once_per_process() {
     let w = World::new("garbled-catalog-warns-once");
-    w.write_session("listed", &[user_line("u", "2026-01-01T10:00:00Z", "hello")]);
+    w.write_session("listed", &[user_line("listed", "u", "2026-01-01T10:00:00Z", "hello")]);
     let (healthy, healthy_err) = w.cv_ok(&["ls", "--json"]);
     assert!(!healthy_err.contains("unavailable"), "{healthy_err}");
     let catalog = w.cv_home.join("catalog.db");
@@ -4268,7 +4268,7 @@ fn frozen_writer_commands_exit_two_before_resolving_or_writing() {
 fn frozen_events_match_catalog_order_and_keep_every_event() {
     let w = World::new("frozen-event-order");
     w.write_session("eventorder", &[
-        user_line("u1", "2026-01-01T10:00:00Z", "fix it"),
+        user_line("eventorder", "u1", "2026-01-01T10:00:00Z", "fix it"),
         assistant_line("a1", "2026-01-01T10:00:01Z", serde_json::json!([
             {"type": "tool_use", "id": "t1", "name": "Read", "input": {"file_path": "/work/a"}},
             {"type": "tool_use", "id": "t2", "name": "Edit", "input": {"file_path": "/work/a", "old_string": "a", "new_string": "b"}},
@@ -4331,13 +4331,13 @@ fn cli_skills_policy_on_prune_rewind_and_port() {
     )
     .unwrap();
     let source = w.write_session("skills-source", &[
-        user_line("u", "2026-01-01T00:00:00Z", "continue"),
+        user_line("skills-source", "u", "2026-01-01T00:00:00Z", "continue"),
         json!({"type":"attachment", "uuid":"r", "parentUuid":"u", "isSidechain":false,
             "cwd":"/work/proj", "attachment":{"type":"invoked_skills", "skills":[
                 {"name":"a:b", "path":"userSettings:a:b", "content":"Base directory for this skill: /skills/a:b\n\nCurrent command."},
                 {"name":"gone", "path":"userSettings:gone", "content":"Gone."}
             ]}, "rendered":[{"content":"Old restored text"}], "renderedRole":"system"}),
-        claude::with(user_line("u2", "2026-01-01T00:01:00Z", "next"), json!({"parentUuid":"r"})),
+        claude::with(user_line("skills-source", "u2", "2026-01-01T00:01:00Z", "next"), json!({"parentUuid":"r"})),
     ]);
     let before = fs::read(&source).unwrap();
     for command in ["prune", "rewind", "port"] {

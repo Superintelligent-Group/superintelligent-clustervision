@@ -334,10 +334,11 @@ fn output_with_stdin(mut cmd: Command, text: &str) -> std::process::Output {
 pub mod claude {
     use serde_json::{json, Value};
 
-    /// A user prompt, with `cwd` (the field `cv ls` reads the project from).
-    pub fn user(uuid: &str, ts: &str, text: &str) -> Value {
+    /// A user prompt, with `cwd` (the field `cv ls` reads the project from) and the session
+    /// the record belongs to (the adapters take the id from the file name; the JSON agrees).
+    pub fn user(sid: &str, uuid: &str, ts: &str, text: &str) -> Value {
         json!({
-            "type": "user", "uuid": uuid, "sessionId": "s", "timestamp": ts, "cwd": "/work/proj",
+            "type": "user", "uuid": uuid, "sessionId": sid, "timestamp": ts, "cwd": "/work/proj",
             "message": {"role": "user", "content": text}
         })
     }

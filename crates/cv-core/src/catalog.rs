@@ -27,6 +27,24 @@
 
 use crate::ir::{Harness, SessionRef};
 
+/// The recorded-watch fudge window: a directory (or db file) modified within this of being
+/// recorded is [`Watched::Unknown`] ("always stale"), because a session file may have landed
+/// between discovery enumerating the directory and us stat'ing it — the next probe then
+/// re-discovers that harness once and re-records a trustworthy identity. Self-quiescing: an
+/// actively-written harness pays one cheap re-discovery per probe until it goes idle for this
+/// long. Production keeps 2 s; integration tests shrink it per process via
+/// [`watch_fudge_for_tests`] so freshness tests need not sleep seconds per step.
+#[cfg(feature = "sqlite")]
+static WATCH_FUDGE_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(2_000);
+
+/// Shrink the recorded-watch fudge window for the rest of this process. Integration-test
+/// plumbing, hidden from docs; production never calls it.
+#[cfg(feature = "sqlite")]
+#[doc(hidden)]
+pub fn watch_fudge_for_tests(fudge: std::time::Duration) {
+    WATCH_FUDGE_MS.store(fudge.as_millis() as u64, std::sync::atomic::Ordering::Relaxed);
+}
+
 mod reader;
 pub(crate) use reader::Reader;
 mod writer;
@@ -64,13 +82,6 @@ mod imp {
     use rusqlite::{params, Connection, OptionalExtension, Row};
     use std::collections::{BTreeSet, HashSet};
     use std::time::{Duration, SystemTime};
-
-    /// A directory (or db file) modified within this of being recorded is [`Watched::Unknown`]
-    /// ("always stale"): a session file may have landed *between* discovery enumerating the
-    /// directory and us stat'ing it, so the next probe re-discovers that harness once and
-    /// re-records a trustworthy identity. Self-quiescing: an actively-written harness pays one
-    /// cheap re-discovery per probe until it goes idle for this long.
-    const WATCH_FUDGE: Duration = Duration::from_secs(2);
 
     impl Watched {
         fn value(self) -> rusqlite::types::Value {
@@ -782,7 +793,9 @@ mod imp {
                     .modified()
                     .ok()
                     .and_then(|mtime| now.duration_since(mtime).ok())
-                    .is_some_and(|age| age >= WATCH_FUDGE);
+                    .is_some_and(|age| {
+                        age >= Duration::from_millis(super::WATCH_FUDGE_MS.load(std::sync::atomic::Ordering::Relaxed))
+                    });
                 let watched = FileId::of(&md).filter(|_| settled);
                 (p, watched.map_or(Watched::Unknown, Watched::Is))
             })
