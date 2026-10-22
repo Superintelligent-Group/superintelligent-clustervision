@@ -504,6 +504,18 @@ pub(crate) fn effective_cwd(session: &Session, opts: &EmitOptions) -> Option<Pat
     opts.new_cwd.clone().or_else(|| session.cwd.clone())
 }
 
+/// The store's own subdirectory of `out_dir` an emitter writes into, without doubling: when
+/// `out_dir` already is that directory (emitting into a discovered root, whose basename is
+/// `name`), it stays itself instead of nesting `<name>/<name>`. LM Studio's `conversations` and
+/// OpenClaw's `agents` share this one rule.
+pub(crate) fn out_dir_within(out_dir: &Path, name: &str) -> PathBuf {
+    if out_dir.file_name().is_some_and(|n| n == name) {
+        out_dir.to_path_buf()
+    } else {
+        out_dir.join(name)
+    }
+}
+
 /// Branch name (if any) for git-flavored metadata fields.
 pub(crate) fn branch_of(session: &Session) -> Option<String> {
     session.git.as_ref().and_then(|g| g.branch.clone())
