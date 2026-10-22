@@ -3424,6 +3424,14 @@ mod tests {
             IN_FLIGHT_BYTES,
             "compressed size cannot undercharge a group"
         );
+        // A frame that declares its decoded size is charged that size, not the whole guard.
+        let dir = tmpdir();
+        let declared = dir.join("rollout.jsonl.zst");
+        let mut frame = vec![0x28, 0xB5, 0x2F, 0xFD, 0xA0];
+        frame.extend_from_slice(&(IN_FLIGHT_BYTES as u32 / 16).to_le_bytes());
+        std::fs::write(&declared, frame).unwrap();
+        group[0].r.path = declared;
+        assert_eq!(job_cost(&group), IN_FLIGHT_BYTES / 16 + 3 * IN_FLIGHT_BYTES / 4);
         group[0].r.path = "/missing".into();
         for job in &mut group {
             job.size = i64::MAX;

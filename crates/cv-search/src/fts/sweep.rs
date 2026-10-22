@@ -109,14 +109,16 @@ impl Drop for Shutdown<'_> {
 pub(super) fn job_cost(group: &[Job]) -> u64 {
     group
         .iter()
-        // Compressed extents do not bound decoded working sets. Until the adapter
-        // exposes that length, admit a compressed source alone.
-        .map(|j| {
-            if j.r.path.extension().is_some_and(|ext| ext == "zst") {
-                IN_FLIGHT_BYTES
-            } else {
-                j.size.max(0) as u64
+        // A compressed extent does not bound the decoded working set: charge the bytes discovery
+        // already decoded, else the size the frame header declares, else the whole guard (the
+        // source runs alone). Charging every compressed source the whole guard ran a cold index
+        // of compressed rollouts one at a time.
+        .map(|j| match &j.decoded {
+            Some(decoded) => decoded.decoded_bytes(),
+            None if j.r.path.extension().is_some_and(|ext| ext == "zst") => {
+                cv_core::codex_handoff::decoded_size_hint(&j.r.path).unwrap_or(IN_FLIGHT_BYTES)
             }
+            None => j.size.max(0) as u64,
         })
         .fold(0u64, u64::saturating_add)
         .min(IN_FLIGHT_BYTES)

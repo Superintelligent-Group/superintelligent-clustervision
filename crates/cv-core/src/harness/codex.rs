@@ -636,6 +636,13 @@ pub(crate) struct Rollout {
     input: Arc<jsonl::Read>,
 }
 
+impl Rollout {
+    /// The decoded bytes it holds.
+    pub(crate) fn decoded_bytes(&self) -> u64 {
+        self.input.len()
+    }
+}
+
 thread_local! {
     /// A rollout discovery already decoded, standing in for decoding it again (see
     /// [`crate::handoff`]).

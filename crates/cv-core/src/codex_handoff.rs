@@ -19,6 +19,17 @@ impl Decoded {
     pub fn run<T>(&self, f: impl FnOnce() -> T) -> T {
         crate::harness::codex::with_decoded(&self.rollout, f)
     }
+
+    /// The decoded bytes held: what reading them in place of the file works over.
+    pub fn decoded_bytes(&self) -> u64 {
+        self.rollout.decoded_bytes()
+    }
+}
+
+/// The decoded size a compressed rollout's first frame header declares, if it declares one: an
+/// unverified hint for sizing admission, never for trusting the data.
+pub fn decoded_size_hint(path: &std::path::Path) -> Option<u64> {
+    crate::harness::store::zst::content_size(path)
 }
 
 /// Discovery's end: makes decoded rollouts available to the consumer while it is alive.
