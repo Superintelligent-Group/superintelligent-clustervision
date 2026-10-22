@@ -88,7 +88,7 @@ fn text(fields: &Fields<'_>, key: &str, spans: bool) -> Result<Option<Text>> {
         .transpose()
         .map(Option::flatten)
 }
-fn nonempty(text: Option<Text>) -> Option<Text> {
+fn nonempty<T: std::ops::Deref<Target = str>>(text: Option<T>) -> Option<T> {
     text.filter(|text| !text.is_empty())
 }
 fn nonnull(fields: &Fields<'_>, key: &str) -> Result<Option<Value>> {
@@ -413,12 +413,13 @@ fn agent_block(view: JsonView<'_>, spans: bool) -> Result<Option<Block>> {
                 .transpose()?
                 .flatten()
                 .unwrap_or_default(),
-            signature: fields
-                .as_ref()
-                .map(|v| v.string("signature"))
-                .transpose()?
-                .flatten()
-                .filter(|s| !s.is_empty()),
+            signature: nonempty(
+                fields
+                    .as_ref()
+                    .map(|v| v.string("signature"))
+                    .transpose()?
+                    .flatten(),
+            ),
             encrypted: None,
             redacted: false,
         }));

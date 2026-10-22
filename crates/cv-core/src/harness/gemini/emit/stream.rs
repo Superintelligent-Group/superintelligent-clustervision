@@ -50,7 +50,10 @@ fn parts(writer: &mut dyn Write, message: &Message, fates: &[ThinkingFate], reso
                     genai::text_fields(&mut object, text, projection == ThinkingFate::Keep, None, resolver)?;
                 }
             }
-            block @ (Block::Image { .. } | Block::File { .. }) => genai::media_fields(&mut object, block)?,
+            Block::Image { media_type, .. } => genai::image_fields(&mut object, media_type.as_deref())?,
+            Block::File { mime, path, source } => {
+                genai::file_fields(&mut object, mime.as_deref(), path.as_deref(), source.as_deref())?
+            }
             Block::ToolUse { .. } | Block::ToolResult { .. } => unreachable!(),
         }
         object.finish()?;
