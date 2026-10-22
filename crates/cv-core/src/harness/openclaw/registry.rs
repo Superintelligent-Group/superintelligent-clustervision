@@ -52,6 +52,92 @@ pub(super) fn affordances(r: &SessionRef) -> Result<Vec<Affordance>> {
     Ok(out)
 }
 
+/// Every session's certificate in the JSONL registries a transcript in `dir` reads: exactly what
+/// its read takes from them. From `dir/sessions.json`: the key [`session_key`] finds (the first
+/// entry naming it, in the parsed map's order) and, as [`super::JsonKeys`] reads the document,
+/// its own entry's key and `spawnedBy` and the session that spawner key names now; from the state
+/// dir's `cron/jobs.json` and `subagents/runs.json`, the jobs and runs that belong to its key
+/// ([`jsonl_jobs`], [`jsonl_runs`]); a registry that fails to read, as the failure. Keyed by the
+/// session ids `sessions.json` names and the transcripts' file names.
+pub(super) fn jsonl_rows(dir: &Path) -> Option<std::collections::HashMap<String, crate::source::Rows>> {
+    use crate::source::Rows;
+    let state = dir.ancestors().nth(STATE_ANCESTOR - 1)?;
+    let index_path = dir.join("sessions.json");
+    let index = shared_json(&index_path);
+    let keys = super::JsonKeys::read(&index_path);
+    let entries = match &index {
+        Ok(Some(index)) => index.as_object(),
+        _ => None,
+    };
+    // The sessions `sessions.json` names, and every transcript's by its file name (a session it
+    // does not name reads no entry: that absence is its certificate).
+    let on_disk: Vec<String> = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| e.file_name().to_str().is_some_and(super::is_primary_transcript_name))
+        .map(|e| super::session_id_from_filename(&e.path()))
+        .collect();
+    let mut ids: std::collections::BTreeSet<&str> = keys.sessions.keys().map(String::as_str).collect();
+    ids.extend(
+        entries
+            .into_iter()
+            .flatten()
+            .filter_map(|(_, e)| e.get("sessionId").and_then(Value::as_str)),
+    );
+    ids.extend(on_disk.iter().map(String::as_str));
+    let fold = |digest: u64, part: &[u8]| Rows::fold(Rows::fold(digest, &(part.len() as u64).to_le_bytes()), part);
+    let json = |value: &Value| serde_json::to_vec(value).unwrap_or_default();
+    let mut out = std::collections::HashMap::new();
+    for id in ids {
+        let mut digest = Rows::SEED;
+        let key = match &index {
+            Err(error) => {
+                digest = fold(digest, format!("error {error:#}").as_bytes());
+                None
+            }
+            Ok(None) => None,
+            Ok(Some(_)) => match entries {
+                None => {
+                    digest = fold(digest, b"not an object");
+                    None
+                }
+                Some(entries) => entries
+                    .iter()
+                    .find(|(_, e)| e.get("sessionId").and_then(Value::as_str) == Some(id))
+                    .map(|(k, _)| k.clone()),
+            },
+        };
+        digest = fold(digest, key.as_deref().unwrap_or("\0").as_bytes());
+        if let Some((own, spawned_by)) = keys.sessions.get(id) {
+            digest = fold(digest, own.as_bytes());
+            if let Some(by) = spawned_by {
+                digest = fold(digest, by.as_bytes());
+                digest = fold(digest, keys.preferred.get(by).map_or(&b"\0"[..], |s| s.as_bytes()));
+            }
+        }
+        if let Some(key) = &key {
+            match jsonl_jobs(state, key) {
+                Ok(jobs) => jobs.iter().for_each(|job| digest = fold(digest, &json(job))),
+                Err(error) => digest = fold(digest, format!("error {error:#}").as_bytes()),
+            }
+            match jsonl_runs(state, key) {
+                Ok(runs) => runs.iter().for_each(|(_, run)| digest = fold(digest, &json(run))),
+                Err(error) => digest = fold(digest, format!("error {error:#}").as_bytes()),
+            }
+        }
+        out.insert(
+            id.to_owned(),
+            Rows {
+                count: 1,
+                high: 0,
+                digest,
+            },
+        );
+    }
+    Some(out)
+}
+
 /// The session's key: the `sessions.json` entry naming it, or its `session_windows` row.
 fn session_key(r: &SessionRef) -> Result<Option<String>> {
     if super::is_sqlite_store_path(&r.path) {

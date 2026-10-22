@@ -269,23 +269,37 @@ impl Cursor {
             let Some(cwd) = workspace_cwd(&ws) else {
                 continue;
             };
-            let Ok(conn) = open_ro(&db) else { continue };
-            let Ok(Some(v)) = conn.read(|conn, _| {
-                Ok(item_table_get(conn, "composer.composerData")
-                    .and_then(|raw| serde_json::from_str::<Value>(&raw).ok()))
+            // The workspace's composer ids, read once per database state and kept in cv's
+            // catalog: a discovery over unchanged workspaces opens none of them.
+            let Ok(ids) = super::store::sqlite::derived(&db, Harness::Cursor, |conn, _| {
+                let v = item_table_get(conn, "composer.composerData")
+                    .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+                    .unwrap_or_default();
+                Ok(WorkspaceComposers(
+                    v.get("allComposers")
+                        .and_then(Value::as_array)
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|c| c.get("composerId").and_then(Value::as_str).map(str::to_string))
+                        .collect(),
+                ))
             }) else {
                 continue;
             };
-            if let Some(all) = v.get("allComposers").and_then(Value::as_array) {
-                for c in all {
-                    if let Some(id) = c.get("composerId").and_then(Value::as_str) {
-                        map.entry(id.to_string()).or_insert_with(|| cwd.clone());
-                    }
-                }
+            for id in &ids.payload.0 {
+                map.entry(id.clone()).or_insert_with(|| cwd.clone());
             }
         }
         map
     }
+}
+
+/// The composer ids a workspace database's `composer.composerData` lists, in its order.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct WorkspaceComposers(Vec<String>);
+
+impl crate::source::Payload for WorkspaceComposers {
+    const TAG: &'static str = "cursor-workspace-composers";
 }
 
 /// Read a single ItemTable value (TEXT or BLOB) as a UTF-8 string.
@@ -412,6 +426,10 @@ fn discover_global(conn: &Connection, db: &Path, cwd_map: &HashMap<String, PathB
     };
     let rows = stmt.query_map([], |row| row.get::<_, String>(0));
     let Ok(rows) = rows else { return };
+    // A composer whose rows certify as when it was last decoded keeps that listing: a write
+    // decodes the composers it moved, not every composer of the store.
+    let certificates = rows_conn(conn).unwrap_or_default();
+    let mut pass = super::store::sqlite::listing::Pass::<ComposerListing>::begin(Harness::Cursor, db);
 
     for key in rows.flatten() {
         let Some(composer_id) = key.strip_prefix("composerData:") else {
@@ -421,36 +439,67 @@ fn discover_global(conn: &Connection, db: &Path, cwd_map: &HashMap<String, PathB
         let Ok(cells) = Cells::new(conn, db, &crate::source::ReadSet::default(), "cursorDiskKV") else {
             return;
         };
-        let Ok(Some(cell)) = source::cell(conn, &cells, "cursorDiskKV", &key) else {
+        let listed = pass.list(composer_id, certificates.get(composer_id).copied(), || {
+            // A cell that cannot be read is skipped and decoded again next time.
+            let cell = match source::cell(conn, &cells, "cursorDiskKV", &key) {
+                Ok(Some(cell)) => cell,
+                Ok(None) => return Ok(ComposerListing(None)),
+                Err(_) => return Err(()),
+            };
+            let header = cells.read(cell, |root| {
+                let composer = record::composer(root)?;
+                let mut count = 0;
+                for row in composer.rows.into_iter().flatten() {
+                    row?;
+                    count += 1;
+                }
+                Ok((composer.metadata, count))
+            });
+            let Ok(Some((d, count))) = header else { return Err(()) };
+            // Skip threads that have no messages at all (Cursor leaves empty composer shells around).
+            if count == 0 {
+                return Ok(ComposerListing(None));
+            }
+            let shell = SessionRef::new(composer_id, Harness::Cursor, db);
+            let head = global_session(&d, &shell);
+            Ok(ComposerListing(Some(Composed {
+                title: head
+                    .title
+                    .map(|title| crate::ir::truncate(&title, crate::projection::Head::TITLE)),
+                created_at: head.created_at,
+                updated_at: head.updated_at,
+                count,
+            })))
+        });
+        let Ok(ComposerListing(Some(listed))) = listed else {
             continue;
         };
-        let header = cells.read(cell, |root| {
-            let composer = record::composer(root)?;
-            let mut count = 0;
-            for row in composer.rows.into_iter().flatten() {
-                row?;
-                count += 1;
-            }
-            Ok((composer.metadata, count))
-        });
-        let Ok(Some((d, count))) = header else { continue };
-        // Skip threads that have no messages at all (Cursor leaves empty composer shells around).
-        if count == 0 {
-            continue;
-        }
-        let shell = SessionRef::new(composer_id, Harness::Cursor, db);
-        let head = global_session(&d, &shell);
         out.push(SessionRef {
             cwd: cwd_map.get(composer_id).cloned(),
-            title: head
-                .title
-                .map(|title| crate::ir::truncate(&title, crate::projection::Head::TITLE)),
-            created_at: head.created_at,
-            updated_at: head.updated_at,
-            message_count: Some(count),
+            title: listed.title,
+            created_at: listed.created_at,
+            updated_at: listed.updated_at,
+            message_count: Some(listed.count),
             ..SessionRef::new(composer_id.to_string(), Harness::Cursor, db.to_path_buf())
         });
     }
+    pass.keep();
+}
+
+/// A composer's discovery listing ([`discover_global`]); `None` for a composer listed as none.
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+struct ComposerListing(Option<Composed>);
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+struct Composed {
+    title: Option<String>,
+    created_at: Option<chrono::DateTime<chrono::Utc>>,
+    updated_at: Option<chrono::DateTime<chrono::Utc>>,
+    count: usize,
+}
+
+impl super::store::sqlite::listing::Listing for ComposerListing {
+    const TAG: &'static str = "cursor-listing";
 }
 
 /// One composer: its session facts, then each bubble of its authoritative conversation, inline or
@@ -746,6 +795,59 @@ mod tests {
             )
             .unwrap();
         });
+    }
+
+    /// A write to one composer rediscovers the store decoding that composer alone (the others
+    /// keep the listing their unchanged rows certify), and the workspace composer map is read
+    /// once per workspace database state.
+    #[test]
+    fn a_composer_write_decodes_only_that_composer_at_discovery() {
+        use super::super::store::sqlite::{listing::DECODED, DERIVE_OPENS};
+        let world = crate::test_world("cursor-listing");
+        let context = crate::discover_cache::read::Context::current();
+        let _scope = context.enter();
+        let corpus = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/corpus/cursor/3.24.12-ide/Cursor/User");
+        let user = world.base.join("User");
+        for entry in walkdir::WalkDir::new(&corpus) {
+            let entry = entry.unwrap();
+            let to = user.join(entry.path().strip_prefix(&corpus).unwrap());
+            if entry.file_type().is_dir() {
+                std::fs::create_dir_all(&to).unwrap();
+            } else {
+                std::fs::copy(entry.path(), &to).unwrap();
+            }
+        }
+        let db = user.join("globalStorage/state.vscdb");
+        let leaf = "4850be27-a5fd-4c24-b25b-7786285ccbea";
+        for copy in ["copied-one", "copied-two"] {
+            Connection::open(&db)
+                .unwrap()
+                .execute_batch(&format!(
+                    "INSERT INTO cursorDiskKV SELECT replace(key, '{leaf}', '{copy}'), value FROM cursorDiskKV \
+                     WHERE key LIKE 'composerData:{leaf}' OR key LIKE 'bubbleId:{leaf}:%';"
+                ))
+                .unwrap();
+        }
+        let adapter = Cursor::with_user_dir(&user);
+        let listing = || {
+            let mut refs = adapter.discover().unwrap().refs;
+            refs.sort_by(|a, b| a.id.cmp(&b.id));
+            serde_json::to_string(&refs).unwrap()
+        };
+        let counters = || (DECODED.with(|n| n.replace(0)), DERIVE_OPENS.with(|n| n.replace(0)));
+        let first = listing();
+        let (decoded, opened) = counters();
+        assert!(decoded >= 3, "three composers at least: {decoded}");
+        assert!(opened > 0, "the corpus holds a workspace database");
+        Connection::open(&db)
+            .unwrap()
+            .execute(
+                "INSERT INTO cursorDiskKV SELECT key, value FROM cursorDiskKV WHERE key = ?1",
+                [format!("composerData:{leaf}")],
+            )
+            .unwrap();
+        assert_eq!(listing(), first);
+        assert_eq!(counters(), (1, 0));
     }
 
     #[test]

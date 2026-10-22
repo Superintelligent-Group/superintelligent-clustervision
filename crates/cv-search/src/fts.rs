@@ -5601,6 +5601,54 @@ mod tests {
         assert_eq!(refresh(), 0);
     }
 
+    /// OpenClaw's JSONL registries (`sessions.json`, `cron/jobs.json`, `subagents/runs.json`)
+    /// are rewritten by every session of the agent: each session is certified by its own entries,
+    /// so a rewrite that moves none rereads none, and a job made for one session rereads it alone.
+    #[test]
+    fn an_openclaw_registry_write_rereads_only_the_session_it_names() {
+        use cv_core::harness::Adapter as _;
+        let _home = IsolatedHome::new();
+        let (dir, state) = (tmpdir(), tmpdir());
+        let corpus = Path::new(env!("CARGO_MANIFEST_DIR")).join("../cv-core/tests/corpus/openclaw/2026.1.29");
+        fn copy(from: &Path, to: &Path) {
+            std::fs::create_dir_all(to).unwrap();
+            for entry in std::fs::read_dir(from).unwrap() {
+                let entry = entry.unwrap();
+                if entry.file_type().unwrap().is_dir() {
+                    copy(&entry.path(), &to.join(entry.file_name()));
+                } else {
+                    std::fs::copy(entry.path(), to.join(entry.file_name())).unwrap();
+                }
+            }
+        }
+        copy(&corpus, &state);
+        let refs = cv_core::harness::openclaw::OpenClaw::with_state_dir(&state)
+            .discover()
+            .unwrap()
+            .refs;
+        assert!(refs.len() > 2, "{refs:?}");
+        let refresh = || sweep(&dir, refs.clone(), false, false).unwrap().changed;
+        assert_eq!(refresh(), refs.len());
+        assert_eq!(refresh(), 0);
+        let index = state.join("agents/main/sessions/sessions.json");
+        let mut sessions: serde_json::Value = serde_json::from_slice(&std::fs::read(&index).unwrap()).unwrap();
+        // Another session's activity: a new entry, and a field no read takes.
+        sessions["agent:main:subagent:other"] = serde_json::json!({"sessionId":"not-on-disk","updatedAt":1});
+        sessions["agent:main:main"]["updatedAt"] = 1.into();
+        std::fs::write(&index, sessions.to_string()).unwrap();
+        assert_eq!(refresh(), 0);
+        let jobs_path = state.join("cron/jobs.json");
+        let mut jobs: serde_json::Value = serde_json::from_slice(&std::fs::read(&jobs_path).unwrap()).unwrap();
+        jobs["jobs"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({"id":"made-by-main","agentId":"main",
+            "owner":{"sessionKey":"agent:main:main"},"sessionTarget":"isolated"}));
+        std::fs::write(&jobs_path, jobs.to_string()).unwrap();
+        assert_eq!(refresh(), 1);
+        assert_eq!(refresh(), 0);
+    }
+
     /// The core invariant of `ChunkSink`: a body larger than [`CHUNK_BYTES`] is flushed into several
     /// tantivy docs that all share the session id. Search must (a) still find a term living only in a
     /// late chunk, and (b) dedup a term present in *every* chunk back to a single row per id.

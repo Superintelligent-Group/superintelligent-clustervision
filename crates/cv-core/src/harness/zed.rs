@@ -168,7 +168,10 @@ fn discover_db(conn: &Connection, db: &Path) -> Result<Vec<SessionRef>> {
     // Sorting only metadata keeps every complete blob out of SQLite's temporary sorter; each
     // thread's cell is then read by key.
     let sql = format!("SELECT {} FROM threads ORDER BY updated_at DESC", select.list());
-    let cells = Cells::new(conn, db, &crate::source::ReadSet::default(), "threads")?;
+    // A thread whose row certifies as it did when its listing was last decoded keeps that
+    // listing: a save decodes the saved thread, not every thread ([`Listings`]).
+    let certificates = rows_conn(conn)?;
+    let mut pass = super::store::sqlite::listing::Pass::<ThreadCwd>::begin(Harness::Zed, db);
     let mut stmt = conn.prepare(&sql)?;
     let mut rows = stmt.query([])?;
     let mut out = Vec::new();
@@ -182,11 +185,17 @@ fn discover_db(conn: &Connection, db: &Path) -> Result<Vec<SessionRef>> {
         let folders = row.get::<_, Option<String>>(4)?;
         let order = row.get::<_, Option<String>>(5)?;
         let data_type = row.get::<_, Option<String>>(6)?;
-        let thread = thread_cell(conn, &cells, &id, data_type.as_deref())?
-            .map(|cell| cells.read(cell, listing))
-            .transpose()?
-            .flatten();
-        let cwd = thread.flatten();
+        let ThreadCwd(cwd) = pass.list(&id, certificates.get(&id).copied(), || -> Result<ThreadCwd> {
+            // Each thread's cells are its own: the decoded blob is released before the next.
+            let cells = Cells::new(conn, db, &crate::source::ReadSet::default(), "threads")?;
+            Ok(ThreadCwd(
+                thread_cell(conn, &cells, &id, data_type.as_deref())?
+                    .map(|cell| cells.read(cell, listing))
+                    .transpose()?
+                    .flatten()
+                    .flatten(),
+            ))
+        })?;
         out.push(SessionRef {
             cwd: cwd.or_else(|| first_folder_path(folders.as_deref(), order.as_deref())),
             title: summary
@@ -198,7 +207,18 @@ fn discover_db(conn: &Connection, db: &Path) -> Result<Vec<SessionRef>> {
             ..SessionRef::new(id, Harness::Zed, db.to_path_buf())
         });
     }
+    drop(rows);
+    drop(stmt);
+    pass.keep();
     Ok(out)
+}
+
+/// A thread's listing cwd: its decoded blob's snapshot cwd ([`listing`]).
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+struct ThreadCwd(Option<PathBuf>);
+
+impl super::store::sqlite::listing::Listing for ThreadCwd {
+    const TAG: &'static str = "zed-listing";
 }
 
 /// Every thread's [`Rows`](crate::source::Rows) certificate: its one `threads` row, by rowid (Zed
@@ -1357,6 +1377,48 @@ mod tests {
                 .any(|m| matches!(m.role, Role::User | Role::Assistant)));
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A save of one thread rediscovers the store decoding that thread alone: every other
+    /// thread keeps the listing its unchanged row certifies, in this process or (its memo gone,
+    /// as in the next `cv` process) from the catalog.
+    #[test]
+    fn a_save_decodes_only_the_saved_thread_at_discovery() {
+        let world = crate::test_world("zed-listing");
+        let context = crate::discover_cache::read::Context::current();
+        let _scope = context.enter();
+        let db = world.base.join("threads.db");
+        let c = Connection::open(&db).unwrap();
+        c.execute_batch(SCHEMA).unwrap();
+        for id in ["t1", "t2", "t3"] {
+            insert(&c, id, id, "zstd", &zstd_blob(&legacy_thread()));
+        }
+        let zed = Zed::with_root(&world.base);
+        let decoded = || super::super::store::sqlite::listing::DECODED.with(|n| n.replace(0));
+        let listing = || {
+            let mut refs = zed.discover().unwrap().refs;
+            refs.sort_by(|a, b| a.id.cmp(&b.id));
+            serde_json::to_string(&refs).unwrap()
+        };
+        let first = listing();
+        assert_eq!(decoded(), 3);
+        let save = |id: &str, at: &str| {
+            c.execute(
+                "INSERT OR REPLACE INTO threads (id, summary, updated_at, data_type, data, folder_paths, \
+                 folder_paths_order, created_at) SELECT id, summary, ?2, data_type, data, folder_paths, \
+                 folder_paths_order, created_at FROM threads WHERE id = ?1",
+                rusqlite::params![id, at],
+            )
+            .unwrap();
+        };
+        save("t2", "2030-01-01T00:00:00+00:00");
+        let saved = listing();
+        assert_eq!(decoded(), 1);
+        assert_ne!(saved, first);
+        super::super::store::sqlite::listing::forget();
+        save("t3", "2030-01-02T00:00:00+00:00");
+        listing();
+        assert_eq!(decoded(), 1);
     }
 
     /// A save of one thread (its row replaced, as Zed writes it) moves its certificate alone, with

@@ -28,6 +28,7 @@ pub(crate) use certify::{fold_value, Certificates};
 mod derived;
 #[cfg(test)]
 pub(crate) mod export_tests;
+pub(crate) mod listing;
 pub(crate) use derived::derived;
 #[cfg(test)]
 pub(crate) use derived::DERIVE_OPENS;

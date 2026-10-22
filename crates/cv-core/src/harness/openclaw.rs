@@ -257,12 +257,44 @@ impl Adapter for OpenClaw {
         Ok(out)
     }
 
-    /// Every window's certificate in an agent's `.sqlite` store ([`sqlite_rows`]).
+    /// Every window's certificate in an agent's `.sqlite` store ([`sqlite_rows`]); every JSONL
+    /// session's in the registries beside its transcript ([`registry::jsonl_rows`]).
     #[cfg(feature = "sqlite")]
     fn rows(&self, store: &Path) -> Option<std::collections::HashMap<String, crate::source::Rows>> {
-        is_sqlite_store_path(store)
-            .then(|| open_ro(store).ok()?.read(|conn, _| sqlite_rows(conn)).ok())
+        if !is_sqlite_store_path(store) {
+            return registry::jsonl_rows(store);
+        }
+        open_ro(store).ok()?.read(|conn, _| sqlite_rows(conn)).ok()
+    }
+
+    #[cfg(not(feature = "sqlite"))]
+    fn rows(&self, store: &Path) -> Option<std::collections::HashMap<String, crate::source::Rows>> {
+        (!is_sqlite_store_path(store))
+            .then(|| registry::jsonl_rows(store))
             .flatten()
+    }
+
+    /// A JSONL session reads its own entries of `sessions.json`, `cron/jobs.json` and
+    /// `subagents/runs.json`, which every session of the agent (and the gateway) rewrites: it is
+    /// certified by them, its store the directory of its transcript.
+    fn rows_store(&self, r: &SessionRef) -> Option<PathBuf> {
+        if is_sqlite_store_path(&r.path) {
+            return Some(r.path.clone());
+        }
+        let dir = r.path.parent()?;
+        (dir.file_name()? == "sessions" && r.path.ancestors().nth(4).is_some()).then(|| dir.to_path_buf())
+    }
+
+    fn rows_files(&self, store: &Path) -> Vec<PathBuf> {
+        if is_sqlite_store_path(store) {
+            return vec![store.to_path_buf()];
+        }
+        let mut files = vec![store.join("sessions.json")];
+        if let Some(state) = store.ancestors().nth(3) {
+            files.push(state.join("cron/jobs.json"));
+            files.push(state.join("subagents/runs.json"));
+        }
+        files
     }
 
     /// An agent's `.sqlite` store is written in place; a JSONL transcript is a file like any other.
@@ -985,12 +1017,37 @@ fn sqlite_rows(conn: &rusqlite::Connection) -> Result<std::collections::HashMap<
             .prepare("SELECT session_id, spawned_by FROM session_windows WHERE spawned_by IS NOT NULL")?
             .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
             .collect::<rusqlite::Result<_>>()?;
+        // Each spawner key's windows, once: a query per child scanned every window (children x
+        // windows). Exact under plain text comparison; other collations keep the query.
+        let grouped =
+            super::store::sqlite::binary_text_columns(conn, "session_windows", &["session_key", "session_id"])?;
+        let mut windows: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+        if grouped {
+            let mut stmt = conn.prepare("SELECT session_key, session_id FROM session_windows")?;
+            let mut rows = stmt.query([])?;
+            while let Some(row) = rows.next()? {
+                let (Ok(key), Ok(id)) = (row.get_ref(0)?.as_str(), row.get_ref(1)?.as_str()) else {
+                    continue;
+                };
+                windows.entry(key.to_owned()).or_default().push(id.to_owned());
+            }
+        }
         let mut candidates =
             conn.prepare("SELECT session_id FROM session_windows WHERE session_key=?1 AND session_id!=?2")?;
         for (id, by) in spawned {
-            let found: Vec<String> = candidates
-                .query_map([&by, &id], |row| row.get(0))?
-                .collect::<rusqlite::Result<_>>()?;
+            let found: Vec<String> = if grouped {
+                windows
+                    .get(&by)
+                    .into_iter()
+                    .flatten()
+                    .filter(|window| **window != id)
+                    .cloned()
+                    .collect()
+            } else {
+                candidates
+                    .query_map([&by, &id], |row| row.get(0))?
+                    .collect::<rusqlite::Result<_>>()?
+            };
             for candidate in &found {
                 certificates.fold(&id, candidate.as_bytes());
                 if found.len() > 1 {

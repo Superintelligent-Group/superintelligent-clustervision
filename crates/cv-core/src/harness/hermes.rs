@@ -334,7 +334,10 @@ impl Adapter for Hermes {
     /// Every session's certificate, from one read of the store's small tables and the
     /// `messages(session_id, …)` indexes ([`rows_conn`]).
     fn rows(&self, store: &Path) -> Option<std::collections::HashMap<String, crate::source::Rows>> {
-        open_ro(store).ok()?.read(|conn, _| rows_conn(conn)).ok()
+        open_ro(store)
+            .ok()?
+            .read(|conn, _| rows_from(conn, &*walked(conn, store)?))
+            .ok()
     }
 
     /// What `/goal`, `/loop` and `/heartbeat` keep in `state_meta` under `<kind>:<session id>`.
@@ -383,7 +386,10 @@ fn latest_of(stamps: [Option<f64>; 3]) -> Option<DateTime<Utc>> {
 /// user-visible conversations and stay listed. An untitled compression tip takes its root's title,
 /// as Hermes's listing does (`COALESCE(tip.title, s.title)`, `hermes_state_sessions.py:1137`).
 fn discover_conn(conn: &Connection, path: &Path) -> Result<Vec<SessionRef>> {
-    Ok(refs_conn(conn, path, false)?.into_iter().map(|(_, r)| r).collect())
+    Ok(refs_of(&*walked(conn, path)?, path, false)?
+        .into_iter()
+        .map(|(_, r)| r)
+        .collect())
 }
 
 /// The delegate sub-agent runs of one conversation (`model_config._delegate_from` naming it, or any
@@ -404,7 +410,11 @@ pub fn subagent_refs(parent: &SessionRef) -> Result<Vec<SessionRef>> {
             crate::source::unchanged(parent, &record.baseline),
             "SQLite source dependencies changed or unavailable"
         );
-        Ok(chain_delegates(conn, &parent.id, &forests.by_parent))
+        Ok(chain_delegates(
+            &*walked(conn, &parent.path)?,
+            &parent.id,
+            &forests.by_parent,
+        ))
     })
 }
 
@@ -426,8 +436,9 @@ impl crate::source::Payload for Forests {
 /// walk reads the overflow pages too; a forest fold asks for every conversation's delegates, so
 /// one walk per parent made a `--subagents` pass over a 4 GB store read ~4 GB per conversation.
 fn forests_conn(conn: &Connection, path: &Path) -> Result<Forests> {
+    let walk = walked(conn, path)?;
     let mut by_parent = std::collections::HashMap::<String, Vec<SessionRef>>::new();
-    for (from, r) in refs_conn(conn, path, true)? {
+    for (from, r) in refs_of(&walk, path, true)? {
         by_parent.entry(from.unwrap_or_default()).or_default().push(r);
     }
     let listed: HashSet<String> = super::store::sqlite::cached_discover(path, || discover_conn(conn, path))?
@@ -439,7 +450,7 @@ fn forests_conn(conn: &Connection, path: &Path) -> Result<Forests> {
     } else {
         listed
             .iter()
-            .map(|id| (id.clone(), chain_delegates(conn, id, &by_parent)))
+            .map(|id| (id.clone(), chain_delegates(&walk, id, &by_parent)))
             .filter(|(_, kids)| !kids.is_empty())
             .collect()
     };
@@ -448,13 +459,12 @@ fn forests_conn(conn: &Connection, path: &Path) -> Result<Forests> {
 
 /// The delegates of every segment of `id`'s compression chain, sorted by id.
 fn chain_delegates(
-    conn: &Connection,
+    walk: &Walk,
     id: &str,
     by_parent: &std::collections::HashMap<String, Vec<SessionRef>>,
 ) -> Vec<SessionRef> {
-    let probe = Select::of(conn, "sessions");
-    let chain = if probe.has("parent_session_id") {
-        session_lineage_root_to_tip(conn, id, &probe)
+    let chain = if walk.has("parent_session_id") {
+        walk.lineage(id)
     } else {
         vec![id.to_string()]
     };
@@ -468,65 +478,265 @@ fn chain_delegates(
     out
 }
 
-/// Session refs in one db, each with the session its `_delegate_from` names: with `delegates`
-/// unset, every listed conversation (see [`discover_conn`]); with it set, only the delegate runs.
-fn refs_conn(conn: &Connection, path: &Path, delegates: bool) -> Result<Vec<(Option<String>, SessionRef)>> {
-    // Older schemas may lack `title`, `parent_session_id`, …: select what exists, NULL for the rest.
-    let select = Select::of(conn, "sessions")
-        .always(&["id"])
-        .probed(&["title"])
-        .always(&["started_at", "ended_at"])
-        .probed(&["cwd", "last_activity_at", "model_config"]);
-    let sql = format!("SELECT {} FROM sessions ORDER BY started_at DESC", select.list());
-    let has_parent = select.has("parent_session_id");
-    // Compression ancestors: parents (ended in compression) that some session continues from.
-    let mut compression_parents: HashSet<String> = HashSet::new();
-    if has_parent && select.has("end_reason") {
-        let mut stmt = conn.prepare(
-            "SELECT DISTINCT p.id FROM sessions p JOIN sessions c ON c.parent_session_id = p.id \
-             WHERE p.end_reason IN ('compression', 'orphaned_compression')",
-        )?;
-        for row in stmt.query_map([], |row| row.get::<_, String>(0))? {
-            compression_parents.insert(row?);
+/// One walk over `sessions` per store state, serving discovery, the delegate forests and every
+/// session's certificate ([`walked`]). Each read the table whole (its overflow pages too: the
+/// system prompts of older schemas), three times per state, and a forest derivation probed the
+/// schema and walked each listed conversation's chain by query once more.
+pub(crate) struct Walk {
+    columns: HashSet<String>,
+    /// The rows in the listing order (`ORDER BY started_at DESC`), scanned in table order.
+    rows: Vec<WalkRow>,
+    /// Row positions by text id (`WHERE id = ?1`).
+    by_id: std::collections::HashMap<String, usize>,
+}
+
+/// One `sessions` row as its readers take it.
+struct WalkRow {
+    /// The listing's typed reads (`id` as text, then its columns), or the first one's error.
+    listed: std::result::Result<Listed, String>,
+    /// Text of a column, as a lone-column query reads it (`None` for NULL, absent or not text).
+    id: Option<String>,
+    title: Option<String>,
+    parent: Option<String>,
+    end_reason: Option<String>,
+    model_config: Option<String>,
+    /// [`rows_from`]: the digest of every column, and of `(id, model_config, started_at)`.
+    digest: u64,
+    child: u64,
+}
+
+struct Listed {
+    id: String,
+    title: Option<String>,
+    started: Option<f64>,
+    ended: Option<f64>,
+    cwd: Option<String>,
+    last: Option<f64>,
+    model_config: Option<String>,
+}
+
+/// A value as SQLite orders it: NULL, then numbers, then text, then blobs.
+#[derive(PartialEq, PartialOrd)]
+enum SqlOrder {
+    Null,
+    Number(f64),
+    Text(Vec<u8>),
+    Blob(Vec<u8>),
+}
+
+impl Walk {
+    fn has(&self, column: &str) -> bool {
+        self.columns.contains(column)
+    }
+
+    fn row(&self, id: &str) -> Option<&WalkRow> {
+        self.by_id.get(id).map(|&i| &self.rows[i])
+    }
+
+    /// [`session_lineage_root_to_tip`] over the walked rows.
+    fn lineage(&self, session_id: &str) -> Vec<String> {
+        if session_id.is_empty() {
+            return vec![session_id.to_string()];
+        }
+        let (has_end_reason, has_model_config) = (self.has("end_reason"), self.has("model_config"));
+        let mut chain: Vec<String> = Vec::new();
+        let mut seen: HashSet<String> = HashSet::new();
+        let mut current = session_id.to_string();
+        loop {
+            if current.is_empty() || seen.contains(&current) {
+                break;
+            }
+            seen.insert(current.clone());
+            chain.push(current.clone());
+            let row = self.row(&current);
+            if has_model_config && !lineage_markers(row.and_then(|r| r.model_config.as_deref())).is_empty() {
+                break;
+            }
+            let Some(parent) = row.and_then(|r| r.parent.clone()).filter(|p| !p.is_empty()) else {
+                break;
+            };
+            if has_end_reason
+                && !matches!(
+                    self.row(&parent).and_then(|r| r.end_reason.as_deref()),
+                    Some("compression") | Some("orphaned_compression")
+                )
+            {
+                break;
+            }
+            current = parent;
+        }
+        chain.reverse();
+        if chain.is_empty() {
+            vec![session_id.to_string()]
+        } else {
+            chain
         }
     }
-    let mut stmt = conn.prepare(&sql)?;
-    let rows = stmt.query_map([], |row| {
-        let id: String = row.get(0)?;
-        let title: Option<String> = row.get(1)?;
-        let started: Option<f64> = row.get(2)?;
-        let ended: Option<f64> = row.get(3)?;
-        let cwd: Option<String> = row.get(4)?;
-        let last: Option<f64> = row.get(5)?;
-        let model_config: Option<String> = row.get(6)?;
-        Ok((id, title, started, ended, cwd, last, model_config))
-    })?;
+}
+
+/// The [`Walk`] of `conn`'s `sessions` table.
+fn walk_conn(conn: &Connection) -> Result<Walk> {
+    use super::store::sqlite::fold_value;
+    use crate::source::Rows;
+    let mut stmt = conn.prepare("SELECT * FROM sessions")?;
+    let names: Vec<String> = stmt.column_names().into_iter().map(str::to_owned).collect();
+    let at = |name: &str| names.iter().position(|n| n == name);
+    let id_at = at("id").context("hermes sessions without id")?;
+    let (title_at, parent_at, end_at, config_at) = (
+        at("title"),
+        at("parent_session_id"),
+        at("end_reason"),
+        at("model_config"),
+    );
+    let (started_at, ended_at, cwd_at, last_at) = (at("started_at"), at("ended_at"), at("cwd"), at("last_activity_at"));
+    let lone = |row: &rusqlite::Row<'_>, i: Option<usize>| -> Option<String> {
+        row.get::<_, Option<String>>(i?).ok().flatten()
+    };
+    let mut rows = Vec::new();
+    let mut keys = Vec::new();
+    let mut query = stmt.query([])?;
+    while let Some(row) = query.next()? {
+        let mut digest = Rows::SEED;
+        for i in 0..names.len() {
+            digest = fold_value(digest, row.get_ref(i)?);
+        }
+        let mut child = Rows::SEED;
+        for i in [Some(id_at), config_at, started_at].into_iter().flatten() {
+            child = fold_value(child, row.get_ref(i)?);
+        }
+        let typed = |i: Option<usize>| -> std::result::Result<Option<String>, String> {
+            i.map_or(Ok(None), |i| row.get::<_, Option<String>>(i).map_err(|e| e.to_string()))
+        };
+        let number = |i: Option<usize>| -> std::result::Result<Option<f64>, String> {
+            i.map_or(Ok(None), |i| row.get::<_, Option<f64>>(i).map_err(|e| e.to_string()))
+        };
+        let listed = (|| {
+            Ok(Listed {
+                id: row.get::<_, String>(id_at).map_err(|e| e.to_string())?,
+                title: typed(title_at)?,
+                started: number(started_at)?,
+                ended: number(ended_at)?,
+                cwd: typed(cwd_at)?,
+                last: number(last_at)?,
+                model_config: typed(config_at)?,
+            })
+        })();
+        let key = match started_at.map(|i| row.get_ref(i)).transpose()? {
+            None | Some(rusqlite::types::ValueRef::Null) => SqlOrder::Null,
+            Some(rusqlite::types::ValueRef::Integer(i)) => SqlOrder::Number(i as f64),
+            Some(rusqlite::types::ValueRef::Real(f)) => SqlOrder::Number(f),
+            Some(rusqlite::types::ValueRef::Text(t)) => SqlOrder::Text(t.to_vec()),
+            Some(rusqlite::types::ValueRef::Blob(b)) => SqlOrder::Blob(b.to_vec()),
+        };
+        keys.push(key);
+        rows.push(WalkRow {
+            listed,
+            id: lone(row, Some(id_at)),
+            title: lone(row, title_at),
+            parent: lone(row, parent_at),
+            end_reason: lone(row, end_at),
+            model_config: lone(row, config_at),
+            digest,
+            child,
+        });
+    }
+    // `ORDER BY started_at DESC`, ties in table order.
+    let mut order: Vec<usize> = (0..rows.len()).collect();
+    order.sort_by(|&a, &b| keys[b].partial_cmp(&keys[a]).unwrap_or(std::cmp::Ordering::Equal));
+    let mut slots: Vec<Option<WalkRow>> = rows.into_iter().map(Some).collect();
+    let rows: Vec<WalkRow> = order.into_iter().filter_map(|i| slots[i].take()).collect();
+    let mut by_id = std::collections::HashMap::new();
+    for (i, row) in rows.iter().enumerate() {
+        if let Ok(listed) = &row.listed {
+            by_id.entry(listed.id.clone()).or_insert(i);
+        }
+    }
+    Ok(Walk {
+        columns: names.into_iter().collect(),
+        rows,
+        by_id,
+    })
+}
+
+/// The [`Walk`] of the store at `db`, once per store state (its database, WAL and journal
+/// identities) in this process. Memory: the walked rows' small columns, for the stores read.
+fn walked(conn: &Connection, db: &Path) -> Result<std::sync::Arc<Walk>> {
+    type State = Vec<Option<crate::source::FileId>>;
+    type Walks = std::sync::Mutex<std::collections::HashMap<PathBuf, (State, std::sync::Arc<Walk>)>>;
+    static WALKS: std::sync::LazyLock<Walks> = std::sync::LazyLock::new(Default::default);
+    let state = || -> State {
+        let mut files: Vec<PathBuf> = crate::source::sqlite_sidecars(db).into();
+        files.push(db.to_path_buf());
+        files.iter().map(|f| crate::source::FileId::at(f)).collect()
+    };
+    let key = std::path::absolute(db)?;
+    let before = state();
+    let lock = || WALKS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some((_, walk)) = lock().get(&key).filter(|(at, _)| *at == before) {
+        return Ok(walk.clone());
+    }
+    #[cfg(test)]
+    WALKED.with(|n| n.set(n.get() + 1));
+    let walk = std::sync::Arc::new(walk_conn(conn)?);
+    // Kept only when no write landed while it walked.
+    if state() == before {
+        lock().insert(key, (before, walk.clone()));
+    }
+    Ok(walk)
+}
+
+#[cfg(test)]
+thread_local! { static WALKED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
+
+/// Session refs in one db, each with the session its `_delegate_from` names: with `delegates`
+/// unset, every listed conversation (see [`discover_conn`]); with it set, only the delegate runs.
+fn refs_of(walk: &Walk, path: &Path, delegates: bool) -> Result<Vec<(Option<String>, SessionRef)>> {
+    // The listing selects these whatever the schema.
+    for column in ["started_at", "ended_at"] {
+        anyhow::ensure!(walk.has(column), "no such column: {column}");
+    }
+    let has_parent = walk.has("parent_session_id");
+    // Compression ancestors: parents (ended in compression) that some session continues from.
+    let mut compression_parents: HashSet<&str> = HashSet::new();
+    if has_parent && walk.has("end_reason") {
+        let continued: HashSet<&str> = walk.rows.iter().filter_map(|r| r.parent.as_deref()).collect();
+        for row in &walk.rows {
+            let Ok(listed) = &row.listed else { continue };
+            if matches!(
+                row.end_reason.as_deref(),
+                Some("compression") | Some("orphaned_compression")
+            ) && continued.contains(listed.id.as_str())
+            {
+                compression_parents.insert(listed.id.as_str());
+            }
+        }
+    }
     let mut out = Vec::new();
-    for row in rows {
-        let (id, title, started, ended, cwd, last, model_config) = row?;
-        if compression_parents.contains(&id) {
+    for row in &walk.rows {
+        let listed = row.listed.as_ref().map_err(|e| anyhow::anyhow!("{e}"))?;
+        if compression_parents.contains(listed.id.as_str()) {
             continue;
         }
-        let delegate_from = lineage_markers(model_config.as_deref())
+        let delegate_from = lineage_markers(listed.model_config.as_deref())
             .get("_delegate_from")
             .map(|v| v.as_str().unwrap_or_default().to_string());
         if delegates != delegate_from.is_some() {
             continue;
         }
-        let title = title.filter(|t| !t.is_empty()).or_else(|| {
+        let title = listed.title.clone().filter(|t| !t.is_empty()).or_else(|| {
             has_parent
-                .then(|| inherited_title(conn, &session_lineage_root_to_tip(conn, &id, &select)))
+                .then(|| inherited_title(walk, &walk.lineage(&listed.id)))
                 .flatten()
         });
         out.push((
             delegate_from,
             SessionRef {
-                cwd: cwd.filter(|c| !c.is_empty()).map(PathBuf::from),
+                cwd: listed.cwd.clone().filter(|c| !c.is_empty()).map(PathBuf::from),
                 title: title.map(|t| crate::ir::truncate(&t, crate::projection::Head::TITLE)),
-                created_at: started.and_then(ts_from_epoch),
-                updated_at: latest_of([ended, last, started]),
+                created_at: listed.started.and_then(ts_from_epoch),
+                updated_at: latest_of([listed.ended, listed.last, listed.started]),
                 message_count: None,
-                ..SessionRef::new(id, Harness::Hermes, path.to_path_buf())
+                ..SessionRef::new(listed.id.clone(), Harness::Hermes, path.to_path_buf())
             },
         ));
     }
@@ -539,7 +749,7 @@ fn refs_conn(conn: &Connection, path: &Path, delegates: bool) -> Result<Vec<(Opt
 /// state right after a rotation (a real 0.21.3 store: `publish_compression_child` leaves the child's
 /// `title` NULL). Given a root→tip `chain` (see [`session_lineage_root_to_tip`]), the nearest titled
 /// ancestor, root first; `None` for a chain of one.
-fn inherited_title(conn: &Connection, chain: &[String]) -> Option<String> {
+fn inherited_title_conn(conn: &Connection, chain: &[String]) -> Option<String> {
     let (_, ancestors) = chain.split_last()?;
     ancestors.iter().find_map(|id| {
         conn.query_row("SELECT title FROM sessions WHERE id = ?1", [id], |row| {
@@ -549,6 +759,14 @@ fn inherited_title(conn: &Connection, chain: &[String]) -> Option<String> {
         .flatten()
         .filter(|t| !t.is_empty())
     })
+}
+
+/// [`inherited_title_conn`] over the walked rows.
+fn inherited_title(walk: &Walk, chain: &[String]) -> Option<String> {
+    let (_, ancestors) = chain.split_last()?;
+    ancestors
+        .iter()
+        .find_map(|id| walk.row(id)?.title.clone().filter(|t| !t.is_empty()))
 }
 
 /// Per-session columns with no first-class IR home. Captured into
@@ -732,7 +950,13 @@ fn read_session_facts(
 /// parent that stopped the walk, the `(id, model_config, started_at)` of its children (the
 /// compression continuation), and its `state_meta` rows. The aggregates come from the
 /// `messages(session_id, …)` indexes; no `content` is read.
+#[cfg(test)]
 fn rows_conn(conn: &Connection) -> Result<std::collections::HashMap<String, crate::source::Rows>> {
+    rows_from(conn, &walk_conn(conn)?)
+}
+
+/// [`rows_conn`] with the `sessions` table already walked.
+fn rows_from(conn: &Connection, walk: &Walk) -> Result<std::collections::HashMap<String, crate::source::Rows>> {
     use super::store::sqlite::fold_value;
     use crate::source::Rows;
     use std::collections::HashMap;
@@ -743,50 +967,22 @@ fn rows_conn(conn: &Connection) -> Result<std::collections::HashMap<String, crat
         marked: bool,
         child: u64,
     }
-    let columns = super::store::sqlite::columns(conn, "sessions");
+    let columns = &walk.columns;
     let mut sessions: HashMap<String, Meta> = HashMap::new();
     let mut children: HashMap<String, u64> = HashMap::new();
-    {
-        let mut stmt = conn.prepare("SELECT * FROM sessions")?;
-        let names: Vec<String> = stmt.column_names().into_iter().map(str::to_owned).collect();
-        let at = |name: &str| names.iter().position(|n| n == name);
-        let (id_at, parent_at, end_at, config_at, started_at) = (
-            at("id").context("hermes sessions without id")?,
-            at("parent_session_id"),
-            at("end_reason"),
-            at("model_config"),
-            at("started_at"),
+    let text = |value: &Option<String>| value.clone().filter(|s| !s.is_empty());
+    for row in &walk.rows {
+        let Some(id) = text(&row.id) else { continue };
+        sessions.insert(
+            id,
+            Meta {
+                row: row.digest,
+                parent: text(&row.parent),
+                end_reason: text(&row.end_reason),
+                marked: !lineage_markers(text(&row.model_config).as_deref()).is_empty(),
+                child: row.child,
+            },
         );
-        let text = |row: &rusqlite::Row<'_>, i: Option<usize>| -> Option<String> {
-            row.get::<_, Option<String>>(i?)
-                .ok()
-                .flatten()
-                .filter(|s| !s.is_empty())
-        };
-        let mut rows = stmt.query([])?;
-        while let Some(row) = rows.next()? {
-            let Some(id) = text(row, Some(id_at)) else { continue };
-            let mut digest = Rows::SEED;
-            for i in 0..names.len() {
-                digest = fold_value(digest, row.get_ref(i)?);
-            }
-            let config = text(row, config_at);
-            let mut child = Rows::SEED;
-            for i in [Some(id_at), config_at, started_at].into_iter().flatten() {
-                child = fold_value(child, row.get_ref(i)?);
-            }
-            let parent = text(row, parent_at);
-            sessions.insert(
-                id,
-                Meta {
-                    row: digest,
-                    parent,
-                    end_reason: text(row, end_at),
-                    marked: !lineage_markers(config.as_deref()).is_empty(),
-                    child,
-                },
-            );
-        }
     }
     let mut by_parent: Vec<(&str, &str, u64)> = sessions
         .iter()
@@ -1032,7 +1228,7 @@ fn stream_conn_with_reads(
         title: title
             .filter(|t| !t.is_empty())
             .or_else(|| r.title.clone())
-            .or_else(|| inherited_title(conn, &chain)),
+            .or_else(|| inherited_title_conn(conn, &chain)),
         created_at: started.and_then(ts_from_epoch).or(r.created_at),
         updated_at: latest_of([ended, last_activity, started]).or(r.updated_at),
         model,
@@ -2723,6 +2919,39 @@ mod tests {
     /// Every corpus version: each session has a certificate, a certificate is deterministic, and
     /// a row written to one session moves its certificate alone, while every session whose
     /// certificate held reads exactly as it did before the write.
+    /// Over both corpus stores: discovery, the delegate forests and every session's certificate
+    /// walk `sessions` once per store state, and give what the walks of their own gave.
+    #[test]
+    fn corpus_sessions_are_walked_once_per_store_state() {
+        let corpus = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/corpus/hermes");
+        for version in std::fs::read_dir(&corpus).unwrap().map(|e| e.unwrap().path()) {
+            let world = cv_testkit::World::new("hermes-walk-once");
+            let db = world.base.join("state.db");
+            std::fs::copy(version.join(".hermes/state.db"), &db).unwrap();
+            let adapter = Hermes::with_db(db.clone());
+            WALKED.with(|n| n.set(0));
+            let refs = adapter.discover().unwrap().refs;
+            for r in &refs {
+                subagent_refs(r).unwrap();
+            }
+            let certified = adapter.rows(&db).unwrap();
+            assert_eq!(WALKED.with(|n| n.replace(0)), 1, "{version:?}");
+            let conn = open_ro(&db).unwrap();
+            conn.read(|conn, _| {
+                let walk = walk_conn(conn)?;
+                assert_eq!(rows_from(conn, &walk)?, certified, "{version:?}");
+                let listed: Vec<SessionRef> = refs_of(&walk, &db, false)?.into_iter().map(|(_, r)| r).collect();
+                assert_eq!(
+                    serde_json::to_string(&listed)?,
+                    serde_json::to_string(&refs)?,
+                    "{version:?}"
+                );
+                Ok(())
+            })
+            .unwrap();
+        }
+    }
+
     #[test]
     fn corpus_rows_certify_each_session_and_move_only_with_its_rows() {
         let corpus = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/corpus/hermes");
