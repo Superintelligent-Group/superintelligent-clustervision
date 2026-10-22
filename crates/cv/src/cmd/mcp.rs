@@ -616,7 +616,9 @@ fn instructions() -> String {
 }
 
 /// Every tool: the CLI-generated commands first (they are the ones an agent reaches for), then the
-/// hand-written MCP-only tools. A generated name never shadows a hand-written one.
+/// hand-written MCP-only tools. A generated name never shadows a hand-written one, and none is
+/// dropped for colliding: `no_generated_tool_is_shadowed_by_a_hand_written_one` keeps the two
+/// name sets disjoint, so the filter below removes nothing in a released binary.
 fn tool_list() -> Value {
     let mut tools = base_tool_list();
     let Value::Array(list) = &mut tools else {
@@ -1697,6 +1699,27 @@ mod admission_tests {
 
 #[cfg(test)]
 mod instructions_tests {
+    /// A generated tool whose name a hand-written one already holds is dropped from the roster
+    /// (`tool_list`); no command may be lost that way unnoticed, so none may collide at all.
+    #[test]
+    fn no_generated_tool_is_shadowed_by_a_hand_written_one() {
+        crate::on_main_sized_stack(|| {
+            let generated = super::CliTools::from_owned_tree(crate::build_cli()).expect("tool tree");
+            let hand_written: Vec<&str> = super::NativeTool::ALL.iter().map(|t| t.name()).collect();
+            let shadowed: Vec<String> = generated
+                .tool_list()
+                .iter()
+                .filter_map(|t| t["name"].as_str())
+                .filter(|name| hand_written.contains(name))
+                .map(str::to_string)
+                .collect();
+            assert!(
+                shadowed.is_empty(),
+                "generated tools shadowed by hand-written ones: {shadowed:?}"
+            );
+        });
+    }
+
     /// The blurb is the one hand-written roster of the server's surface: every backticked word must
     /// be a tool, a `prefix*` family of tools, an argument some tool takes, or values of one of
     /// those arguments, all read from the live tool list. A renamed tool or flag fails here. (A
