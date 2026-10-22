@@ -20,7 +20,7 @@ use anyhow::{bail, Context, Result};
 use cv_core::distill::{distill_pack, findings, prepare_distill, DistillOptions, Distilled, PreparedDistillation};
 use cv_core::harness::claude::sidecar;
 use cv_core::ir::{Harness, Session, SessionRef};
-use cv_core::EmitOptions;
+use cv_core::{EmitOptions, SidechainOf};
 use serde_json::{json, Value};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -211,7 +211,7 @@ pub(crate) fn emit_to(
             // The emitter writes the sub-agent transcript in place: the root's id on every record,
             // the sidechain markers, no title record (`EmitOptions::sidechain_of`).
             let opts = EmitOptions {
-                sidechain_of: Some((root.id.clone(), agent.clone())),
+                sidechain_of: Some(SidechainOf { root: root.id.clone(), agent: agent.clone() }),
                 ..Default::default()
             };
             let res = emit_resumable(ir, &sub, &opts)?;

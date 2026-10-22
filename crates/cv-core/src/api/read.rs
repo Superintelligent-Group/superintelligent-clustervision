@@ -290,6 +290,13 @@ pub(super) fn head(cache: &Cache, adapter: &dyn Adapter, r: &SessionRef) -> Resu
         let shell = adapter.try_stream(r, &Demand::LEAN.with_spans(), &mut counter)?;
         let mut value = session_meta_json(&shell);
         let map = value.as_object_mut().expect("session metadata is an object");
+        // `title`/`cwd` are carried only when the transcript knows them: a null would overwrite
+        // the catalog row's discovery hint when this map merges into it (`session_head`).
+        for key in ["title", "cwd"] {
+            if map.get(key).is_some_and(Value::is_null) {
+                map.remove(key);
+            }
+        }
         map.insert("total".into(), json!(counter.total));
         map.insert("extra".into(), Value::Object(shell.extra));
         *reads = counter.reads;

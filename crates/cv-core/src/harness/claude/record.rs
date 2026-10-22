@@ -125,6 +125,7 @@ const SYSTEM_EXTRA: &[&str] = &[
     "direction",
 ];
 
+#[derive(Clone, Copy)]
 pub(crate) enum Demand {
     Message,
     Metadata,
@@ -1493,5 +1494,29 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The selection lists skip silently: a non-object line is `Ok(None)` under every demand (the
+    /// non-turn filter), and an object missing every selected key still parses — fields are
+    /// presence-selected, completeness is objecthood.
+    #[test]
+    fn selections_skip_non_objects_and_select_by_presence() -> Result<()> {
+        for demand in [
+            Demand::Message,
+            Demand::Metadata,
+            Demand::Facts,
+            Demand::Compact,
+            Demand::Tools,
+        ] {
+            for line in ["[1,2]", "\"scalar\"", "42", "null"] {
+                let value: serde_json::Value = serde_json::from_str(line)?;
+                let parsed = Head::parse(JsonView::from(&value), demand)?;
+                assert!(parsed.is_none(), "{line} parsed");
+            }
+            let value: serde_json::Value = serde_json::from_str(r#"{"unrelated":true}"#)?;
+            let head = Head::parse(JsonView::from(&value), demand)?;
+            assert!(head.is_some(), "object with none of the keys");
+        }
+        Ok(())
     }
 }

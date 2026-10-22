@@ -28,6 +28,15 @@ use fidelity::{diff_features, reparse_features, source_features, target_holds, F
 use fidelity::{diff_fidelity, reparse_emitted};
 pub use fidelity::{Divergence, FidelityReport};
 
+/// The root transcript a Claude sub-agent emission lives beside, and the agent id it is written as.
+#[derive(Debug, Clone)]
+pub struct SidechainOf {
+    /// The root session's id: every emitted record carries its `sessionId`.
+    pub root: String,
+    /// The emitted records' `agentId`, and the file's `agent-<id>.jsonl` name.
+    pub agent: String,
+}
+
 /// Knobs for emitting/porting a session.
 #[derive(Debug, Clone, Default)]
 pub struct EmitOptions {
@@ -42,15 +51,15 @@ pub struct EmitOptions {
     pub strict: bool,
     /// What to do with [`Block::Thinking`] on the way out. See [`ThinkingMode`].
     pub thinking: ThinkingMode,
-    /// Claude only: write the session as a **sub-agent transcript** of `(root session id, agent id)`
-    /// instead of a main-thread session. Every record carries the root's `sessionId`,
-    /// `isSidechain: true` and `agentId`; no `ai-title` is written; the file is
+    /// Claude only: write the session as a **sub-agent transcript** of a root instead of a
+    /// main-thread session. Every record carries the root's `sessionId`, `isSidechain: true` and
+    /// `agentId`; no `ai-title` is written; the file is
     /// `<out_dir>/agent-<agent id>.jsonl` (the caller passes the root's `subagents/` dir as
     /// `out_dir`, since a sub-agent lives beside its root, not under a project dir of its own) and
     /// `EmitResult::new_id` is the agent id, the handle `SendMessage` takes. `new_id` is ignored.
     /// With `None`, the emitter writes a main-thread session: `isSidechain` false where present,
     /// no `agentId` — a span lifted from a sub-agent transcript joins the main thread.
-    pub sidechain_of: Option<(String, String)>,
+    pub sidechain_of: Option<SidechainOf>,
     /// Replace a session file that already holds the emitted name, by atomic rename. Without it a
     /// taken name (a pinned `new_id` emitted twice) is refused with [`crate::publish::Exists`].
     pub force: bool,
@@ -237,10 +246,15 @@ fn emitter_for(target: Harness) -> Result<EmitFn, &'static str> {
 /// Emit `session` into `target`'s native format under `out_dir` (the target harness's storage root,
 /// or any directory for a dry run). Returns where it was written + how to resume it.
 pub fn emit(session: &Session, target: Harness, out_dir: &Path, opts: &EmitOptions) -> Result<EmitResult> {
-    let f = emitter_for(target).map_err(|why| anyhow::anyhow!("emit to {target} {why}"))?;
+    let f = registered_emitter(target)?;
     // Every registered writer consumes guarded fields and projects thinking per block.
     // Keep that contract at the writer boundary so direct and dispatched emission agree.
     f(session, out_dir, opts)
+}
+
+/// The target's registered writer, with the registry's refusal spelling.
+fn registered_emitter(target: Harness) -> Result<EmitFn> {
+    emitter_for(target).map_err(|why| anyhow::anyhow!("emit to {target} {why}"))
 }
 
 /// Rewrite every [`Block::Thinking`] in `session` as [`EmitOptions::thinking`] asks, for `target`.
@@ -454,6 +468,8 @@ pub fn emit_report(
     out_dir: &Path,
     opts: &EmitOptions,
 ) -> Result<(EmitResult, FidelityReport)> {
+    // Refuse an unregistered target before projecting the source: the projection materializes.
+    registered_emitter(target)?;
     let before = source_features(target, opts.thinking, session)?;
     // An emitter that owns a check on its output (Claude's three resumability rules) runs it on
     // the staged file, before publishing.
@@ -614,7 +630,6 @@ mod tests {
     use crate::ir::*;
     use anyhow::Context as _;
     use serde_json::json;
-    use uuid::Uuid;
 
     #[test]
     fn native_source_validation_checks_complete_record_without_lazy_blocks() -> Result<()> {
@@ -632,10 +647,18 @@ mod tests {
         Ok(())
     }
 
-    fn temp_dir() -> PathBuf {
-        let d = std::env::temp_dir().join(format!("cv-emit-{}", Uuid::new_v4()));
-        fs::create_dir_all(&d).unwrap();
-        d
+    /// A scratch dir removed when the test ends — failed or not — by the same [`World`](cv_testkit::World)
+    /// facility [`crate::test_world`] sits on. The environment stays untouched: these tests read none.
+    struct Scratch(cv_testkit::World);
+    impl std::ops::Deref for Scratch {
+        type Target = PathBuf;
+        fn deref(&self) -> &PathBuf {
+            &self.0.base
+        }
+    }
+
+    fn temp_dir() -> Scratch {
+        Scratch(cv_testkit::World::new("emit"))
     }
 
     fn sample_session(harness: Harness) -> Session {
@@ -823,7 +846,6 @@ mod tests {
             .is_err());
             assert_eq!(fs::read(path)?, bytes);
         }
-        fs::remove_dir_all(out)?;
         Ok(())
     }
 
@@ -958,7 +980,10 @@ mod tests {
         // Portable is a new wire policy; frozen legacy dispatch has no corresponding oracle.
         let mut frozen = crate::emit::frozen::Frozen::new("claude-checked-writer");
         for mode in [ThinkingMode::Native, ThinkingMode::Text, ThinkingMode::Drop] {
-            for sidechain in [None, Some(("root".to_owned(), "agent".to_owned()))] {
+            for sidechain in [
+                None,
+                Some(SidechainOf { root: "root".into(), agent: "agent".into() }),
+            ] {
                 let opts = EmitOptions {
                     new_id: Some("fixed-id".into()),
                     thinking: mode,
@@ -973,7 +998,7 @@ mod tests {
                         .join(format!("new-{}-{}", mode.as_str(), opts.sidechain_of.is_some())),
                     &opts,
                 )?;
-                verify_claude_resumable(&new.path, opts.sidechain_of.as_ref().map(|(_, a)| a.as_str()))?;
+                verify_claude_resumable(&new.path, opts.sidechain_of.as_ref().map(|of| of.agent.as_str()))?;
                 let bytes = fs::read(&new.path)?;
                 frozen.insert(
                     format!("{}-{}", mode.as_str(), opts.sidechain_of.is_some()),
@@ -1407,13 +1432,16 @@ mod tests {
             ("distill(lane).unwrap()", &lane_distilled),
         ];
         for (verb, session) in verbs {
-            for sidechain in [None, Some(("rootsess".to_string(), "afedcba9876543210".to_string()))] {
+            for sidechain in [
+                None,
+                Some(SidechainOf { root: "rootsess".into(), agent: "afedcba9876543210".into() }),
+            ] {
                 let out = temp_dir();
                 let opts = EmitOptions {
                     sidechain_of: sidechain.clone(),
                     ..Default::default()
                 };
-                let agent = sidechain.as_ref().map(|(_, a)| a.as_str());
+                let agent = sidechain.as_ref().map(|of| of.agent.as_str());
                 let (res, _) = emit_verified(session, Harness::Claude, &out, &opts)
                     .unwrap_or_else(|e| panic!("{verb} sidechain={agent:?}: {e:#}"));
                 verify_claude_resumable(&res.path, agent).unwrap_or_else(|e| panic!("{verb}: {e:#}"));
@@ -1449,7 +1477,6 @@ mod tests {
                         );
                     }
                 }
-                let _ = fs::remove_dir_all(&out);
             }
         }
 
@@ -1458,7 +1485,6 @@ mod tests {
             let out = temp_dir();
             let res = emit(s, Harness::Claude, &out, &EmitOptions::default()).unwrap();
             let text = fs::read_to_string(&res.path).unwrap();
-            let _ = fs::remove_dir_all(&out);
             text
         };
         let t = emit_main(&src);
@@ -2460,7 +2486,6 @@ mod tests {
             }
         }
 
-        fs::remove_dir_all(&out).ok();
     }
 
     // --------------------------------------------------------------------------------------------
@@ -3309,7 +3334,6 @@ mod tests {
                 first.path,
                 "{target}"
             );
-            std::fs::remove_dir_all(&out).ok();
         }
     }
 

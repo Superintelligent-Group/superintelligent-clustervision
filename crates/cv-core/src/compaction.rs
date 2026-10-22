@@ -80,7 +80,9 @@ pub struct CompactionSink {
     /// Resolver for a lazily-spanned summary body (set on the streaming path; `None` for the
     /// already-materialized in-session path). A compaction summary can exceed the inline threshold.
     resolver: Option<crate::lazy::Resolver>,
+    /// The scan's first failure, handed out once (`error`); `failed` keeps refusing after that.
     error: Option<anyhow::Error>,
+    failed: bool,
 }
 
 impl CompactionSink {
@@ -94,6 +96,7 @@ impl CompactionSink {
             unpaired: std::collections::BTreeSet::new(),
             resolver: None,
             error: None,
+            failed: false,
         }
     }
 
@@ -127,13 +130,19 @@ impl MessageSink for CompactionSink {
     }
 
     fn try_message(&mut self, m: Message) -> anyhow::Result<Flow> {
-        if self.error.is_none() {
+        if !self.failed {
             match self.observe(m) {
                 Ok(flow) => return Ok(flow),
-                Err(error) => self.error = Some(error),
+                Err(error) => {
+                    self.failed = true;
+                    self.error = Some(error);
+                }
             }
         }
-        Err(anyhow::anyhow!("{:#}", self.error.as_ref().unwrap()))
+        Err(self
+            .error
+            .take()
+            .unwrap_or_else(|| anyhow::anyhow!("compaction scan has already failed")))
     }
 }
 
@@ -279,8 +288,7 @@ pub fn pre_compaction_span(boundaries: &[Compaction], n: usize) -> Option<(usize
 /// the [`Compaction`] struct's own serialization plus `pre_compaction_span` under that one name,
 /// so the same fact never has two spellings depending on the door.
 pub fn row(boundaries: &[Compaction], n: usize) -> Value {
-    let Some(c) = boundaries.get(n) else { return Value::Null };
-    let mut v = serde_json::to_value(c).unwrap_or(Value::Null);
+    let mut v = serde_json::to_value(&boundaries[n]).expect("Compaction serializes to an object");
     if let Some(obj) = v.as_object_mut() {
         if let Some((s, e)) = pre_compaction_span(boundaries, n) {
             obj.insert("pre_compaction_span".into(), serde_json::json!([s, e]));
