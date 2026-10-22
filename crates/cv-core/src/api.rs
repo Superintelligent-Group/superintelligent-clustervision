@@ -377,10 +377,6 @@ fn session_head(harness: &str, id: &str) -> (u16, Value) {
         unreachable!("head metadata is an object")
     };
     for (key, value) in head {
-        // Parsed title/cwd replace catalog hints only when present, as before.
-        if matches!(key.as_str(), "title" | "cwd") && value.is_null() {
-            continue;
-        }
         map.insert(key, value);
     }
     ok(row)
@@ -551,11 +547,8 @@ fn subagent(harness: &str, parent: &str, agent: &str) -> (u16, Value) {
         Ok(forest) => forest,
         Err(error) => return err(500, &format!("forest read failed: {error:#}")),
     };
-    let Some(sr) = forest
-        .into_iter()
-        .find(|s| s.session.id == agent || s.agent_id() == agent)
-        .map(|s| s.session)
-    else {
+    // The select closure kept only members whose transcript id names `agent`, so take the first.
+    let Some(sr) = forest.into_iter().next().map(|s| s.session) else {
         return err(404, "subagent not found");
     };
     match complete_session_json(adapter.as_ref(), &sr) {
