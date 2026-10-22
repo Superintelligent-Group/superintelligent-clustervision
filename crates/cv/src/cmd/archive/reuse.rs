@@ -143,7 +143,8 @@ fn equal_artifact(path: &Path, len: u64, digest: &str) -> bool {
     compare().unwrap_or(false)
 }
 
-/// The catalog row of an archived session: `turns` of its `written` messages are turns.
+/// The catalog row of an archived session: `message_count` becomes its turns, `messages_written`
+/// the raw count of messages the pass wrote.
 fn entry(session: &Session, title: Option<String>, turns: usize, written: usize) -> CatalogEntry {
     CatalogEntry {
         session: SessionRef {
