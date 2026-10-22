@@ -213,42 +213,8 @@ fn generate_string_with_len(
 
 fn write_quoted_json(view: crate::json::JsonView<'_>, writer: &mut dyn std::io::Write) -> Result<usize> {
     use std::io::Write;
-    // Input is write_canonical output: control bytes are already escaped. Only quotes and
-    // backslashes need another escape layer to embed that JSON in a JSON string.
-    struct Escaped<'a> {
-        writer: &'a mut dyn Write,
-        scratch: Vec<u8>,
-        len: usize,
-    }
-    impl Write for Escaped<'_> {
-        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-            self.len = self
-                .len
-                .checked_add(bytes.len())
-                .ok_or_else(|| std::io::Error::other("text length overflow"))?;
-            for chunk in bytes.chunks(64 * 1024) {
-                self.scratch.clear();
-                self.scratch.reserve(chunk.len().saturating_mul(2));
-                for &byte in chunk {
-                    if matches!(byte, b'"' | b'\\') {
-                        self.scratch.push(b'\\');
-                    }
-                    self.scratch.push(byte);
-                }
-                self.writer.write_all(&self.scratch)?;
-            }
-            Ok(bytes.len())
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            self.writer.flush()
-        }
-    }
     let mut buffered = std::io::BufWriter::with_capacity(64 * 1024, writer);
-    let mut escaped = Escaped {
-        writer: &mut buffered,
-        scratch: Vec::new(),
-        len: 0,
-    };
+    let mut escaped = super::bytes::ScratchWriter::new(&mut buffered, true);
     view.write_canonical(&mut escaped)?;
     let len = escaped.len;
     buffered.flush()?;
