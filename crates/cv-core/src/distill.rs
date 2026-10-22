@@ -227,7 +227,9 @@ type Counts = HashMap<String, Mentions>;
 #[derive(Default)]
 struct Facts {
     commits: Vec<(usize, String, String, String)>, // idx, branch, sha, subject
-    branches: Counts,                              // name, mentions and first-seen order
+    /// The shas in `commits`: a capture is checked against a set, not a scan of every commit so far.
+    commit_shas: HashSet<String>,
+    branches: Counts, // name, mentions and first-seen order
     hosts: Counts,
     paths: Counts,
     gates: Vec<(usize, String, String)>,  // idx, label, verdict
@@ -1150,7 +1152,7 @@ fn scan_result_facts(
         let (b, sha, subj) = (c[1].to_string(), c[2].to_string(), c[3].trim().to_string());
         // `git log --oneline`-style listings never use the bracketed form; a bracketed line is a
         // commit (or cherry-pick/amend) the agent made.
-        if !f.commits.iter().any(|x| x.2 == sha) {
+        if f.commit_shas.insert(sha.clone()) {
             bump(&mut f.branches, &b);
             commit_outcome.get_or_insert_with(|| format!("⊕ [{b} {sha}] {}", truncate(subj.trim(), 90)));
             f.tips.push((i, b.clone(), sha.clone()));
