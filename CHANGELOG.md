@@ -10,6 +10,8 @@
 
 **Listing and counts.**
 - A round-trip read (`Demand::COMPLETE`) never records counts: Hermes's rewound and superseded rows no longer inflate a session's count.
+- Hermes scans delegate runs once per database state instead of once per parent during subagent indexing.
+
 - Search staleness counts the preferred copy of each session, avoiding false drift from older duplicates.
 
 ## 0.18.0-rc.1 — 2026-10-22 — the release an agent can trust
