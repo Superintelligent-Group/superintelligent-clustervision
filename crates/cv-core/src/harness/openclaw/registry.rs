@@ -29,11 +29,14 @@ use anyhow::Result;
 use serde_json::Value;
 use std::path::Path;
 
+/// The state dir's position above either store layout: self, `sessions|agent`, `<agent>`, `agents`,
+/// then `<state>` — so both `<state>/agents/<agent>/sessions/<sid>.jsonl` and
+/// `<state>/agents/<agent>/agent/<db>.sqlite` keep it at the same ancestor index.
+const STATE_ANCESTOR: usize = 4;
+
 /// Every registry row that belongs to `r`.
 pub(super) fn affordances(r: &SessionRef) -> Result<Vec<Affordance>> {
-    // `<state>/agents/<agent>/sessions/<sid>.jsonl` and `<state>/agents/<agent>/agent/<db>.sqlite`
-    // sit at the same depth.
-    let Some(state) = r.path.ancestors().nth(4) else {
+    let Some(state) = r.path.ancestors().nth(STATE_ANCESTOR) else {
         return Ok(Vec::new());
     };
     let Some(key) = session_key(r)? else {
@@ -119,10 +122,8 @@ fn jsonl_runs(state: &Path, key: &str) -> Result<Vec<Run>> {
     let mut out: Vec<Run> = runs
         .into_iter()
         .filter_map(|(_, p)| {
-            ["requesterSessionKey", "controllerSessionKey"]
-                .into_iter()
-                .any(|field| p.get(field).and_then(Value::as_str) == Some(key))
-                .then(|| (run_keys(&p), p))
+            let keys = run_keys(&p);
+            keys.iter().any(|by| by == key).then(|| (keys, p))
         })
         .collect();
     out.sort_by_key(|(_, p)| p.get("createdAt").and_then(Value::as_i64).unwrap_or(0));
@@ -185,8 +186,9 @@ fn job_belongs(job: &Value, key: &str) -> bool {
         .iter()
         .any(|p| str_at(job, p) == Some(key));
     let id = str_at(job, "/id").unwrap_or("");
-    let mut parts = key.split(':');
-    let (agent, kind, rest) = (parts.nth(1), parts.next(), parts.next());
+    // `agent:<agentId>:<kind>:<…>`: the agent, the kind, and the first field after it.
+    let fields: Vec<&str> = key.split(':').collect();
+    let (agent, kind, rest) = (fields.get(1).copied(), fields.get(2).copied(), fields.get(3).copied());
     let run = kind == Some("cron") && !id.is_empty() && rest == Some(id);
     let main = str_at(job, "/sessionTarget") == Some("main")
         && kind == Some("main")
