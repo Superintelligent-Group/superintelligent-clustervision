@@ -265,6 +265,34 @@ pub fn discover_in(roots: &[PathBuf], harness: Harness) -> crate::Discovered {
     out
 }
 
+/// Whether one history item is a turn ([`Message::is_turn`]) as [`record`] reads it: a user or
+/// assistant item that is not a condense summary (`isSummary`), and for a user item, not one
+/// whose content is only `tool_result` blocks (a Tool turn). Reads block types, never bodies.
+fn is_turn(role: &str, record: &Fields<'_>) -> Result<bool> {
+    if !matches!(role, "user" | "assistant")
+        || record.get("isSummary").map(|v| v.as_bool()).transpose()?.flatten() == Some(true)
+    {
+        return Ok(false);
+    }
+    if role == "assistant" {
+        return Ok(true);
+    }
+    // `reasoning` is Cline's own thinking part; every other part is an Anthropic block.
+    let only_results = anthropic::only_tool_results(record.get("content"), |part| {
+        let reasoning = Fields::parse(part, &["type"])?
+            .map(|f| f.string("type"))
+            .transpose()?
+            .flatten()
+            .as_deref()
+            == Some("reasoning");
+        match reasoning {
+            true => Ok(Some(false)),
+            false => anthropic::block_kind(part, &anthropic::ANTHROPIC),
+        }
+    })?;
+    Ok(!only_results)
+}
+
 /// Cheap metadata-only scan of one task dir into a `SessionRef`.
 fn scan(dir: &Path, id: &str, harness: Harness) -> Result<SessionRef> {
     let history = dir.join("api_conversation_history.json");
@@ -276,11 +304,11 @@ fn scan(dir: &Path, id: &str, harness: Harness) -> Result<SessionRef> {
         let mut message_count = 0;
         for view in messages {
             let view = view?;
-            let Some(record) = Fields::parse(view, &["role", "content"])? else {
+            let Some(record) = Fields::parse(view, &["role", "content", "isSummary"])? else {
                 continue;
             };
             let role = record.string("role")?.unwrap_or_default();
-            if matches!(role.as_str(), "user" | "assistant") {
+            if is_turn(&role, &record)? {
                 message_count += 1;
             }
             if role == "user" && (cwd.is_none() || title.is_none()) {
@@ -1201,7 +1229,8 @@ mod tests {
         let r = scan(&dir, "1717000000000", Harness::Cline).unwrap();
         assert_eq!(r.title.as_deref(), Some("late selected title"));
         assert_eq!(r.cwd, Some(PathBuf::from("/selected")));
-        assert_eq!(r.message_count, Some(4));
+        // The prompt and the reply: the tool results, the system turn and the summary are not turns.
+        assert_eq!(r.message_count, Some(2));
         fs::write(&history, "[{\"role\":\"user\",\"content\":\"ok\"},]").unwrap();
         assert!(parse_task_dir(&dir, "1717000000000", Harness::Cline)
             .unwrap()

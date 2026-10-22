@@ -150,6 +150,33 @@ fn mtime(path: &Path) -> Option<DateTime<Utc>> {
     fs::metadata(path).ok()?.modified().ok().map(DateTime::<Utc>::from)
 }
 
+/// Whether a `messages[]` entry is a turn ([`Message::is_turn`]) as [`message_with_blocks`] kinds
+/// it: an assistant reply that is not a display-only error, or a user entry that does not hold
+/// only tool results. Reads `role`, `metadata` and block types, never bodies.
+fn is_turn(entry: &Fields<'_>) -> Result<bool> {
+    Ok(match entry.string("role")?.as_deref() {
+        Some("assistant") => {
+            let meta = entry
+                .get("metadata")
+                .map(|m| Fields::parse(m, &["displayOnly", "displayRole"]))
+                .transpose()?
+                .flatten();
+            let display_only = meta
+                .as_ref()
+                .and_then(|m| m.get("displayOnly"))
+                .map(|v| v.as_bool())
+                .transpose()?
+                .flatten();
+            let display_role = meta.as_ref().map(|m| m.string("displayRole")).transpose()?.flatten();
+            !(display_only == Some(true) && display_role.as_deref() == Some("error"))
+        }
+        Some("user") => !anthropic::only_tool_results(entry.get("content"), |part| {
+            anthropic::block_kind(part, &anthropic::ANTHROPIC)
+        })?,
+        _ => false,
+    })
+}
+
 fn scan(path: &Path, sid: &str) -> Result<SessionRef> {
     JsonSource::capture(path)?.read(ReadInput::Document, Validation::Value, |view| {
         let record = Fields::parse(view, &["messages", "updated_at"])?.context("SDK document object")?;
@@ -181,10 +208,10 @@ fn scan(path: &Path, sid: &str) -> Result<SessionRef> {
         let mut first_user = false;
         let mut count = 0;
         for message in messages.array()?.context("SDK messages array")? {
-            count += 1;
             let message = message?;
             // A message entry, not the document-level `record` above.
-            if let Some(entry) = Fields::parse(message, &["ts", "role", "content"])? {
+            if let Some(entry) = Fields::parse(message, &["ts", "role", "content", "metadata"])? {
+                count += usize::from(is_turn(&entry)?);
                 if first && r.created_at.is_none() {
                     r.created_at = entry.value("ts")?.and_then(|v| v.as_i64()).and_then(ts_from_epoch);
                 }
