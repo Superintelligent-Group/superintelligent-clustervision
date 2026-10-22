@@ -4696,6 +4696,100 @@ mod tests {
         assert_eq!(refresh(false).changed, 0);
     }
 
+    /// Grok appends to `updates.jsonl` on every turn: that growth resumes the mark (with the
+    /// enrichment of the tools the turn added), keeps a whole sweep's docs, events and counts,
+    /// and declines when it revises a tool the prefix emitted; growth alone rereads.
+    #[test]
+    fn grok_turns_resume_across_update_growth_and_decline_on_a_revised_tool() {
+        use std::io::Write as _;
+        let _home = IsolatedHome::new();
+        let (dir, sdir) = (tmpdir(), tmpdir());
+        let session = sdir.join("group/grok-session");
+        std::fs::create_dir_all(&session).unwrap();
+        std::fs::write(
+            session.join("summary.json"),
+            serde_json::json!({"info":{"id":"grok-session","cwd":"/work"},"created_at":"2026-10-01T00:00:00Z"})
+                .to_string(),
+        )
+        .unwrap();
+        let (history, updates) = (session.join("chat_history.jsonl"), session.join("updates.jsonl"));
+        let append = |path: &Path, lines: &[serde_json::Value]| {
+            let mut file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+                .unwrap();
+            for line in lines {
+                writeln!(file, "{line}").unwrap();
+            }
+        };
+        let user = |text: &str| serde_json::json!({"type":"user","content":[{"type":"text","text":text}]});
+        let call = |id: &str| {
+            serde_json::json!({"type":"assistant","content":"","tool_calls":[{"id":id,"name":"read_file",
+                "arguments":"{\"target_file\":\"a.rs\"}"}]})
+        };
+        let result = |id: &str| serde_json::json!({"type":"tool_result","tool_call_id":id,"content":"zanzibar body"});
+        let update = |id: &str, title: &str, status: Option<&str>| {
+            let mut u = serde_json::json!({"sessionUpdate":"tool_call_update","toolCallId":id,"title":title});
+            if let Some(status) = status {
+                u["status"] = status.into();
+            }
+            serde_json::json!({"method":"session/update","params":{"update":u}})
+        };
+        let chunk =
+            serde_json::json!({"method":"session/update","params":{"update":{"sessionUpdate":"agent_message_chunk"}}});
+        let hook = serde_json::json!({"method":"_x.ai/session/update","params":{"update":{"sessionUpdate":"hook_execution",
+            "event_name":"stop","runs":[{"name":"check","status":{"status":"success"}}]}}});
+        append(&history, &[user("zanzibar first"), call("c1"), result("c1")]);
+        append(
+            &updates,
+            &[
+                chunk.clone(),
+                update("c1", "Read a", None),
+                update("c1", "Read a", Some("completed")),
+            ],
+        );
+        let r = cv_core::SessionRef::new("grok-session", cv_core::Harness::Grok, &*session);
+        let refresh = |rebuild| sweep(&dir, vec![r.clone()], rebuild, false).unwrap();
+        let exact = || {
+            let counts = cv_core::catalog::AffordanceTable::load().counts(&r).unwrap();
+            let before = observe(&dir, std::slice::from_ref(&r), &["zanzibar".into()]);
+            let events = format!("{:?}", cv_core::events::events_for("grok", &r.id, None).unwrap());
+            assert_eq!(refresh(true).resumed, 0);
+            assert_eq!(counts, cv_core::catalog::AffordanceTable::load().counts(&r).unwrap());
+            assert_eq!(before, observe(&dir, std::slice::from_ref(&r), &["zanzibar".into()]));
+            assert_eq!(
+                events,
+                format!("{:?}", cv_core::events::events_for("grok", &r.id, None).unwrap())
+            );
+        };
+        assert_eq!(refresh(false).changed, 1);
+        assert_eq!(refresh(false).changed, 0);
+        // A turn with a new tool, streamed chunks and a hook run: resumed.
+        append(&updates, &[chunk.clone(), update("c2", "Read b", None), hook.clone()]);
+        append(&history, &[user("zanzibar second"), call("c2")]);
+        let turn = refresh(false);
+        assert_eq!((turn.changed, turn.resumed), (1, 1));
+        exact();
+        // The open call completes (its result follows): only the result renders the status.
+        append(&updates, &[update("c2", "Read b", Some("failed"))]);
+        append(&history, &[result("c2")]);
+        let completed = refresh(false);
+        assert_eq!((completed.changed, completed.resumed), (1, 1));
+        exact();
+        // Growth of the updates alone admits nothing: the hook run is counted.
+        append(&updates, &[hook]);
+        let grown = refresh(false);
+        assert_eq!((grown.changed, grown.resumed), (1, 0));
+        assert_eq!(refresh(false).changed, 0);
+        // An update that renames a tool the prefix rendered declines the mark.
+        append(&updates, &[update("c1", "Read a again", Some("completed"))]);
+        append(&history, &[user("zanzibar third")]);
+        let revised = refresh(false);
+        assert_eq!((revised.changed, revised.resumed), (1, 0));
+        exact();
+    }
+
     #[test]
     fn conditional_fork_read_sets_track_new_and_rewritten_siblings() {
         let _home = IsolatedHome::new();

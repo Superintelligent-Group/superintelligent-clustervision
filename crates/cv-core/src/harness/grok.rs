@@ -87,13 +87,15 @@ impl Adapter for Grok {
             [
                 "summary.json",
                 "chat_history.jsonl",
-                "updates.jsonl",
                 "system_prompt.txt",
                 "plan.json",
                 "rewind_points.jsonl",
             ]
             .map(|name| r.path.join(name)),
         );
+        // Every turn appends to `updates.jsonl`: its growth resumes the mark, and the resumed read
+        // declines when the growth revises a tool the prefix emitted ([`HistoryCheckpoint`]).
+        deps.resumable.push(r.path.join("updates.jsonl"));
         // Only subagents consult sibling parent metadata. Ordinary sessions never scan a cwd
         // group's siblings merely to establish freshness. Retain the before-read metadata:
         // interpreting kind must not bless a later version of the summary.
@@ -120,11 +122,22 @@ impl Adapter for Grok {
             .inspect_err(note)
             .ok()?;
         if subagent {
+            // Its parent's record of it ([`parents`]), once a sibling holds one: a new session in
+            // the group changes nothing it reads. Until then, the group and every sibling's
+            // would-be record.
             let group = r.path.parent()?;
-            deps.files.push(group.to_path_buf());
-            for sibling in probe.list(group)?.iter() {
-                deps.files.push(sibling.join("subagents").join(&r.id).join("meta.json"));
+            let parents = parents(group, &r.id);
+            if parents.is_empty() {
+                deps.files.push(group.to_path_buf());
+                for sibling in probe.list(group)?.iter() {
+                    deps.files.push(sibling.join("subagents").join(&r.id).join("meta.json"));
+                }
             }
+            deps.files.extend(
+                parents
+                    .iter()
+                    .map(|sibling| sibling.join("subagents").join(&r.id).join("meta.json")),
+            );
         }
         Some(())
     }
@@ -185,20 +198,30 @@ impl Adapter for Grok {
     ) -> Result<Option<Session>> {
         crate::stream::checked(sink, |sink| {
             let wire = self.resume_source(r);
+            let mut tools = Tools::default();
+            let mut mark = None;
             if let Start::Checkpoint(cp) = from {
                 match jsonl::restore::<HistoryCheckpoint>(cp) {
-                    Some(state) if state.wire == wire => {}
+                    Some(state) if state.wire == wire => {
+                        mark = state.updates;
+                        tools = state.tools;
+                    }
                     _ => return Ok(None),
                 }
             }
+            let (s, updates) = session_header(r, mark);
+            if mark.is_some() && !tools.unrevised(&updates) {
+                return Ok(None);
+            }
             // Spawn turns, sub-agent returns and deferred tool calls, typed (`crate::affordance`).
             let mut spawns = crate::affordance::AffordanceSink::new(Harness::Grok, sink);
-            let (s, enrich) = session_header(r);
             spawns.meta(&s);
             let read = jsonl::Read::open(&wire).with_context(|| format!("reading {}", wire.display()))?;
             let codec = History {
                 s,
-                enrich: &enrich,
+                enrich: &updates.tools,
+                updates: updates.settled,
+                tools,
                 spans: opts.spans.then_some(read.source()),
                 wire: &wire,
                 pending: None,
@@ -347,7 +370,7 @@ fn hook_runs(dir: &Path) -> Result<Vec<crate::affordance::Affordance>> {
 
 /// Static metadata/enrichment shared by whole and suffix passes. Mutable sidecars are verified
 /// by the consumer's source baseline; an enrichment edit can revise an earlier visible tool.
-fn session_header(r: &SessionRef) -> (Session, HashMap<String, ToolEnrich>) {
+fn session_header(r: &SessionRef, mark: Option<u64>) -> (Session, Updates) {
     // r.path is the session directory. `summary.json` (small) carries all session-level
     // metadata; the transcript is `chat_history.jsonl`, one record per line — streamed.
     let dir = &r.path;
@@ -376,7 +399,7 @@ fn session_header(r: &SessionRef) -> (Session, HashMap<String, ToolEnrich>) {
     };
 
     // Sidecar enrichment: tool_call / tool_call_update entries from the ACP update stream.
-    let enrich = read_update_enrichment(dir);
+    let enrich = read_updates(dir, mark);
 
     // Subagent / agent-name facts + lineage from summary.json (and a sub-agent's parent from the
     // parent's `subagents/<id>/meta.json`).
@@ -394,9 +417,80 @@ fn session_header(r: &SessionRef) -> (Session, HashMap<String, ToolEnrich>) {
     (s, enrich)
 }
 
+/// A mark on `chat_history.jsonl` and on the `updates.jsonl` the read was enriched from. The
+/// updates file is a resumable dependency ([`crate::source::Dependencies::resumable`]): it grows
+/// every turn, and a resumed read declines when its growth since `updates` revises a tool the
+/// prefix emitted ([`Tools::unrevised`]). Marks without `updates` (taken while it was an exact
+/// dependency) resume as before.
 #[derive(serde::Serialize, serde::Deserialize)]
-struct HistoryCheckpoint<P = PathBuf> {
+struct HistoryCheckpoint<P = PathBuf, T = Tools> {
     wire: P,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    updates: Option<u64>,
+    #[serde(default)]
+    tools: T,
+}
+
+/// The prefix's tool calls whose rendering growth of `updates.jsonl` could still revise: `open`,
+/// emitted as a call whose result the prefix does not hold (only the call's title, kind and
+/// locations were rendered); `unenriched`, emitted with no update at all. Every other tool the
+/// prefix emitted had an update before the mark.
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+struct Tools {
+    #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
+    open: std::collections::BTreeSet<String>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
+    unenriched: std::collections::BTreeSet<String>,
+}
+
+impl Tools {
+    /// Note the tools of a message the read emits, enriched from `enrich`.
+    fn emitted(&mut self, m: &Message, enrich: &HashMap<String, ToolEnrich>) {
+        for block in &m.content {
+            let (id, call) = match block {
+                Block::ToolUse { id, .. } => (id, true),
+                Block::ToolResult { tool_use_id, .. } => (tool_use_id, false),
+                _ => continue,
+            };
+            if call {
+                self.open.insert(id.clone());
+            } else {
+                self.open.remove(id);
+            }
+            if !enrich.contains_key(id) {
+                self.unenriched.insert(id.clone());
+            }
+        }
+    }
+
+    /// Whether every tool the prefix emitted renders as it did: no update since the mark changed
+    /// a tool the prefix holds (by its call alone, only what the call rendered). A tool first
+    /// updated after the mark that the prefix never emitted is new; one updated before it may
+    /// be in the prefix, and its change declines.
+    fn unrevised(&self, updates: &Updates) -> bool {
+        let Some(then) = &updates.at_mark else {
+            return false;
+        };
+        fn call(e: Option<&ToolEnrich>) -> (Option<&String>, Option<&String>, &[String]) {
+            e.map_or((None, None, &[]), |e| (e.title.as_ref(), e.kind.as_ref(), &e.locations))
+        }
+        let changed = updates
+            .tools
+            .keys()
+            .chain(then.keys())
+            .filter(|id| updates.tools.get(*id) != then.get(*id));
+        for id in changed {
+            let (old, new) = (then.get(id), updates.tools.get(id));
+            if self.open.contains(id) {
+                if call(old) != call(new) {
+                    return false;
+                }
+            } else if old.is_some() || self.unenriched.contains(id) {
+                return false;
+            }
+        }
+        true
+    }
 }
 
 /// The Grok record codec over `chat_history.jsonl`. A standalone `reasoning` record is held and
@@ -405,6 +499,9 @@ struct HistoryCheckpoint<P = PathBuf> {
 struct History<'r> {
     s: Session,
     enrich: &'r HashMap<String, ToolEnrich>,
+    /// Where `updates.jsonl`'s complete lines ended when `enrich` was read.
+    updates: u64,
+    tools: Tools,
     spans: Option<&'r JsonSource>,
     wire: &'r Path,
     pending: Option<Message>,
@@ -417,6 +514,7 @@ impl jsonl::Codec for History<'_> {
         let Some(mut m) = message else {
             return Ok(Flow::Continue);
         };
+        self.tools.emitted(&m, self.enrich);
         if is_reasoning {
             match self.pending.as_mut() {
                 Some(p) => p.content.append(&mut m.content),
@@ -450,7 +548,11 @@ impl jsonl::Codec for History<'_> {
     }
 
     fn state(&self) -> impl serde::Serialize + '_ {
-        HistoryCheckpoint { wire: self.wire }
+        HistoryCheckpoint {
+            wire: self.wire,
+            updates: Some(self.updates),
+            tools: &self.tools,
+        }
     }
 
     fn finish(self, stopped: bool, sink: &mut dyn MessageSink) -> Result<Session> {
@@ -499,9 +601,8 @@ fn grok_lineage(s: &mut Session, summary: &Value, dir: &Path) {
         return;
     }
     let Some(group) = dir.parent() else { return };
-    let Ok(rd) = fs::read_dir(group) else { return };
-    for e in rd.flatten() {
-        let meta = e.path().join("subagents").join(&s.id).join("meta.json");
+    for sibling in parents(group, &s.id).iter() {
+        let meta = sibling.join("subagents").join(&s.id).join("meta.json");
         let Some(v) = fs::read_to_string(&meta)
             .ok()
             .and_then(|t| serde_json::from_str::<Value>(&t).ok())
@@ -512,10 +613,52 @@ fn grok_lineage(s: &mut Session, summary: &Value, dir: &Path) {
             .get("parent_session_id")
             .and_then(Value::as_str)
             .map(str::to_string)
-            .or_else(|| e.file_name().to_str().map(str::to_string));
+            .or_else(|| sibling.file_name().and_then(|n| n.to_str()).map(str::to_string));
         s.lineage.spawned_by_tool_use = v.get("tool_call_id").and_then(Value::as_str).map(str::to_string);
         return;
     }
+}
+
+/// The sessions of cwd group `group` that record sub-agent `child` (`<sibling>/subagents/<child>/`),
+/// in the group's listing order: where its parent's `meta.json` can be. One listing of the group
+/// and of each sibling's `subagents/` serves every sub-agent of the group, kept while the group
+/// lists the same sessions; a child it does not know lists them again (a parent records a child
+/// after the group was listed).
+fn parents(group: &Path, child: &str) -> std::sync::Arc<Vec<PathBuf>> {
+    type Index = HashMap<String, std::sync::Arc<Vec<PathBuf>>>;
+    type Groups = std::sync::Mutex<HashMap<PathBuf, (crate::source::FileId, std::sync::Arc<Index>)>>;
+    static GROUPS: std::sync::LazyLock<Groups> = std::sync::LazyLock::new(Default::default);
+    let lock = || GROUPS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let Some(state) = crate::source::FileId::at(group) else {
+        return Default::default();
+    };
+    let known = lock()
+        .get(group)
+        .filter(|(at, _)| *at == state)
+        .and_then(|(_, index)| index.get(child).cloned());
+    if let Some(parents) = known {
+        return parents;
+    }
+    let mut index: HashMap<String, Vec<PathBuf>> = HashMap::new();
+    if let Ok(siblings) = fs::read_dir(group) {
+        for sibling in siblings.flatten() {
+            let Ok(children) = fs::read_dir(sibling.path().join("subagents")) else {
+                continue;
+            };
+            for c in children.flatten() {
+                if let Ok(name) = c.file_name().into_string() {
+                    index.entry(name).or_default().push(sibling.path());
+                }
+            }
+        }
+    }
+    let index: Index = index.into_iter().map(|(c, p)| (c, std::sync::Arc::new(p))).collect();
+    let parents = index.get(child).cloned().unwrap_or_default();
+    // Kept only when the group did not change while it was listed.
+    if crate::source::FileId::at(group) == Some(state) {
+        lock().insert(group.to_path_buf(), (state, std::sync::Arc::new(index)));
+    }
+    parents
 }
 
 fn grok_git(summary: &Value) -> Option<GitInfo> {
@@ -537,7 +680,7 @@ fn grok_git(summary: &Value) -> Option<GitInfo> {
 }
 
 /// Enrichment for one tool call, mined from `updates.jsonl`.
-#[derive(Default, Clone)]
+#[derive(Default, Clone, PartialEq)]
 struct ToolEnrich {
     /// Human-friendly title, e.g. `List \`.\`` (last `tool_call_update.title` wins).
     title: Option<String>,
@@ -555,58 +698,109 @@ impl ToolEnrich {
     }
 }
 
+/// `updates.jsonl` read for a pass: its per-`toolCallId` enrichment, where its complete lines
+/// end, and (asked with a mark) the enrichment its records before the mark gave.
+#[derive(Default)]
+struct Updates {
+    tools: HashMap<String, ToolEnrich>,
+    /// `None` when no mark was asked, or the read failed (no resume is certified then).
+    at_mark: Option<HashMap<String, ToolEnrich>>,
+    settled: u64,
+}
+
 /// Parse `updates.jsonl` into per-`toolCallId` enrichment. Tolerant: missing/empty/malformed file
 /// yields an empty map and zero behavior change.
+#[cfg(test)]
 fn read_update_enrichment(dir: &Path) -> HashMap<String, ToolEnrich> {
+    read_updates(dir, None).tools
+}
+
+/// [`Updates`] of `dir`, the enrichment as of `mark` too when given.
+fn read_updates(dir: &Path, mark: Option<u64>) -> Updates {
+    let path = dir.join("updates.jsonl");
+    let mut out = Updates::default();
+    let read = (|| -> Result<()> {
+        let read = jsonl::Read::open(&path)?;
+        let mut step = enrichment_step();
+        read.lines(0, |line| {
+            if out.at_mark.is_none() && mark.is_some_and(|mark| line.at >= mark) {
+                out.at_mark = Some(out.tools.clone());
+            }
+            if line.complete {
+                out.settled = line.end;
+            }
+            if let Some(view) = line.view {
+                step(&mut out.tools, view)?;
+            }
+            Ok(Flow::Continue)
+        })
+    })();
+    match read {
+        Ok(()) => {
+            if mark.is_some() && out.at_mark.is_none() {
+                out.at_mark = Some(out.tools.clone());
+            }
+        }
+        // A missing file is the empty enrichment, as of any mark; any other failure is the
+        // empty enrichment too, but certifies no resume.
+        Err(error) => {
+            let missing = super::is_not_found(&error);
+            out = Updates::default();
+            if missing && mark.is_some() {
+                out.at_mark = Some(HashMap::new());
+            }
+        }
+    }
+    out
+}
+
+/// The per-record fold of [`read_updates`].
+fn enrichment_step() -> impl FnMut(&mut HashMap<String, ToolEnrich>, JsonView<'_>) -> Result<()> {
     // Preserve first-seen order in the public vector without repeatedly scanning its prefix.
     // Membership belongs to this one read, not the retained enrichment or replay state.
     let mut seen_locations: HashMap<String, std::collections::HashSet<String>> = HashMap::new();
-    reduce_jsonl(
-        &dir.join("updates.jsonl"),
-        |map: &mut HashMap<String, ToolEnrich>, v| {
-            let Some(u) = v.get("params")?.map(|p| p.get("update")).transpose()?.flatten() else {
-                return Ok(());
-            };
-            let Some(u) = Fields::parse(
-                u,
-                &["sessionUpdate", "toolCallId", "title", "kind", "locations", "status"],
-            )?
-            else {
-                return Ok(());
-            };
-            let su = u.string("sessionUpdate")?;
-            if !matches!(su.as_deref(), Some("tool_call") | Some("tool_call_update")) {
-                return Ok(());
+    move |map: &mut HashMap<String, ToolEnrich>, v| {
+        let Some(u) = v.get("params")?.map(|p| p.get("update")).transpose()?.flatten() else {
+            return Ok(());
+        };
+        let Some(u) = Fields::parse(
+            u,
+            &["sessionUpdate", "toolCallId", "title", "kind", "locations", "status"],
+        )?
+        else {
+            return Ok(());
+        };
+        let su = u.string("sessionUpdate")?;
+        if !matches!(su.as_deref(), Some("tool_call") | Some("tool_call_update")) {
+            return Ok(());
+        }
+        let Some(id) = u.string("toolCallId")? else {
+            return Ok(());
+        };
+        let seen = seen_locations.entry(id.clone()).or_default();
+        let e = map.entry(id).or_default();
+        if let Some(title) = u.string("title")? {
+            if su.as_deref() == Some("tool_call_update") || e.title.is_none() {
+                e.title = Some(title)
             }
-            let Some(id) = u.string("toolCallId")? else {
-                return Ok(());
-            };
-            let seen = seen_locations.entry(id.clone()).or_default();
-            let e = map.entry(id).or_default();
-            if let Some(title) = u.string("title")? {
-                if su.as_deref() == Some("tool_call_update") || e.title.is_none() {
-                    e.title = Some(title)
-                }
-            }
-            if let Some(kind) = u.string("kind")? {
-                e.kind = Some(kind)
-            }
-            if let Some(locations) = u.get("locations").map(|v| v.array()).transpose()?.flatten() {
-                for location in locations {
-                    if let Some(path) = string(Some(location?), "path")? {
-                        if seen.insert(path.clone()) {
-                            e.locations.push(path)
-                        }
+        }
+        if let Some(kind) = u.string("kind")? {
+            e.kind = Some(kind)
+        }
+        if let Some(locations) = u.get("locations").map(|v| v.array()).transpose()?.flatten() {
+            for location in locations {
+                if let Some(path) = string(Some(location?), "path")? {
+                    if seen.insert(path.clone()) {
+                        e.locations.push(path)
                     }
                 }
             }
-            if let Some(status) = u.string("status")? {
-                e.status = Some(status)
-            }
-            Ok(())
-        },
-    )
-    .unwrap_or_default()
+        }
+        if let Some(status) = u.string("status")? {
+            e.status = Some(status)
+        }
+        Ok(())
+    }
 }
 
 /// `summary.json`: the small session-level metadata sidecar. Missing or malformed is `Null` for
@@ -1619,6 +1813,61 @@ mod tests {
             })
             .collect();
         assert_eq!(kinds, vec![vec!["text"], vec!["thinking", "text"], vec!["thinking"]]);
+        let _ = fs::remove_dir_all(&group);
+    }
+
+    /// A sub-agent is certified by its own files and its parent's record of it: a new session in
+    /// its cwd group leaves it fresh; a sub-agent whose parent has not recorded it yet notices
+    /// the record appearing.
+    #[test]
+    fn a_new_session_in_the_group_leaves_a_sub_agent_certified() {
+        let group = tempdir_with("x", "");
+        let session = |id: &str, kind: &str| {
+            let dir = group.join(id);
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(
+                dir.join("summary.json"),
+                format!(r#"{{"info":{{"id":"{id}"}},"session_kind":"{kind}"}}"#),
+            )
+            .unwrap();
+            fs::write(
+                dir.join("chat_history.jsonl"),
+                "{\"type\":\"user\",\"content\":\"hi\"}\n",
+            )
+            .unwrap();
+            SessionRef::new(id, Harness::Grok, &dir)
+        };
+        for i in 0..8 {
+            session(&format!("s{i}"), "headless");
+        }
+        session("p1", "headless");
+        let meta = group.join("p1/subagents/c1/meta.json");
+        fs::create_dir_all(meta.parent().unwrap()).unwrap();
+        fs::write(&meta, r#"{"parent_session_id":"p1"}"#).unwrap();
+        let child = session("c1", "subagent");
+        let orphan = session("c2", "subagent");
+        // A pass's baseline (its inventory and an empty read set) against the store now.
+        let snapshot = |r: &SessionRef| Probe::default().snapshot(r).with_reads(&Default::default());
+        let (child_then, orphan_then) = (snapshot(&child), snapshot(&orphan));
+        session("late", "headless");
+        assert!(child_then.fresh(&snapshot(&child), &mut Probe::default()));
+        assert!(!orphan_then.fresh(&snapshot(&orphan), &mut Probe::default()));
+        let orphan_then = snapshot(&orphan);
+        let record = group.join("late/subagents/c2/meta.json");
+        fs::create_dir_all(record.parent().unwrap()).unwrap();
+        fs::write(&record, r#"{"parent_session_id":"late"}"#).unwrap();
+        assert!(!orphan_then.fresh(&snapshot(&orphan), &mut Probe::default()));
+        let grok = Grok {
+            root: Some(group.clone()),
+        };
+        assert_eq!(grok.parse(&orphan).unwrap().lineage.parent.as_deref(), Some("late"));
+        let child_then = snapshot(&child);
+        fs::write(&meta, r#"{"parent_session_id":"p1","tool_call_id":"call_9"}"#).unwrap();
+        assert!(!child_then.fresh(&snapshot(&child), &mut Probe::default()));
+        assert_eq!(
+            grok.parse(&child).unwrap().lineage.spawned_by_tool_use.as_deref(),
+            Some("call_9")
+        );
         let _ = fs::remove_dir_all(&group);
     }
 

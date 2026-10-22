@@ -192,6 +192,11 @@ struct Entry {
     /// its growth keeps the entry fresh while this sample still holds ([`FileId::admits`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     grows: Option<Prefix>,
+    /// A declared [`Dependencies::resumable`] file: its growth (this sample still holding)
+    /// leaves a mark resumable ([`Baseline::dependencies_fresh`]) but never admits a record as it
+    /// stands ([`Baseline::fresh`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    resumes: Option<Prefix>,
 }
 
 impl Entry {
@@ -279,6 +284,40 @@ impl Stamp {
         }
     }
 
+    /// The same inventory: equal as text, or (one side sampling a resumable file the other did
+    /// not, as an inventory taken before it was declared resumable) as paths and identities.
+    fn same_entries(&self, current: &Stamp) -> bool {
+        self.entries.get() == current.entries.get()
+            || self
+                .entries()
+                .zip(current.entries())
+                .is_some_and(|(old, now)| old == now)
+    }
+
+    /// [`Self::matches`], except that a declared [`Dependencies::resumable`] file may have grown
+    /// since this inventory sampled it: a resumed read decides from its mark what the growth
+    /// revises.
+    fn matches_grown(&self, current: &Stamp, probe: &mut Probe) -> bool {
+        if self.entries.get() != current.entries.get() {
+            let (Some(old), Some(now)) = (self.entries(), current.entries()) else {
+                return false;
+            };
+            let grown = |old: &Entry, now: &Entry| {
+                old.path == now.path
+                    && (old == now
+                        || old
+                            .resumes
+                            .zip(old.state)
+                            .zip(now.state)
+                            .is_some_and(|((sample, then), now)| then.admits(&sample, &now, &old.path)))
+            };
+            if old.len() != now.len() || !old.iter().zip(&now).all(|(old, now)| grown(old, now)) {
+                return false;
+            }
+        }
+        matches!(self.reads(), Some(Some(reads)) if reads.iter().all(|entry| entry.holds(probe)))
+    }
+
     /// [`Self::matches`] with the files in `store` left out of both sides: a shared database's
     /// own files, which every write to any of its sessions moves.
     fn matches_except(&self, current: &Stamp, probe: &mut Probe, store: &[PathBuf]) -> bool {
@@ -296,7 +335,7 @@ impl Stamp {
     /// The same inventory, and every recorded read still as recorded: the stamp of a pass whose
     /// read set is unrecorded never matches.
     fn matches(&self, current: &Stamp, probe: &mut Probe) -> bool {
-        self.entries.get() == current.entries.get()
+        self.same_entries(current)
             && matches!(self.reads(), Some(Some(reads)) if reads.iter().all(|entry| entry.holds(probe)))
     }
 }
@@ -583,17 +622,24 @@ impl Baseline {
         })
     }
 
-    /// Auxiliary inventories and all recorded reads still match, independently of primary growth.
+    /// Auxiliary inventories and all recorded reads still match, independently of primary growth;
+    /// a [`Dependencies::resumable`] file may have grown, which only a resumed read may admit.
     pub fn dependencies_fresh(&self, current: &Self, probe: &mut Probe) -> bool {
         self.stamp
             .as_ref()
             .zip(current.stamp.as_ref())
-            .is_some_and(|(old, now)| old.matches(now, probe))
+            .is_some_and(|(old, now)| old.matches_grown(now, probe))
     }
 
-    /// Strict: the primary was captured and is unchanged, and the dependencies are fresh.
+    /// Strict: the primary was captured and is unchanged, and every dependency is as recorded.
     pub fn fresh(&self, current: &Self, probe: &mut Probe) -> bool {
-        self.primary.is_some() && self.primary == current.primary && self.dependencies_fresh(current, probe)
+        self.primary.is_some()
+            && self.primary == current.primary
+            && self
+                .stamp
+                .as_ref()
+                .zip(current.stamp.as_ref())
+                .is_some_and(|(old, now)| old.matches(now, probe))
     }
 
     /// A session in a shared SQLite store whose files moved (another session was written): the
@@ -735,6 +781,11 @@ impl<T: Payload> Record<T> {
 pub struct Dependencies {
     pub files: Vec<PathBuf>,
     pub directories: Vec<PathBuf>,
+    /// Append-only files the read consults whole, whose growth can revise what it emitted before:
+    /// recorded like `files`, with a [`Prefix`] sample, so their growth keeps a resume mark usable
+    /// (the adapter's resumed read declines when the growth revises its prefix) but never admits a
+    /// record as it stands.
+    pub resumable: Vec<PathBuf>,
 }
 
 /// The store file's identity, folded into each of its sessions' certificates: device, inode and
@@ -816,6 +867,7 @@ impl Probe {
             state,
             prefix: None,
             grows: None,
+            resumes: None,
         })
     }
 
@@ -894,7 +946,11 @@ impl Probe {
             .map_or(Some(()), |adapter| adapter.dependencies(r, self, &mut deps));
         self.adapters.insert(r.harness, adapter);
         declared?;
-        let Dependencies { files, directories } = deps;
+        let Dependencies {
+            files,
+            directories,
+            resumable,
+        } = deps;
         let mut entries = BTreeMap::new();
         for dir in directories {
             entries.insert(dir.clone(), self.entry(&dir)?.state);
@@ -916,11 +972,23 @@ impl Probe {
             let state = self.entry(&file)?.state;
             entries.insert(file, state);
         }
+        let mut samples = HashMap::new();
+        for file in resumable {
+            let state = self.entry(&file)?.state;
+            let file = absolute(&file)?;
+            if let Some(state) = state {
+                // A file that moved between the stat and the sample is recorded exact.
+                let sample = std::fs::File::open(&file).ok().and_then(|f| Prefix::of(&f, state.len));
+                samples.insert(file.clone(), sample);
+            }
+            entries.insert(file, state);
+        }
         entries
             .into_iter()
             .map(|(path, state)| {
                 let path = if path.is_absolute() { path } else { absolute(&path)? };
                 Some(Entry {
+                    resumes: samples.remove(&path).flatten(),
                     path,
                     state,
                     prefix: None,
