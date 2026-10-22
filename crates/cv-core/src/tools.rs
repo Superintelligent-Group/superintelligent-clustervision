@@ -682,7 +682,10 @@ mod tests {
             scratch: Vec::new(),
         };
         discovered.meta(&shell);
-        assert_eq!(discovered.state.cwd.as_deref(), Some(std::path::Path::new("/discovery")));
+        assert_eq!(
+            discovered.state.cwd.as_deref(),
+            Some(std::path::Path::new("/discovery"))
+        );
     }
 
     #[test]

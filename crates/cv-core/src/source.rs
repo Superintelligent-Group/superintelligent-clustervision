@@ -426,7 +426,12 @@ pub(crate) fn session_reads(session: &crate::Session) -> ReadSet {
 /// Record the original and auxiliary sources retained by one message before a consumer demands it.
 pub(crate) fn record_message_reads(message: &crate::Message, primary: Option<&std::path::Path>, reads: &mut ReadSet) {
     /// A captured source records its path (unless it *is* the primary) plus its dependencies.
-    fn captured(path: &std::path::Path, deps: Option<&ReadSet>, primary: Option<&std::path::Path>, reads: &mut ReadSet) {
+    fn captured(
+        path: &std::path::Path,
+        deps: Option<&ReadSet>,
+        primary: Option<&std::path::Path>,
+        reads: &mut ReadSet,
+    ) {
         if primary != Some(path) {
             reads.record(path);
         }

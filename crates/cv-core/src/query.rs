@@ -199,7 +199,9 @@ pub const FIELDS: &[FieldDef] = &[
 
 fn field_for(key: &str) -> Option<&'static FieldDef> {
     let k = key.to_ascii_lowercase();
-    FIELDS.iter().find(|f| f.name == k || f.aliases.iter().any(|(a, _)| *a == k))
+    FIELDS
+        .iter()
+        .find(|f| f.name == k || f.aliases.iter().any(|(a, _)| *a == k))
 }
 
 /// The one-word cost label shown in the reference + machine schema.
@@ -609,30 +611,28 @@ fn eval_term(t: &Term, f: &Facts) -> anyhow::Result<Tri> {
         },
         FieldId::Updated => date_match(t.op, &t.val, f.r.updated_at.or(f.r.created_at)),
         // Parse-required.
-        FieldId::Model => {
-            or_over(&t.val, |needle| {
-                let resolved = f.ext.model(needle, t.op == Op::Eq)?;
-                if resolved != Tri::Unknown {
-                    return Ok(resolved);
+        FieldId::Model => or_over(&t.val, |needle| {
+            let resolved = f.ext.model(needle, t.op == Op::Eq)?;
+            if resolved != Tri::Unknown {
+                return Ok(resolved);
+            }
+            Ok(match f.session {
+                None => Tri::Unknown,
+                Some(s) => {
+                    let hit = |m: Option<&str>| {
+                        m.is_some_and(|m| {
+                            let model = m.to_lowercase();
+                            if t.op == Op::Eq {
+                                model == needle
+                            } else {
+                                model.contains(needle)
+                            }
+                        })
+                    };
+                    Tri::of(hit(s.model.as_deref()) || s.messages.iter().any(|msg| hit(msg.model.as_deref())))
                 }
-                Ok(match f.session {
-                    None => Tri::Unknown,
-                    Some(s) => {
-                        let hit = |m: Option<&str>| {
-                            m.is_some_and(|m| {
-                                let model = m.to_lowercase();
-                                if t.op == Op::Eq {
-                                    model == needle
-                                } else {
-                                    model.contains(needle)
-                                }
-                            })
-                        };
-                        Tri::of(hit(s.model.as_deref()) || s.messages.iter().any(|msg| hit(msg.model.as_deref())))
-                    }
-                })
-            })?
-        }
+            })
+        })?,
         FieldId::Git => match f.session {
             None => Tri::Unknown,
             Some(s) if t.op == Op::Eq => Tri::of(s.git.as_ref().is_some_and(|g| {

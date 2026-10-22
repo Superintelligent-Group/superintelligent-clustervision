@@ -189,7 +189,9 @@ pub fn tail(r: &SessionRef, skip: usize, keep: usize) -> Option<(usize, Vec<Mess
 pub fn resolve(r: &SessionRef, mark: Mark) -> Option<usize> {
     match mark {
         Mark::Messages(n) => Some(n),
-        Mark::Bytes(len) => append_only(r).then(|| count_prefix(r, len, &mut || Ok(())).ok()).flatten(),
+        Mark::Bytes(len) => append_only(r)
+            .then(|| count_prefix(r, len, &mut || Ok(())).ok())
+            .flatten(),
     }
 }
 
@@ -346,7 +348,11 @@ impl Watcher {
     }
 
     /// [`Watcher::new`] over another session source (see [`Watcher::discover`]).
-    pub fn with_discovery(filter: Filter, emit_existing: bool, discover: impl FnMut() -> Vec<SessionRef> + 'static) -> Self {
+    pub fn with_discovery(
+        filter: Filter,
+        emit_existing: bool,
+        discover: impl FnMut() -> Vec<SessionRef> + 'static,
+    ) -> Self {
         Self::with_discovery_until(filter, emit_existing, discover, || false)
     }
 
