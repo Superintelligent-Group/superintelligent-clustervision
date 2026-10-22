@@ -268,12 +268,18 @@ fn represents_system_prompt(message: &Message, prompt: &str, resolver: &crate::R
     Ok(equal && offset == prompt.len())
 }
 
-fn record_header(format: Format) -> &'static [u8] {
+const fn record_header(format: Format) -> &'static [u8] {
     match format {
         Format::Chatml => b"{\"messages\":[",
         Format::ShareGpt => b"{\"conversations\":[",
     }
 }
+
+/// `publish` skips a record header without knowing the format, so it reads into a buffer sized
+/// for any of them — checked against the table above.
+const RECORD_HEADER_BUF: usize = 32;
+const _: () = assert!(record_header(Format::Chatml).len() <= RECORD_HEADER_BUF);
+const _: () = assert!(record_header(Format::ShareGpt).len() <= RECORD_HEADER_BUF);
 
 /// Which export shape — the only difference is the array/role/content key names and the role labels.
 #[derive(Clone, Copy)]
@@ -479,7 +485,7 @@ impl StagedRecord {
             self.body.copy_to(writer)?;
         } else {
             let mut body = self.body.reader()?;
-            let mut header = [0; b"{\"conversations\":[".len()];
+            let mut header = [0; RECORD_HEADER_BUF];
             body.read_exact(&mut header[..self.skip_header])?;
             std::io::copy(&mut body, writer)?;
         }
