@@ -251,6 +251,9 @@ impl Write for CountWriter {
 #[derive(Default)]
 struct Outcome {
     messages: usize,
+    /// The operation's API does not deliver messages through a callback the probe can count:
+    /// `messages` is then reported as null, not as a zero that was never measured.
+    unobserved: bool,
     detail: Value,
     // Keep actual collection alive until the stage's heap snapshot is taken.
     session: Option<Session>,
@@ -330,8 +333,8 @@ fn run(a: &Args, adapter: &dyn Adapter, r: &SessionRef) -> Result<Outcome> {
                 cv_core::events::record_spooled_with_source(r, 0, spool, &source, &Default::default())?;
                 (events.len(), 0)
             };
-            out.detail = json!({ "events": events, "temporary_bytes_written": temporary_bytes,
-                               "temporary_bytes_read": temporary_bytes });
+            // The spool reads back exactly what it wrote; only the write is measured.
+            out.detail = json!({ "events": events, "temporary_bytes_written": temporary_bytes });
         }
         "checkpoint" | "resume" => {
             // This is a fixture diagnostic, not a replacement for production MarkHead/source
@@ -393,6 +396,7 @@ fn run(a: &Args, adapter: &dyn Adapter, r: &SessionRef) -> Result<Outcome> {
                 cv_core::tools::ToolHistogram::from_events(&sink.into_events()?)
             };
             out.detail = serde_json::to_value(histogram)?;
+            out.unobserved = true;
         }
         "dataset" | "dataset-collect" => {
             let query = a
@@ -440,7 +444,7 @@ fn run(a: &Args, adapter: &dyn Adapter, r: &SessionRef) -> Result<Outcome> {
                 out.detail["record_sha256"] = json!(digest.digest.finish_hex());
             }
             if a.operation == "dataset" {
-                out.detail["message_callbacks"] = json!("not observed");
+                out.unobserved = true;
             }
         }
         "token-stats" => {
@@ -469,7 +473,8 @@ fn run(a: &Args, adapter: &dyn Adapter, r: &SessionRef) -> Result<Outcome> {
                 out.session = Some(session);
                 matched
             };
-            out.detail = json!({ "matches": matched, "message_callbacks": "not observed" });
+            out.detail = json!({ "matches": matched });
+            out.unobserved = true;
         }
         "collect" | "affordances" => {
             let opts = if a.operation == "affordances" {
@@ -514,7 +519,7 @@ fn run(a: &Args, adapter: &dyn Adapter, r: &SessionRef) -> Result<Outcome> {
         "affordance-read" => {
             out.rows = cv_core::affordance::read(adapter, r)?;
             out.detail = affordance_detail(&out.rows, a.hash_output)?;
-            out.detail["message_callbacks"] = json!("not observed");
+            out.unobserved = true;
         }
         "hash" => {
             let resolver = cv_core::Resolver::new(Some(r.path.clone()));
@@ -745,14 +750,14 @@ fn main() -> Result<()> {
             },
             "materialize": if a.operation == "affordance-read" { Value::Null }
                            else { json!(a.materialize || matches!(a.operation.as_str(), "affordances" | "hash" | "resolve")) },
-            "physical_input_bytes": physical_bytes, "traversed_bytes": null,
+            "physical_input_bytes": physical_bytes,
             "build_features": { "mmap": cfg!(feature = "mmap"), "probe_heap": cfg!(feature = "probe-heap") },
             "hash_output": a.hash_output,
             "hash_detail": a.hash_detail,
             "raw_order": a.raw_order,
             "warm_discover": a.warm_discover,
             "setup_discovered_sessions": setup_discovered_sessions,
-            "wall_seconds": seconds, "messages": out.messages,
+            "wall_seconds": seconds, "messages": if out.unobserved { Value::Null } else { json!(out.messages) },
             "requested_rust_heap": requested_rust_heap, "sqlite_native_heap": sqlite_native_heap, "detail": out.detail,
         })
     );
