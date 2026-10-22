@@ -2428,14 +2428,14 @@ mod tests {
     #[test]
     fn replay_text_spill_keeps_exact_equality_and_releases_on_clear() {
         let mut texts = crate::spill::ExactStrings::default();
-        texts.insert("first".into()).unwrap();
+        texts.insert("first").unwrap();
         let large = "x".repeat(1024 * 1024 + 1);
         texts.insert(large.clone()).unwrap();
         assert!(texts.contains("first").unwrap());
         assert!(texts.contains(&large).unwrap());
         assert!(!texts.contains("FIRST").unwrap());
         assert!(!texts.contains(&(large.clone() + "x")).unwrap());
-        texts.insert("nul\0suffix".into()).unwrap();
+        texts.insert("nul\0suffix").unwrap();
         assert!(texts.contains("nul\0suffix").unwrap());
         assert!(!texts.contains("nul").unwrap());
         texts.clear();

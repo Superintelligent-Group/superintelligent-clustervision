@@ -52,29 +52,29 @@ impl ExactStrings {
     }
 
     /// True only on first insertion. Empty strings, embedded NUL and hash collisions are exact.
-    pub(crate) fn insert(&mut self, text: String) -> Result<bool> {
-        self.insert_text(Cow::Owned(text))
+    pub(crate) fn insert(&mut self, text: impl Into<crate::Text>) -> Result<bool> {
+        match text.into() {
+            crate::Text::Inline(text) => self.insert_text(Cow::Owned(text)),
+            text => self.insert_source(&text, &crate::Resolver::new(None)),
+        }
     }
 
     /// Borrow keys that only need writing/comparison after spill. In-memory retention still owns
     /// its exact bytes, and uses the same payload-plus-slot budget as owned insertion.
-    #[cfg(feature = "sqlite")]
     pub(crate) fn insert_borrowed(&mut self, text: &str) -> Result<bool> {
         self.insert_text(Cow::Borrowed(text))
     }
 
     /// Small checked keys keep the bounded memory fast path; larger keys stage once
     /// into the existing disk backend. Neither path publishes before the producer succeeds.
-    #[cfg(feature = "sqlite")]
     pub(crate) fn insert_source(&mut self, text: &crate::Text, resolver: &crate::lazy::Resolver) -> Result<bool> {
         if let Some(text) = text.inline_str() {
             return self.insert_borrowed(text);
         }
-        // Checked JSON text's raw extent bounds decoded bytes. Legacy Span also permits
-        // lossy UTF-8, whose replacement scalars can expand each source byte threefold.
+        // Checked JSON text's raw extent bounds decoded bytes, including wire-form spans.
         let bounded_len = match text {
             crate::Text::Source(source) => Some(source.raw_len()),
-            crate::Text::Span(span) => span.len.checked_mul(3).and_then(|n| usize::try_from(n).ok()),
+            crate::Text::Span(span) => usize::try_from(span.len).ok(),
             crate::Text::Inline(_) => unreachable!(),
         };
         if let Some(bound) = bounded_len.filter(|&bound| self.spill.is_none() && self.memory_cost(bound) <= self.limit)
@@ -149,7 +149,7 @@ impl ExactStrings {
             .saturating_add(slots.saturating_mul(std::mem::size_of::<String>() + 16))
     }
 
-    #[cfg(all(test, feature = "sqlite"))]
+    #[cfg(test)]
     pub(crate) fn is_spilled(&self) -> bool {
         self.spill.is_some()
     }
@@ -465,7 +465,6 @@ impl Disk {
         }
     }
 
-    #[cfg(any(feature = "sqlite", test))]
     fn flush_pending(&mut self) -> Result<()> {
         if !self.pending.is_empty() {
             self.data.seek(SeekFrom::Start(self.flushed))?;
@@ -493,7 +492,6 @@ impl Disk {
         result
     }
 
-    #[cfg(any(feature = "sqlite", test))]
     fn equal_ranges(&mut self, slot: Slot, start: u64, len: u64) -> Result<bool> {
         let mut left = [0; COMPARE_BYTES];
         let mut right = [0; COMPARE_BYTES];
@@ -512,7 +510,6 @@ impl Disk {
 
     /// Stage one decoded key in the same append file as retained keys. Errors and duplicates
     /// discard only unpublished bytes; complete source validation precedes exact membership.
-    #[cfg(any(feature = "sqlite", test))]
     fn insert_stream(
         &mut self,
         produce: impl FnOnce(&mut dyn FnMut(&[u8]) -> Result<()>) -> Result<()>,
@@ -598,12 +595,10 @@ impl Disk {
     }
 }
 
-#[cfg(any(feature = "sqlite", test))]
 struct ChunkHash<H> {
     hasher: H,
     pending: Vec<u8>,
 }
-#[cfg(any(feature = "sqlite", test))]
 impl<H: Hasher> ChunkHash<H> {
     fn new(hasher: H) -> Self {
         Self {
@@ -766,7 +761,6 @@ mod tests {
         assert!(disk.insert(b"after", 3).is_err());
     }
 
-    #[cfg(feature = "sqlite")]
     #[test]
     fn small_checked_sources_keep_memory_fast_path() {
         let world = crate::test_world("exact-small-source");
@@ -790,10 +784,7 @@ mod tests {
             assert!(matches!(text, crate::Text::Source(_)));
             assert!(set.insert_source(&text, &resolver).unwrap());
             assert!(!set.insert_source(&text, &resolver).unwrap());
-            assert!(
-                set.spill.is_none(),
-                "ordinary checked prompts must not open spill files"
-            );
+            assert!(!set.is_spilled(), "ordinary checked prompts must not open spill files");
             assert!(set.contains(&body).unwrap());
         }
     }
@@ -822,7 +813,6 @@ mod tests {
         assert_eq!(std::fs::read(&path).unwrap(), b"unchanged");
     }
 
-    #[cfg(feature = "sqlite")]
     #[test]
     fn checked_source_insertion_matches_inline_keys_and_rejects_stale_sources() {
         let world = crate::test_world("exact-checked-source");
@@ -838,7 +828,7 @@ mod tests {
         let mut set = ExactStrings::default();
         assert!(set.insert_borrowed("retained before spill").unwrap());
         assert!(set.insert_source(&text, &resolver).unwrap());
-        assert!(set.spill.is_some(), "giant checked keys must spill");
+        assert!(set.is_spilled(), "giant checked keys must spill");
         assert!(!set.insert_borrowed(&body).unwrap());
         assert!(!set.insert_source(&text, &resolver).unwrap());
         std::fs::write(&path, "changed backing").unwrap();
@@ -875,16 +865,15 @@ mod tests {
         for i in 0..400 {
             assert!(set.insert(i.to_string()).unwrap());
         }
-        assert!(set.spill.is_some());
+        assert!(set.is_spilled());
         assert_eq!(set.memory.capacity(), 0);
         for i in 0..400 {
             assert!(set.contains(&i.to_string()).unwrap());
         }
         set.clear();
-        assert!(set.spill.is_none());
+        assert!(!set.is_spilled());
         assert!(!set.contains("").unwrap());
     }
-    #[cfg(feature = "sqlite")]
     #[test]
     fn borrowed_keys_survive_caller_changes_and_spill() {
         let mut set = ExactStrings {
@@ -897,7 +886,7 @@ mod tests {
         assert!(set.contains("source\0λ").unwrap());
         let large = "bodyλ\0".repeat(1024);
         assert!(set.insert_borrowed(&large).unwrap());
-        assert!(set.spill.is_some());
+        assert!(set.is_spilled());
         assert!(!set.insert_borrowed("source\0λ").unwrap());
         assert!(!set.insert_borrowed(&large).unwrap());
         assert!(set.insert_borrowed("").unwrap());
