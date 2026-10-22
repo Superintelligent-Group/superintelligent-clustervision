@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- `cv serve` treats a response body longer than its Content-Length as a failed response and closes the connection, instead of silently dropping the excess.
 - `cv blame -L` says when its commit list was cut, has its own no-commit message, and marks an empty commit message `(no message)`.
 - `cv blame` spells sub-agent sessions in full in every `cv show` hint, not only under exact matches.
 - A refused write after a failed JSONL record names that record and its cause, instead of only saying the stage failed.
