@@ -540,6 +540,12 @@ impl Adapter for OpenCode {
         })
     }
 
+    /// Every database session's certificate ([`db::rows`]); a JSON-file session is its own files.
+    #[cfg(feature = "sqlite")]
+    fn rows(&self, store: &Path) -> Option<std::collections::HashMap<String, crate::source::Rows>> {
+        db::rows(store).ok()
+    }
+
     /// The todo list `todowrite` keeps in `opencode.db`'s `todo` table (1.x; 2.x has none).
     fn store_affordances(&self, r: &SessionRef) -> anyhow::Result<Vec<crate::affordance::Affordance>> {
         #[cfg(feature = "sqlite")]
@@ -656,11 +662,80 @@ mod db {
         })
     }
 
+    /// Every session's [`Rows`](crate::source::Rows) certificate: what a read of it consults
+    /// besides message bodies. Its `session` and `session_v2` rows whole (which table the read
+    /// takes is the presence of the latter); per 1.x `message` row its rowid, id, `time_created`
+    /// (the read's order), `time_updated` and the byte length of `data`; per `part` row, through
+    /// its message, the same with `message_id`; per 2.x `session_message` row its rowid, id, type,
+    /// `seq` (the read's order), `time_updated` and `data`'s length; and its `todo` rows. OpenCode
+    /// UPDATEs a streaming part (and a 2.x message) in place, so count and max rowid alone are
+    /// not enough: every UPDATE stamps `time_updated` (drizzle `$onUpdate`) and nearly every one
+    /// changes the length; a same-length rewrite within the same millisecond escapes. Lengths come
+    /// from record headers, so no body's overflow pages are read.
+    pub(super) fn rows(db: &Path) -> Result<std::collections::HashMap<String, crate::source::Rows>> {
+        open_ro(db)?.read(|conn, _| {
+            let _snapshot = crate::harness::store::sqlite::snapshot(conn)?;
+            let mut certificates = crate::harness::store::sqlite::Certificates::default();
+            for table in ["session", "session_v2"] {
+                if has_table(conn, table) {
+                    certificates.digest(conn, &format!("SELECT id, '{table}', * FROM {table} ORDER BY id"))?;
+                }
+            }
+            let column = |table: &str, name: &str, expr: &str| {
+                if crate::harness::store::sqlite::columns(conn, table).contains(name) {
+                    expr.to_owned()
+                } else {
+                    "NULL".to_owned()
+                }
+            };
+            if has_table(conn, "message") {
+                let (created, updated) = (
+                    column("message", "time_created", "time_created"),
+                    column("message", "time_updated", "time_updated"),
+                );
+                certificates.rows(
+                    conn,
+                    &format!(
+                        "SELECT session_id, rowid, id, {created}, {updated}, octet_length(data) FROM message \
+                         ORDER BY session_id, rowid"
+                    ),
+                )?;
+            }
+            if has_table(conn, "message") && has_table(conn, "part") {
+                let updated = column("part", "time_updated", "p.time_updated");
+                certificates.rows(
+                    conn,
+                    &format!(
+                        "SELECT m.session_id, p.rowid, p.message_id, p.id, {updated}, octet_length(p.data) \
+                         FROM part p JOIN message m ON m.id = p.message_id ORDER BY m.session_id, p.rowid"
+                    ),
+                )?;
+            }
+            if has_table(conn, "session_message") {
+                let updated = column("session_message", "time_updated", "time_updated");
+                certificates.rows(
+                    conn,
+                    &format!(
+                        "SELECT session_id, rowid, id, type, seq, {updated}, octet_length(data) FROM session_message \
+                         ORDER BY session_id, rowid"
+                    ),
+                )?;
+            }
+            if has_table(conn, "todo") {
+                certificates.digest(
+                    conn,
+                    "SELECT session_id, position, content, status FROM todo ORDER BY session_id, position",
+                )?;
+            }
+            Ok(certificates.0)
+        })
+    }
+
     pub(super) fn is_db_ref(r: &SessionRef) -> bool {
         r.path.extension().and_then(|e| e.to_str()) == Some("db")
     }
 
-    fn has_table(conn: &rusqlite::Connection, name: &str) -> bool {
+    pub(super) fn has_table(conn: &rusqlite::Connection, name: &str) -> bool {
         conn.query_row(
             "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1",
             rusqlite::params![name],
@@ -2227,6 +2302,74 @@ mod tests {
         assert!(format!("{error:#}").contains("changed"), "{error:#}");
         assert!(!format!("{error:#}").contains("consumer cap"));
         drop(writer);
+    }
+
+    /// Every corpus version: a part written into one session's last message (1.x) or a message
+    /// appended to it (2.x) moves that session's certificate alone, and every other session
+    /// reads exactly as before.
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn corpus_rows_certify_each_session_and_move_only_with_its_rows() {
+        let corpus = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/corpus/opencode");
+        let mut versions: Vec<_> = std::fs::read_dir(&corpus).unwrap().map(|e| e.unwrap().path()).collect();
+        versions.sort();
+        assert!(!versions.is_empty());
+        for version in versions {
+            let world = crate::test_world("opencode-corpus-rows");
+            let db = world.base.join("opencode.db");
+            std::fs::copy(version.join(".local/share/opencode/opencode.db"), &db).unwrap();
+            let conn = rusqlite::Connection::open(&db).unwrap();
+            let v2 = db::has_table(&conn, "session_v2");
+            let leaf: String = conn
+                .query_row(
+                    if v2 {
+                        "SELECT session_id FROM session_message ORDER BY session_id LIMIT 1"
+                    } else {
+                        "SELECT session_id FROM message ORDER BY session_id LIMIT 1"
+                    },
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            drop(conn);
+            let adapter = OpenCode::with_db(db.clone());
+            crate::harness::store::sqlite::assert_rows_move_alone(&adapter, &db, &leaf, |c| {
+                let sql = if v2 {
+                    "INSERT INTO session_message (id, session_id, type, seq, time_created, time_updated, data) \
+                     SELECT 'zq', ?1, 'user', max(seq) + 1, 4102444800000, 4102444800000, \
+                     '{\"text\":\"zqcertified\"}' FROM session_message WHERE session_id = ?1"
+                } else {
+                    "INSERT INTO part (id, message_id, session_id, time_created, time_updated, data) \
+                     SELECT 'prt_zq', id, ?1, 4102444800000, 4102444800000, \
+                     '{\"type\":\"text\",\"text\":\"zqcertified\"}' FROM message WHERE session_id = ?1 \
+                     ORDER BY time_created DESC LIMIT 1"
+                };
+                assert_eq!(c.execute(sql, [&leaf]).unwrap(), 1);
+            });
+            // A streaming part (a 2.x message) is UPDATEd in place: same rowid, same count.
+            let before = adapter.rows(&db).unwrap();
+            let table = if v2 { "session_message" } else { "part" };
+            rusqlite::Connection::open(&db)
+                .unwrap()
+                .execute(
+                    &format!(
+                        "UPDATE {table} SET data = json_set(data, '$.text', 'zqcertified, streamed'), \
+                         time_updated = time_updated + 1 WHERE id = (SELECT id FROM {table} WHERE id LIKE '%zq')"
+                    ),
+                    [],
+                )
+                .unwrap();
+            let after = adapter.rows(&db).unwrap();
+            assert_ne!(
+                after[&leaf], before[&leaf],
+                "{version:?}: an in-place update moves its session"
+            );
+            assert_eq!(
+                (after[&leaf].count, after[&leaf].high),
+                (before[&leaf].count, before[&leaf].high)
+            );
+            assert!(after.iter().all(|(id, rows)| id == &leaf || before[id] == *rows));
+        }
     }
 
     #[cfg(feature = "sqlite")]
