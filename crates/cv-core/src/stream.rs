@@ -8,11 +8,10 @@
 //! [`Adapter::stream`](crate::harness::Adapter::stream) instead hands each [`Message`] to a
 //! [`MessageSink`] and drops it before reading the next. Retention depends on the adapter and
 //! consumer: selected payloads may remain checked source ranges, while owned fallbacks still
-//! scale with their largest message. A collecting sink retains the entire history. The
-//! whole-`Session` `parse` is recovered for free as "stream into a [`CollectSink`]" (see
-//! [`collect`]). Adapters override **one** of the two: a native `stream` (memory-savings) *or* the
-//! existing `parse` (and inherit a `stream` that bridges through it). No mutual recursion, so
-//! migration is incremental.
+//! scale with their largest message. A collecting sink retains the entire history. Every adapter
+//! implements `stream` (a store that can only be read whole hands its parsed session to
+//! [`replay`]); the whole-`Session` `parse` is "stream into a [`CollectSink`]" ([`collect`]), a
+//! blanket [`crate::harness::Parse`] impl no adapter overrides.
 //!
 //! **Who owns the source guarantee.** A reader captures its source (identity, length, the
 //! dependencies it consults) before it reads a byte and binds its descriptor to that capture. It
