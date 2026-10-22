@@ -431,7 +431,8 @@ pub(crate) fn report(json: bool, human: &str, value: &serde_json::Value) -> Resu
 
 /// Dry-run honesty for a `--json` report: nothing was written, so every `paths` key is null, and
 /// the `minted` keys (the new id and what derives from it) are null too unless `--to` pinned the
-/// id — the core mints a throwaway id a real run would NOT reuse. `note` says which.
+/// id — the core mints a throwaway id a real run would NOT reuse. `note` says which; it is part of
+/// every report's shape (the `cv recipes` key list names it), null on a real run.
 pub(crate) fn dry_run_nulls(v: &mut serde_json::Value, pinned: bool, paths: &[&str], minted: &[&str]) {
     v["note"] = serde_json::Value::Null;
     if v["dry_run"] != true {
