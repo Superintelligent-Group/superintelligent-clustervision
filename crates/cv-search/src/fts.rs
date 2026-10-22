@@ -2587,7 +2587,7 @@ fn enrich_snippets_from(
         let path = path.as_str();
         // The stored preview stands in when the live read cannot: marked when the source is
         // gone, returned as the search's note when it is there but cannot be read.
-        match live_snippet(path, &hit.harness, query, scope) {
+        match live_snippet(path, &hit.id, &hit.harness, query, scope) {
             Ok(snippet) if !snippet.is_empty() => hit.snippet = snippet,
             Ok(_) => {}
             Err(_) if !Path::new(path).exists() => {
@@ -2903,7 +2903,7 @@ const SNIPPET_SCAN_CAP: usize = 256 * 1024;
 /// [`SNIPPET_SCAN_CAP`] here — the old `bulk()` + materialize path owned the whole record before
 /// the cap check could run. Trade-off: a term that only occurs *beyond* the cap inside one giant
 /// field now falls back to the head/preview snippet (it already did for terms in later messages).
-fn live_snippet(path: &str, harness: &str, query: &str, scope: crate::Scope) -> Result<String> {
+fn live_snippet(path: &str, id: &str, harness: &str, query: &str, scope: crate::Scope) -> Result<String> {
     use cv_core::{Block, Demand, Flow, Message, MessageSink, SessionRef};
     let h = cv_core::Harness::parse(harness).with_context(|| format!("unknown harness {harness:?}"))?;
     let adapter = cv_core::harness::for_harness(h).with_context(|| format!("no adapter for {harness}"))?;
@@ -2913,7 +2913,7 @@ fn live_snippet(path: &str, harness: &str, query: &str, scope: crate::Scope) -> 
         created_at: None,
         updated_at: None,
         message_count: None,
-        ..SessionRef::new(String::new(), h, PathBuf::from(path))
+        ..SessionRef::new(id.to_owned(), h, PathBuf::from(path))
     };
 
     struct Acc {
@@ -5165,7 +5165,12 @@ mod tests {
         .unwrap();
         assert_eq!((hits.len(), suffix.stale, suffix.read), (1, 1, 1), "{suffix:?}");
         assert_eq!(sweep(&dir, refs.clone(), false, false).unwrap().changed, 1);
-        assert_eq!(text_search(&dir, "zqalphalate", 10).unwrap().len(), 1);
+        let hits = text_search(&dir, "zqalphalate", 10).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert!(
+            hits[0].snippet.contains("zqalphalate"),
+            "a store session's live snippet: {hits:?}"
+        );
         // Rows that went backwards (a deletion, a rewrite) reread the session whole.
         writer
             .execute("DELETE FROM messages WHERE content='zqbravotwo'", [])
@@ -5239,10 +5244,10 @@ mod tests {
         assert!(body.len() > SNIPPET_SCAN_CAP);
         let p = write_claude(&sdir, "giant", &body);
 
-        let snip = live_snippet(&p, "claude", "zqearly", crate::Scope::Exchange).expect("snippet");
+        let snip = live_snippet(&p, "", "claude", "zqearly", crate::Scope::Exchange).expect("snippet");
         assert!(snip.contains("zqearly"), "in-cap term should window: {snip:?}");
 
-        let snip = live_snippet(&p, "claude", "zqlate", crate::Scope::Exchange).expect("snippet");
+        let snip = live_snippet(&p, "", "claude", "zqlate", crate::Scope::Exchange).expect("snippet");
         assert!(
             !snip.contains("zqlate") && snip.starts_with("zqearly"),
             "beyond-cap term must fall back to the head, got: {snip:?}"
