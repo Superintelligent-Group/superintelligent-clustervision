@@ -31,7 +31,7 @@ pub(crate) struct ShowView {
 }
 
 /// What `--kind` selects: each family has one compact view.
-enum KindView {
+pub(super) enum KindView {
     /// `prompt` / `answer`: what the person said (`session_reports::print_prompts`).
     Said { prompts: bool, answers: bool },
     /// `compaction_boundary` / `compaction_summary`: the compaction seams, each boundary paired
@@ -42,7 +42,7 @@ enum KindView {
     Affordances(std::collections::HashSet<cv_core::affordance::Kind>),
 }
 
-fn parse_kinds(spec: &str) -> Result<KindView> {
+pub(super) fn parse_kinds(spec: &str) -> Result<KindView> {
     #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
     enum Family {
         Said,

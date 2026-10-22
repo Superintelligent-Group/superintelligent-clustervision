@@ -1694,3 +1694,52 @@ mod admission_tests {
         assert_eq!(*pool.used.lock().unwrap(), 0);
     }
 }
+
+#[cfg(test)]
+mod instructions_tests {
+    /// The blurb is the one hand-written roster of the server's surface: every backticked word must
+    /// be a tool, a `prefix*` family of tools, an argument some tool takes, or values of one of
+    /// those arguments, all read from the live tool list. A renamed tool or flag fails here. (A
+    /// review once read `query` as a removed command; it is `ls`'s filter argument, and passes.)
+    #[test]
+    fn instructions_name_only_real_tools_and_arguments() {
+        crate::on_main_sized_stack(|| {
+            // As `serve` does at startup: the generated tools come from the clap tree.
+            let generated = super::CliTools::from_owned_tree(crate::build_cli()).expect("tool tree");
+            let _ = super::CLI.set(Some(generated));
+            let tools = super::tool_list();
+            let tools = tools.as_array().expect("tool list is an array");
+            let names: std::collections::HashSet<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
+            let properties = || {
+                tools
+                    .iter()
+                    .filter_map(|t| t["inputSchema"]["properties"].as_object())
+                    .flat_map(|p| p.iter())
+            };
+            let arguments: std::collections::HashSet<&str> = properties().map(|(k, _)| k.as_str()).collect();
+            let values: std::collections::HashSet<String> = properties()
+                .flat_map(|(_, p)| {
+                    let listed = p["enum"].as_array().or_else(|| p["items"]["enum"].as_array());
+                    listed
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|v| v.as_str().map(str::to_string))
+                })
+                .collect();
+            // `kind` is a free comma list `show` validates itself: its own parser is the oracle.
+            assert!(arguments.contains("kind"));
+            let kind = |word: &str| crate::cmd::view::parse_kinds(word).is_ok();
+            let text = super::instructions();
+            for word in text.split('`').skip(1).step_by(2) {
+                if let Some(prefix) = word.strip_suffix('*') {
+                    assert!(names.iter().any(|n| n.starts_with(prefix)), "no {word} tool");
+                } else if !names.contains(word) && !arguments.contains(word) {
+                    assert!(
+                        word.split(',').all(|v| values.contains(v)) || kind(word),
+                        "instructions name {word:?}: not a tool, an argument, or argument values"
+                    );
+                }
+            }
+        });
+    }
+}
