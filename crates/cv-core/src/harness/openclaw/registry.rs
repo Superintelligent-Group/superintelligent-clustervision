@@ -123,7 +123,7 @@ fn jsonl_runs(state: &Path, key: &str) -> Result<Vec<Run>> {
         .into_iter()
         .filter_map(|(_, p)| {
             let keys = run_keys(&p);
-            keys.iter().any(|by| by == key).then(|| (keys, p))
+            keys.iter().any(|by| by == key).then_some((keys, p))
         })
         .collect();
     out.sort_by_key(|(_, p)| p.get("createdAt").and_then(Value::as_i64).unwrap_or(0));

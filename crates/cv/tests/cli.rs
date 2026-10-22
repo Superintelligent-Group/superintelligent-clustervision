@@ -3044,10 +3044,6 @@ fn adopt_reaches_extra_claude_roots_and_never_targets_the_dead_session() {
     assert!(out.contains(&aid[..8]), "a seat session lists by id too: {out}");
 }
 
-/// Provisional resolutions: the orchestrator poses and resolves on the default at once
-/// (`decide --provisional`); the decider's inbox lists it under "made for you (veto?)", not as
-/// owed; a third party cannot override it; the decider vetoes with `--choice` (or confirms, here
-/// through the page's `{confirm: true}`), and `show` keeps both resolutions.
 // ───────────────────────────── tools --timeline → cat ─────────────────────────────
 
 /// Every timeline entry carries its call's id, and that id is what `cv cat` takes: on screen and
