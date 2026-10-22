@@ -109,11 +109,11 @@ impl Reader {
     pub(crate) fn from_connection(conn: std::sync::Arc<std::sync::Mutex<rusqlite::Connection>>) -> Self {
         Self {
             conn,
-            #[cfg(test)]
+            #[cfg(all(test, feature = "sqlite"))]
             counts_lookups: std::cell::Cell::new(0),
-            #[cfg(test)]
+            #[cfg(all(test, feature = "sqlite"))]
             counts_rows: std::cell::Cell::new(0),
-            #[cfg(test)]
+            #[cfg(all(test, feature = "sqlite"))]
             turn_snapshots: std::cell::Cell::new(0),
         }
     }

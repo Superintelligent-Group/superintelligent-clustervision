@@ -523,6 +523,11 @@ fn lines(
 #[cfg(feature = "mmap")]
 pub(crate) const MAP_WINDOW: u64 = if cfg!(test) { 64 << 10 } else { 8 << 20 };
 
+/// The record size a whole-record read buffers; at most this (and with `mmap`, strictly above it)
+/// the read is served from a buffer, never a range context. (Not [`MAP_WINDOW`], which bounds how
+/// much a line pass keeps mapped.)
+const MAPPED_RECORD: u64 = 64 * 1024;
+
 // Tests: the largest mapping each thread has made, the bound the mapped-bytes test asserts.
 #[cfg(all(test, feature = "mmap"))]
 thread_local! { pub(crate) static MAPPED_PEAK: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
@@ -653,7 +658,7 @@ impl<'s> Records<'s> {
             at.checked_add(len).is_some_and(|end| end <= self.source.len()),
             "record range outside its source"
         );
-        if len <= 64 * 1024 {
+        if len <= MAPPED_RECORD {
             self.buffer.resize(len as usize, 0);
             ranges::read_exact_at(self.file, &mut self.buffer, at)?;
             let text = std::str::from_utf8(&self.buffer).map_err(|_| crate::json::InvalidJson)?;

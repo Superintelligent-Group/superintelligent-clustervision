@@ -215,7 +215,7 @@ fn generate_string_with_len(
 
 fn write_quoted_json(view: crate::json::JsonView<'_>, writer: &mut dyn std::io::Write) -> Result<usize> {
     use std::io::Write;
-    let mut buffered = std::io::BufWriter::with_capacity(64 * 1024, writer);
+    let mut buffered = std::io::BufWriter::with_capacity(super::IO_CHUNK, writer);
     let mut escaped = super::bytes::ScratchWriter::new(&mut buffered, true);
     view.write_canonical(&mut escaped)?;
     let len = escaped.len;

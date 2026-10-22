@@ -843,14 +843,7 @@ mod tests {
             task_id: "00000000-0000-7000-8000-000000000def".into(),
             ts: "2026-07-16T12:00:00Z".parse().unwrap(),
             by: AUTHOR.into(),
-            kind: TaskEventKind::Opened {
-                title: "t".into(),
-                body: String::new(),
-                repo: None,
-                issue: None,
-                channel: None,
-                assignee: None,
-            },
+            kind: crate::task::opened_kind("t", None),
         };
         assert!(matches!(
             TaskReducer::reduce(&[ev]).unwrap_err(),
@@ -1198,14 +1191,7 @@ mod tests {
                 task_id: id.clone(),
                 ts: "2026-07-16T12:00:00Z".parse().unwrap(),
                 by: AUTHOR.into(),
-                kind: TaskEventKind::Opened {
-                    title: "a decision".into(),
-                    body: String::new(),
-                    repo: None,
-                    issue: None,
-                    channel: None,
-                    assignee: Some(DECIDER.into()),
-                },
+                kind: crate::task::opened_kind("a decision", Some(DECIDER)),
             });
             log.push(&id, AUTHOR, posed(&["keep", "delete"], "keep"));
             (log, id)

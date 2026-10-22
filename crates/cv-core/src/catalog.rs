@@ -376,7 +376,8 @@ mod imp {
         }
     }
 
-    /// The SELECT column list [`row_to_ref`] decodes — keep the two in lockstep.
+    /// The sessions column list, in order: [`row_to_ref`] decodes it and `insert_refs` names it —
+    /// keep all three in lockstep.
     const REF_COLUMNS: &str = "harness,id,path,cwd,title,created_at,updated_at,message_count,created_ns,updated_ns";
 
     /// A timestamp from the nanosecond column at `ns_idx`, falling back to the second-precision
@@ -437,12 +438,12 @@ mod imp {
         refs: &[SessionRef],
         retained: &std::collections::HashMap<(String, String), String>,
     ) -> rusqlite::Result<()> {
-        let mut stmt = tx.prepare(
+        let mut stmt = tx.prepare(&format!(
             "INSERT OR REPLACE INTO sessions
-             (harness,id,path,cwd,title,created_at,updated_at,message_count,created_ns,updated_ns,writer_version)
+             ({REF_COLUMNS},writer_version)
              VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,
-                 COALESCE(?11,(SELECT writer_version FROM sessions WHERE harness=?1 AND id=?2 AND path=?3)))",
-        )?;
+                 COALESCE(?11,(SELECT writer_version FROM sessions WHERE harness=?1 AND id=?2 AND path=?3)))"
+        ))?;
         for r in refs {
             stmt.execute(params![
                 r.harness.as_str(),

@@ -462,17 +462,7 @@ mod tests {
             kind,
         };
         let events = vec![
-            ev(
-                1,
-                TaskEventKind::Opened {
-                    title: "pick".into(),
-                    body: String::new(),
-                    repo: None,
-                    issue: None,
-                    channel: None,
-                    assignee: Some("ember".into()),
-                },
-            ),
+            ev(1, crate::task::opened_kind("pick", Some("ember"))),
             ev(
                 2,
                 TaskEventKind::Posed {
