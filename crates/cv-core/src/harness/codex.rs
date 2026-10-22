@@ -406,13 +406,23 @@ impl CodexCtx {
 /// Codex hook membership is a native UUID/parent relation, verified against each child's header.
 /// This also makes the registered forest available to tools and query consumers of the one API.
 fn hook_forest(parent: &SessionRef) -> Result<Vec<crate::AgentRef>> {
-    let rows = crate::lanes::read_ledger();
+    let ledger = crate::lanes::ledger_index();
+    let rows = &ledger.rows;
     let mut known = std::collections::HashSet::from([parent.id.clone()]);
     let mut out = Vec::new();
-    loop {
-        let before = known.len();
-        for row in rows.iter() {
-            if !known.contains(&row.session_id) || known.contains(&row.agent_id) {
+    // The rows whose parent is known and that are not yet decided, by ledger position. Each round
+    // takes them in ledger order, and a child found mid-round makes its own rows candidates of
+    // the same round when they lie further on, of the next round otherwise: the passes the fold
+    // made over every row, without scanning a row whose parent is not in the forest. A row is
+    // decided once (its header verifies or never will), so a forest costs its own rows.
+    let mut candidates: std::collections::BTreeSet<usize> = ledger.rows_of(&parent.id).iter().copied().collect();
+    while !candidates.is_empty() {
+        let mut cursor = 0;
+        while let Some(at) = candidates.range(cursor..).next().copied() {
+            candidates.remove(&at);
+            cursor = at + 1;
+            let row = &rows[at];
+            if known.contains(&row.agent_id) {
                 continue;
             }
             let Some(path) = row.agent_transcript_path.as_deref() else {
@@ -430,6 +440,7 @@ fn hook_forest(parent: &SessionRef) -> Result<Vec<crate::AgentRef>> {
                 continue;
             }
             known.insert(head.id.clone());
+            candidates.extend(ledger.rows_of(&head.id).iter().copied());
             let mut session = SessionRef::new(head.id, Harness::Codex, path);
             session.cwd = head.cwd;
             session.created_at = head.created_at.or(Some(row.ts));
@@ -443,9 +454,6 @@ fn hook_forest(parent: &SessionRef) -> Result<Vec<crate::AgentRef>> {
                 result_status: None,
                 result_summary: None,
             });
-        }
-        if known.len() == before {
-            break;
         }
     }
     out.sort_by_key(|s| std::cmp::Reverse(s.session.created_at));
@@ -1035,6 +1043,12 @@ mod tests {
         assert!(
             std::sync::Arc::ptr_eq(&rows, &crate::lanes::read_ledger()),
             "unchanged: not reparsed"
+        );
+        let index = crate::lanes::ledger_index();
+        crate::subagent_tree_of(&parent).unwrap();
+        assert!(
+            std::sync::Arc::ptr_eq(&index, &crate::lanes::ledger_index()),
+            "unchanged: indexed once"
         );
         crate::lanes::append_lane_event(&row("late", "root", "root")).unwrap();
         let after = crate::lanes::read_ledger();

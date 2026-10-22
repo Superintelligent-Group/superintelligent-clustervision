@@ -212,6 +212,55 @@ pub fn read_ledger() -> std::sync::Arc<[LaneEvent]> {
     rows
 }
 
+/// The ledger's rows indexed for lineage walks: each parent session's rows, and the latest
+/// `start` per agent. Built once per ledger state ([`ledger_index`]).
+#[derive(Default)]
+pub struct LedgerIndex {
+    pub rows: std::sync::Arc<[LaneEvent]>,
+    by_session: HashMap<String, Vec<usize>>,
+    started: HashMap<String, usize>,
+}
+
+impl LedgerIndex {
+    fn of(rows: std::sync::Arc<[LaneEvent]>) -> Self {
+        let mut index = LedgerIndex {
+            rows,
+            ..Default::default()
+        };
+        for (at, row) in index.rows.iter().enumerate() {
+            index.by_session.entry(row.session_id.clone()).or_default().push(at);
+            if row.event == LaneEventKind::Start {
+                index.started.insert(row.agent_id.clone(), at);
+            }
+        }
+        index
+    }
+    /// The positions of the rows naming `session` as their parent, in file order.
+    pub fn rows_of(&self, session: &str) -> &[usize] {
+        self.by_session.get(session).map_or(&[], Vec::as_slice)
+    }
+    /// The last `start` row registering `agent`.
+    pub fn latest_start(&self, agent: &str) -> Option<&LaneEvent> {
+        self.started.get(agent).map(|&at| &self.rows[at])
+    }
+}
+
+/// [`read_ledger`] indexed, kept while the ledger's parse is: a lineage walk per parent (Codex
+/// `hook_forest`) or per touching session (the edit guard) is then a lookup, not a scan of
+/// every row.
+pub fn ledger_index() -> std::sync::Arc<LedgerIndex> {
+    use std::sync::{Arc, Mutex, PoisonError};
+    static MEMO: Mutex<Option<Arc<LedgerIndex>>> = Mutex::new(None);
+    let rows = read_ledger();
+    let mut memo = MEMO.lock().unwrap_or_else(PoisonError::into_inner);
+    if let Some(index) = memo.as_ref().filter(|index| Arc::ptr_eq(&index.rows, &rows)) {
+        return Arc::clone(index);
+    }
+    let index = Arc::new(LedgerIndex::of(rows));
+    *memo = Some(Arc::clone(&index));
+    index
+}
+
 /// The latest `stop` per bare agent id among the rows `keep` admits — what [`status_of`]
 /// consults. The parent scope keeps one parent's rows; the forest scope keeps the lanes' own.
 fn ledger_stops(rows: &[LaneEvent], mut keep: impl FnMut(&LaneEvent) -> bool) -> HashMap<String, DateTime<Utc>> {
