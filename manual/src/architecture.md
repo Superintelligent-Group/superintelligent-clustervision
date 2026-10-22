@@ -196,11 +196,15 @@ Some careful properties make it safe to lean on:
 - **It's scoped to the resolved environment** in process and persisted for `cv` and the desktop app through the catalog database; the same rows feed the freshness probe's append detection.
 - **Empty results aren't cached** — a non-transcript path is cheap to re-reject.
 
-### The head/tail cap
+### Growing transcripts resume
 
-One more guard keeps discovery fast on pathological inputs. Some transcripts are *enormous* — Codex rollout logs can run to hundreds of megabytes. Fully parsing those during a *listing* would defeat the point of the cheap-`SessionRef` design.
-
-So the file-based adapters cap how much they read during discovery. The Codex adapter is the clearest example: plain files up to a `FULL_SCAN_CAP` (8 MiB) are parsed in full; larger plain files are **sampled head + tail** (1 MiB each). The head carries `id` / `cwd` / `title` / `created_at`; the tail's last record carries the real `updated_at`. Codex discovery leaves `message_count` as `null` (not counted), including compressed `.jsonl.zst` rollouts; zero is reserved for a counted session with no turns. Compressed metadata still requires decoding the source. A full read or index pass certifies exact catalog counts.
+Some transcripts are *enormous* — Codex rollout logs can run to hundreds of megabytes — and the
+live ones keep growing. Discovery reads each one in full once, then keeps the fold's state at the
+last finished line in the scan cache, beside the file's identity and a sample of its prefix. An
+unchanged file costs a stat; a grown one costs the records appended since. Claude transcripts
+and plain Codex rollouts resume this way. Codex discovery leaves `message_count` as `null` (not
+counted), including compressed `.jsonl.zst` rollouts, which are decoded in full; zero is reserved
+for a counted session with no turns. A full read or index pass certifies exact catalog counts.
 
 ### Sub-agents
 

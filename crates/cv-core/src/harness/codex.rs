@@ -244,11 +244,15 @@ impl Adapter for Codex {
         }
         // An unreadable dir, and a rollout whose scan fails, are skipped and reported.
         let mut found: crate::Discovered = crate::par_discovery_filter_map(paths, |path| {
+            // A plain rollout grows in place: its scan resumes where the last one ended.
+            if is_plain_rollout(&path) {
+                return crate::Skipped::listed(&path, cached_metadata(&path));
+            }
             let scanned = || match is_zst_path(&path) {
                 // Decoded in full: an index running beside discovery streams these same bytes.
                 true => crate::codex_handoff::decode_and_offer(
                     || super::store::zst::content_size(&path),
-                    || scan_rollout(&path, FULL_SCAN_CAP),
+                    || scan_rollout(&path),
                 ),
                 false => scan(&path),
             };
@@ -901,26 +905,126 @@ fn title_of(v: Option<JsonView<'_>>, only: Option<&str>) -> Result<String> {
     Ok(head.finish())
 }
 
-/// Files up to this size are scanned in full by [`scan`]; larger ones are sampled head+tail.
-const FULL_SCAN_CAP: u64 = 8 << 20; // 8 MiB
+/// A plain `.jsonl` rollout: what Codex appends to while a session runs.
+fn is_plain_rollout(path: &Path) -> bool {
+    path.extension().and_then(|e| e.to_str()) == Some("jsonl")
+}
 
-/// Metadata-only scan for `discover`: bodies are never resolved past a title and counts are
-/// deferred until a full read or index pass. Files up to [`FULL_SCAN_CAP`] (and every `.jsonl.zst`) are scanned
-/// in full; larger plain ones (Codex rollout logs can be hundreds of MB) are sampled head+tail so
-/// discovery never reads gigabytes just to list sessions. Exact content is parsed on actual open.
+/// Metadata-only scan: bodies are never resolved past a title and counts are deferred until a
+/// full read or index pass. Every record is read (0.17 sampled 1 MiB of head and tail past
+/// 8 MiB, and listed a different title or cwd than a full read would). Exact content is parsed
+/// on actual open.
 fn scan(path: &Path) -> Result<SessionRef> {
-    scan_capped(path, FULL_SCAN_CAP)
+    if is_plain_rollout(path) {
+        return Ok(scan_at(path, None)?.0);
+    }
+    scan_rollout(path).map(|(r, _)| r)
 }
 
-/// [`scan`] with an explicit full-scan cap (tests exercise the sampled path on a small file).
-fn scan_capped(path: &Path, full_scan_cap: u64) -> Result<SessionRef> {
-    scan_rollout(path, full_scan_cap).map(|(r, _)| r)
+/// The discovery fold of a plain rollout, through the per-file scan cache with its continuation:
+/// an unchanged rollout costs a stat, a grown one the appended records.
+fn cached_metadata(path: &Path) -> Result<Option<SessionRef>> {
+    crate::discover_cache::cached_scan_continued(path, LISTING, |from| {
+        let (reference, checkpoint) = scan_at(path, from)?;
+        let continuation = checkpoint.and_then(|checkpoint| {
+            let head = crate::resume::MarkHead::of(path, &checkpoint, LISTING)?;
+            Some(crate::discover_cache::ScanContinuation {
+                head,
+                checkpoint,
+                dependencies: Default::default(),
+            })
+        });
+        Ok((Some(reference), continuation))
+    })
 }
 
-/// [`scan_capped`], keeping the rollout when it was decoded.
-fn scan_rollout(path: &Path, full_scan_cap: u64) -> Result<(SessionRef, Option<Rollout>)> {
-    const SAMPLE: u64 = 1 << 20; // 1 MiB head, 1 MiB tail
+/// The checkpoint layer of [`scan_at`]'s fold.
+const LISTING: &str = "codex.discovery.v1";
 
+/// The discovery fold between records: what [`Reader::record`] keeps under the metadata demand.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct Listing {
+    session: Session,
+    ctx: CodexCtx,
+}
+
+#[cfg(test)]
+thread_local! {
+    /// The `(offset, bytes)` each plain-rollout discovery fold read: the continuation test's record.
+    static FOLDED: std::cell::RefCell<Vec<(u64, u64)>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Fold a plain rollout's records from `from`'s offset (or 0) to its end, and the state after
+/// its last finished line: a partial last line is folded now but read again next time.
+fn scan_at(path: &Path, from: Option<&stream::Checkpoint>) -> Result<(SessionRef, Option<stream::Checkpoint>)> {
+    let rollout = Rollout::open(path)?;
+    let len = rollout.input.len();
+    let restored = from.and_then(|cp| {
+        let state = cp.get::<Listing>(LISTING)?;
+        (cp.offset <= len && state.session.source_path.as_deref() == Some(path)).then_some((state, cp.offset))
+    });
+    let (Listing { mut session, mut ctx }, offset) = restored.unwrap_or_else(|| {
+        let session = Session {
+            source_path: Some(path.to_path_buf()),
+            ..Session::new(String::new(), Harness::Codex)
+        };
+        (
+            Listing {
+                session,
+                ctx: CodexCtx::default(),
+            },
+            0,
+        )
+    });
+    #[cfg(test)]
+    FOLDED.with(|folded| folded.borrow_mut().push((offset, len - offset)));
+    let mut out = Vec::new();
+    let mut prefix: Option<stream::Checkpoint> = None;
+    let mut finished = offset;
+    let mut partial = false;
+    {
+        let mut reader = Reader {
+            session: &mut session,
+            ctx: &mut ctx,
+            out: &mut out,
+            has_events: false,
+            demand: (&stream::Demand::DISCOVERY).into(),
+            source: None,
+        };
+        rollout.lines(offset, len, |line| {
+            if !line.complete && !partial {
+                partial = true;
+                prefix = Some(listing_checkpoint(finished, reader.session, reader.ctx));
+            }
+            if let Some(view) = line.view {
+                reader.record(view)?;
+            }
+            if line.complete {
+                finished = line.end;
+            }
+            Ok(Flow::Continue)
+        })?;
+    }
+    if !partial {
+        prefix = Some(listing_checkpoint(finished, &session, &ctx));
+    }
+    Ok((listed(path, session, &ctx), prefix))
+}
+
+fn listing_checkpoint(offset: u64, session: &Session, ctx: &CodexCtx) -> stream::Checkpoint {
+    #[derive(serde::Serialize)]
+    struct ListingRef<'a> {
+        session: &'a Session,
+        ctx: &'a CodexCtx,
+    }
+    let mut checkpoint = stream::Checkpoint::new(offset);
+    checkpoint.put(LISTING, &ListingRef { session, ctx });
+    checkpoint
+}
+
+/// A decoded `.jsonl.zst` or a 2025 single-document rollout, scanned whole, keeping the rollout
+/// when it was decoded.
+fn scan_rollout(path: &Path) -> Result<(SessionRef, Option<Rollout>)> {
     let mut s = Session::new(String::new(), Harness::Codex);
     let mut ctx = CodexCtx::default();
     let mut out = Vec::new();
@@ -937,37 +1041,19 @@ fn scan_rollout(path: &Path, full_scan_cap: u64) -> Result<(SessionRef, Option<R
             source: None,
         };
         let rollout = Rollout::open(path)?;
-        let len = rollout.input.len();
-        if rollout.input.is_decoded() || len <= full_scan_cap {
-            rollout.lines(0, len, |line| {
-                if let Some(view) = line.view {
-                    s.record(view)?;
-                }
-                Ok(Flow::Continue)
-            })?;
-        } else {
-            // Head: id / cwd / title / created_at all live near the top; its partial last line is
-            // not read.
-            rollout.lines(0, SAMPLE.min(len), |line| {
-                if let (Some(view), true) = (line.view, line.complete) {
-                    s.record(view)?;
-                }
-                Ok(Flow::Continue)
-            })?;
-            // Tail: the last record carries the real updated_at. Skip the (likely partial) first line.
-            let mut first = true;
-            rollout.lines(len.saturating_sub(SAMPLE), len, |line| {
-                let skipped = std::mem::take(&mut first);
-                if let (Some(view), false) = (line.view, skipped) {
-                    s.record(view)?;
-                }
-                Ok(Flow::Continue)
-            })?;
-            // Keep the existing metadata sampling policy; all discovery defers exact counts.
-        }
+        rollout.lines(0, rollout.input.len(), |line| {
+            if let Some(view) = line.view {
+                s.record(view)?;
+            }
+            Ok(Flow::Continue)
+        })?;
         decoded = rollout.input.is_decoded().then_some(rollout);
     }
+    Ok((listed(path, s, &ctx), decoded))
+}
 
+/// The listing row a scan's session makes, its writer version observed.
+fn listed(path: &Path, mut s: Session, ctx: &CodexCtx) -> SessionRef {
     if s.id.is_empty() {
         // `rollout-<ts>-<uuid>.jsonl[.zst]`: strip both suffixes.
         let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
@@ -987,7 +1073,7 @@ fn scan_rollout(path: &Path, full_scan_cap: u64) -> Result<(SessionRef, Option<R
         ..SessionRef::new(s.id, Harness::Codex, path.to_path_buf())
     };
     crate::discover_cache::read::Context::current().observe_writer(&r, ctx.writer_version.as_deref());
-    Ok((r, decoded))
+    r
 }
 
 #[cfg(test)]
@@ -2813,17 +2899,38 @@ mod tests {
         );
         assert_eq!(r.message_count, None, "discovery defers exact turn counts");
 
-        // Over the full-scan cap the middle is never read: the metadata still comes from the head
-        // and tail, and the turn count is 0 ("not counted") rather than an extrapolation
-        // (`SessionRef::message_count` is user + assistant turns, never a proxy).
-        let sampled = scan_capped(&path, 0).unwrap();
-        assert_eq!(sampled.id, "child-1");
-        assert_eq!(sampled.cwd, r.cwd);
-        assert_eq!(sampled.title, r.title);
-        assert_eq!(sampled.updated_at, r.updated_at);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_grown_rollout_folds_only_its_appended_records() {
+        let _world = crate::test_world("codex-listing-continuation");
+        let lines = fixture_lines("scan_titles_a_subagent_by_its_own_task_not_the_parents_prompt.jsonl");
+        let dir = cv_testkit::temp_dir("codex-continuation");
+        let path = dir.join("rollout-2026-09-19T14-12-43-child-1.jsonl");
+        let cut = lines.len() / 2;
+        let head = lines[..cut].join("\n") + "\n";
+        // The first pass ends inside a record: that line is read again, never trusted.
+        let torn = &lines[cut][..lines[cut].len() / 2];
+        std::fs::write(&path, format!("{head}{torn}")).unwrap();
+        let folded = || FOLDED.with(|f| std::mem::take(&mut *f.borrow_mut()));
+        let first = cached_metadata(&path).unwrap().unwrap();
+        assert_eq!(folded(), [(0, (head.len() + torn.len()) as u64)]);
+        assert_eq!(cached_metadata(&path).unwrap(), Some(first), "unchanged: a hit");
+        assert!(folded().is_empty());
+        let whole = lines.join("\n") + "\n";
+        std::fs::write(&path, &whole).unwrap();
+        let grown = cached_metadata(&path).unwrap().unwrap();
         assert_eq!(
-            sampled.message_count, None,
-            "over the cap the count is unknown, not estimated"
+            folded(),
+            [(head.len() as u64, (whole.len() - head.len()) as u64)],
+            "only the records after the last finished line"
+        );
+        let fresh = scan(&path).unwrap();
+        assert_eq!(
+            serde_json::to_value(&grown).unwrap(),
+            serde_json::to_value(&fresh).unwrap(),
+            "a resumed fold lists what a whole one does"
         );
         std::fs::remove_dir_all(&dir).ok();
     }

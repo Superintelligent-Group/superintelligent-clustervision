@@ -16,8 +16,8 @@ data was found under `$HOME`.
 
 Discovery parallelizes across harnesses and caches metadata by file identity (length, mtime,
 device, inode, ctime), so the first run does the real work (158–186 s for 5,421 sessions and 78 GB,
-measured 2026-10-14) and later runs take under 0.1 s. A huge plain Codex rollout is
-sampled head+tail during discovery and reports 0 turns until counted; compressed rollouts are decoded in full. See [Architecture](architecture.md).
+measured 2026-10-14) and later runs take under 0.1 s. A growing transcript is read again only from
+where the last listing stopped. Codex rollouts report no turn count until counted. See [Architecture](architecture.md).
 
 ### `cv port` warns about lost content
 

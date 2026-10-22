@@ -185,8 +185,8 @@ fn warm_path_reads_catalog_and_full_discovery_heals() {
     assert_eq!(ids(&refs), vec!["alphasess"]);
 }
 
-/// A Codex rollout over the discovery scan cap lists with `message_count` `None` ("not counted": the
-/// middle was never read). The first full parse writes the true count back, and the next discovery
+/// A large Codex rollout lists with `message_count` `None` ("not counted": discovery folds
+/// listing facts, never turns). The first full parse writes the true count back, and the next discovery
 /// keeps it (a scan-cache hit while the file is unchanged), so `cv ls` shows the real number.
 #[test]
 fn a_full_parse_fills_a_not_counted_catalog_row() {
@@ -207,8 +207,8 @@ fn a_full_parse_fills_a_not_counted_catalog_row() {
         msg("2026-01-01T10:00:01Z", "user", "input_text", "first"),
         msg("2026-01-01T10:00:02Z", "assistant", "output_text", "one"),
     ];
-    // Nine MiB of reply in the middle: past codex's FULL_SCAN_CAP (`8 << 20`, harness/codex.rs —
-    // the hidden cap this blob exists to clear), out of the sampled 1 MiB head/tail.
+    // Nine MiB of reply in the middle: past the 8 MiB where 0.17's discovery sampled head and
+    // tail instead of reading every record; discovery still counts nothing.
     lines.push(msg(
         "2026-01-01T10:00:03Z",
         "assistant",
@@ -224,7 +224,7 @@ fn a_full_parse_fills_a_not_counted_catalog_row() {
     assert_eq!(
         row(cv_core::discover_all()).message_count,
         None,
-        "over the cap: not counted"
+        "discovery: not counted"
     );
     assert_eq!(row(cv_core::sessions()).message_count, None);
 

@@ -33,7 +33,7 @@ or rewritten. Paths are relative to `crates/`.
 | `discover_all` | O(S_meta + n) | O(n) stats + scan-cache hits | O(n_h) refresh reads, O(changed rows) writes | `lib.rs` discover; `catalog/order.rs` |
 | `sessions()` / `cv ls` | as above | O(n) probe + rows, O(n log n) sort | as above | `catalog.rs` `probe_stale_in` |
 | Claude discovery | O(S) | O(n) | O(appended) through the continuation | `claude.rs` `cached_metadata` |
-| Codex discovery | O(Σ min(s, 8 MiB)) + zst decode | O(n) | O(min(s, 8 MiB)) | `codex.rs` `scan_rollout` |
+| Codex discovery | O(S) + zst decode | O(n) | O(appended) through the continuation | `codex.rs` `cached_metadata` |
 | Claude sub-agent forest, any demand | O(Σ s_k) | O(k) stats | O(appended) for the changed agent | `claude.rs` `agents_in_dir` |
 | Codex hook forest | O(L) index + that forest's rows | same | same | `codex.rs` `hook_forest`, `lanes::ledger_index` |
 | Edit guard, per edit | O(touching sessions × hops) lookups | same | same | `hooks.rs` `lineage_root` |
@@ -77,9 +77,6 @@ Budgets (they bound work and say so):
   Past it an evicted session's page costs O(start) and its head O(s); stderr says so once.
 - `source/scope.rs` `RETAINED_BYTES` 16 MiB: per namespace. When a namespace passes it,
   stderr says so once.
-- Codex `FULL_SCAN_CAP` 8 MiB: listing metadata for larger rollouts comes from 1 MiB head and
-  tail samples. It bounds work and is stated in DATAPATHS. Making it say so per session would
-  change output.
 - `hooks.rs` `COMPACT_FULL_SCAN_MAX` / `COMPACT_TAIL_BYTES` / `COMMIT_TAIL_BYTES`: the hook text
   names the command to run in full.
 - `EMBED_HEAD_BYTES` 64 KiB: by definition, the vector is computed from the session's head.
@@ -98,6 +95,8 @@ Safety caps (they bound memory, and the fallback is bounded too):
 - `catalog/reader.rs` Probe reset at 256 refs: one extra stat per 256 refs.
 
 Removed mode switches:
+- Codex `FULL_SCAN_CAP` 8 MiB: past it a listing took title, cwd and times from 1 MiB head and
+  tail samples. Discovery now reads every record once and resumes a grown rollout.
 - API read cache: 32 entries FIFO, 256 KiB per entry and 2 MiB in all, past which a session
   silently paid O(start) per page.
 - MCP observe cursor: reader state for eight sessions under 64 KiB each. It is now one state
