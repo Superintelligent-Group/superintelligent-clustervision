@@ -875,6 +875,15 @@ fn note_settings_change(
     out.push(msg);
 }
 
+/// Token-wise equality of two usage blocks: unlike `Usage`'s `PartialEq`, cost is not compared.
+fn usage_eq(a: &Usage, b: &Usage) -> bool {
+    a.input_tokens == b.input_tokens
+        && a.output_tokens == b.output_tokens
+        && a.cache_read_tokens == b.cache_read_tokens
+        && a.cache_creation_tokens == b.cache_creation_tokens
+        && a.reasoning_tokens == b.reasoning_tokens
+}
+
 /// Marker in `extra.usage_source` for usage that came from a `token_usage_record` (authoritative:
 /// keyed by `response_id`/`turn_id`), so the `token_count` twin merges instead of duplicating.
 const USAGE_FROM_RECORD: &str = "token_usage_record";
