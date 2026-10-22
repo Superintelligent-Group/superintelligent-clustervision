@@ -702,17 +702,6 @@ impl Rollout {
     }
 }
 
-/// Whether a message holds a source descriptor (the reader then rechecks the source).
-fn sourced(m: &Message) -> bool {
-    m.content.iter().any(|block| match block {
-        Block::Text { text } | Block::Thinking { text, .. } | Block::ToolResult { content: text, .. } => {
-            !matches!(text, Text::Inline(_))
-        }
-        Block::ToolUse { input, .. } => matches!(input, crate::json::Json::Source(_)),
-        _ => false,
-    })
-}
-
 /// The Codex record codec over one rollout: each record accumulates into the session and context
 /// (a checkpoint's, or fresh at 0). A trailing assistant message is held until the usage record
 /// that may follow it, so the codec is settled only when nothing is held. A record that published
@@ -750,9 +739,6 @@ impl jsonl::Codec for Transcript<'_> {
             for m in &mut self.held[before..] {
                 m.extra.insert(crate::offsets::OFFSET_KEY.into(), at.into());
             }
-        }
-        if self.held[before..].iter().any(sourced) {
-            self.input.check()?;
         }
         // Hand the session metadata to the sink as soon as the model is known (session_meta /
         // turn_context land in the first records, before any message), so header-rendering sinks
@@ -964,7 +950,6 @@ fn scan_rollout(path: &Path, full_scan_cap: u64) -> Result<(SessionRef, Option<R
             })?;
             // Keep the existing metadata sampling policy; all discovery defers exact counts.
         }
-        rollout.input.check()?;
         decoded = rollout.input.is_decoded().then_some(rollout);
     }
 
