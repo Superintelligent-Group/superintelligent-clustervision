@@ -60,6 +60,8 @@
 
 - `cv search` without an index answers from that live read instead of exiting 1; `--frozen` without an index still names `cv index`.
 
+- `cv stats --tokens` keeps every live session's cached usage however large the store; it evicts only deleted sources, never re-reading the fleet.
+
 ## 0.18.0-rc.1 — 2026-10-22 — the release an agent can trust
 
 **Breaking: commands, MCP, HTTP and JSON.** A removed name exits 2 with a pointer to its replacement; a changed shape is named here.

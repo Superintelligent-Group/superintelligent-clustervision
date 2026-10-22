@@ -501,7 +501,7 @@ impl TokenStats {
         }
         #[cfg(feature = "sqlite")]
         if let Some(cache) = &cache {
-            cache.finish();
+            cache.finish(refs.len() + subs.len());
         }
         fold.finish(&mut stats);
         Ok(stats)
