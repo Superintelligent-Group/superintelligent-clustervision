@@ -19,6 +19,7 @@ struct Projected {
 
 impl crate::source::Payload for Projected {
     const TAG: &'static str = "usage";
+    const BY_ROWS: bool = true;
 }
 
 /// The records' key, kept from 0.17 so the rows it wrote are replaced, not orphaned.

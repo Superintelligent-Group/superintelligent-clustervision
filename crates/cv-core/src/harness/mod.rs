@@ -602,6 +602,16 @@ pub trait Adapter: Send + Sync {
         None
     }
 
+    /// The [`Rows`](crate::source::Rows) certificate of every session the shared SQLite store
+    /// at `store` holds, by session id, from one consistent read that copies no message body:
+    /// what each session's own read consults (its rows' count and highest rowid, the flags and
+    /// small rows beside them). A consumer's record of a session whose certificate is unchanged
+    /// stays fresh across writes to the store's other sessions. `None`: the adapter certifies
+    /// none, and any write to the store rereads every session in it. Default: none.
+    fn rows(&self, _store: &Path) -> Option<std::collections::HashMap<String, crate::source::Rows>> {
+        None
+    }
+
     /// Whether `r`'s source is a SQLite database, whose `-wal`/`-journal` sidecars then guard it;
     /// `None` when that cannot be determined (no consumer certifies it). Default: by its extension.
     fn sqlite_source(&self, r: &SessionRef) -> Option<bool> {

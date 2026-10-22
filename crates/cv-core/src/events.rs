@@ -712,6 +712,7 @@ mod db {
 
     impl crate::source::Payload for Attributed {
         const TAG: &'static str = "events";
+        const BY_ROWS: bool = true;
     }
 
     fn authority(r: &SessionRef, prov: &Provenance) -> Attributed {

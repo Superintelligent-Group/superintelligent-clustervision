@@ -139,7 +139,7 @@ impl Reader {
         #[cfg(test)]
         self.counts_rows.set(self.counts_rows.get() + 1);
         let record = crate::source::Record::<super::imp::Counted>::decode(&record)?;
-        Some(record.admit(source, probe)?.counts.clone())
+        Some(record.admit_for(r, source, probe)?.counts.clone())
     }
 
     /// Refill only source-certified exact counts. Cold/malformed candidates are rejected
@@ -161,7 +161,7 @@ impl Reader {
             #[cfg(test)]
             self.turn_snapshots.set(self.turn_snapshots.get() + 1);
             let source = probe.snapshot(r);
-            if record.admit(&source, &mut probe).is_some() {
+            if record.admit_for(r, &source, &mut probe).is_some() {
                 r.message_count = Some(turns as usize);
             }
             // Bound retained fleet auxiliary metadata while sharing common DB identities

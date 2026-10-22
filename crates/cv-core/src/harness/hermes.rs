@@ -331,6 +331,12 @@ impl Adapter for Hermes {
         })
     }
 
+    /// Every session's certificate, from one read of the store's small tables and the
+    /// `messages(session_id, …)` indexes ([`rows_conn`]).
+    fn rows(&self, store: &Path) -> Option<std::collections::HashMap<String, crate::source::Rows>> {
+        open_ro(store).ok()?.read(|conn, _| rows_conn(conn)).ok()
+    }
+
     /// What `/goal`, `/loop` and `/heartbeat` keep in `state_meta` under `<kind>:<session id>`.
     fn store_affordances(&self, r: &SessionRef) -> anyhow::Result<Vec<crate::affordance::Affordance>> {
         let conn = open_ro(&r.path)?;
@@ -719,6 +725,175 @@ fn read_session_facts(
 /// that carries no branch / reset / delegate marker (`_COMPRESSION_CHILD_SQL`). Only meaningful for
 /// a session that ended in compression; `None` when the store does not say, an error when it
 /// cannot be asked. A child whose id is not text is no session cv can name.
+/// Every session's [`Rows`](crate::source::Rows) certificate: what a read of it consults besides
+/// message bodies. The message rows of its compression chain (count, highest id and, from schema
+/// v11 on, the `active` flags: a rewind or an in-place compaction flips them), each chain
+/// session's whole `sessions` row (title, prompt hash, lineage, counters), the end reason of the
+/// parent that stopped the walk, the `(id, model_config, started_at)` of its children (the
+/// compression continuation), and its `state_meta` rows. The aggregates come from the
+/// `messages(session_id, …)` indexes; no `content` is read.
+fn rows_conn(conn: &Connection) -> Result<std::collections::HashMap<String, crate::source::Rows>> {
+    use crate::source::Rows;
+    use std::collections::HashMap;
+    fn fold_value(digest: u64, value: rusqlite::types::ValueRef<'_>) -> u64 {
+        use rusqlite::types::ValueRef;
+        let (tag, bytes): (u8, std::borrow::Cow<'_, [u8]>) = match value {
+            ValueRef::Null => (0, (&[][..]).into()),
+            ValueRef::Integer(i) => (1, i.to_le_bytes().to_vec().into()),
+            ValueRef::Real(f) => (2, f.to_bits().to_le_bytes().to_vec().into()),
+            ValueRef::Text(t) => (3, t.into()),
+            ValueRef::Blob(b) => (4, b.into()),
+        };
+        let digest = Rows::fold(digest, &[tag]);
+        let digest = Rows::fold(digest, &(bytes.len() as u64).to_le_bytes());
+        Rows::fold(digest, &bytes)
+    }
+    struct Meta {
+        row: u64,
+        parent: Option<String>,
+        end_reason: Option<String>,
+        marked: bool,
+        child: u64,
+    }
+    let columns = super::store::sqlite::columns(conn, "sessions");
+    let mut sessions: HashMap<String, Meta> = HashMap::new();
+    let mut children: HashMap<String, u64> = HashMap::new();
+    {
+        let mut stmt = conn.prepare("SELECT * FROM sessions")?;
+        let names: Vec<String> = stmt.column_names().into_iter().map(str::to_owned).collect();
+        let at = |name: &str| names.iter().position(|n| n == name);
+        let (id_at, parent_at, end_at, config_at, started_at) = (
+            at("id").context("hermes sessions without id")?,
+            at("parent_session_id"),
+            at("end_reason"),
+            at("model_config"),
+            at("started_at"),
+        );
+        let text = |row: &rusqlite::Row<'_>, i: Option<usize>| -> Option<String> {
+            row.get::<_, Option<String>>(i?)
+                .ok()
+                .flatten()
+                .filter(|s| !s.is_empty())
+        };
+        let mut rows = stmt.query([])?;
+        while let Some(row) = rows.next()? {
+            let Some(id) = text(row, Some(id_at)) else { continue };
+            let mut digest = Rows::SEED;
+            for i in 0..names.len() {
+                digest = fold_value(digest, row.get_ref(i)?);
+            }
+            let config = text(row, config_at);
+            let mut child = Rows::SEED;
+            for i in [Some(id_at), config_at, started_at].into_iter().flatten() {
+                child = fold_value(child, row.get_ref(i)?);
+            }
+            let parent = text(row, parent_at);
+            sessions.insert(
+                id,
+                Meta {
+                    row: digest,
+                    parent,
+                    end_reason: text(row, end_at),
+                    marked: !lineage_markers(config.as_deref()).is_empty(),
+                    child,
+                },
+            );
+        }
+    }
+    let mut by_parent: Vec<(&str, &str, u64)> = sessions
+        .iter()
+        .filter_map(|(id, meta)| Some((meta.parent.as_deref()?, id.as_str(), meta.child)))
+        .collect();
+    by_parent.sort_unstable();
+    for (parent, _, child) in by_parent {
+        let digest = children.entry(parent.to_owned()).or_insert(Rows::SEED);
+        *digest = Rows::fold(*digest, &child.to_le_bytes());
+    }
+    let flags = super::store::sqlite::columns(conn, "messages").contains("active");
+    let mut messages: HashMap<String, (u64, i64, i64)> = HashMap::new();
+    {
+        let sql = if flags {
+            "SELECT session_id, count(*), max(id), total(active) FROM messages GROUP BY session_id"
+        } else {
+            "SELECT session_id, count(*), max(id), 0 FROM messages GROUP BY session_id"
+        };
+        let mut stmt = conn.prepare(sql)?;
+        let mut rows = stmt.query([])?;
+        while let Some(row) = rows.next()? {
+            let Some(id) = row.get::<_, Option<String>>(0)? else {
+                continue;
+            };
+            let active: f64 = row.get(3)?;
+            messages.insert(
+                id,
+                (
+                    row.get::<_, i64>(1)? as u64,
+                    row.get::<_, Option<i64>>(2)?.unwrap_or(0),
+                    active as i64,
+                ),
+            );
+        }
+    }
+    let mut meta_rows: HashMap<String, u64> = HashMap::new();
+    if table_exists(conn, "state_meta") {
+        let mut stmt = conn.prepare("SELECT key, value FROM state_meta ORDER BY key")?;
+        let mut rows = stmt.query([])?;
+        while let Some(row) = rows.next()? {
+            let Some(key) = row.get::<_, Option<String>>(0).ok().flatten() else {
+                continue;
+            };
+            let Some((_, id)) = key.split_once(':') else { continue };
+            let digest = meta_rows.entry(id.to_owned()).or_insert(Rows::SEED);
+            *digest = fold_value(fold_value(*digest, row.get_ref(0)?), row.get_ref(1)?);
+        }
+    }
+    let compressed = |id: &str| {
+        sessions.get(id).is_some_and(|m| {
+            matches!(
+                m.end_reason.as_deref(),
+                Some("compression") | Some("orphaned_compression")
+            )
+        })
+    };
+    let has_end = columns.contains("end_reason");
+    let mut out = HashMap::with_capacity(sessions.len());
+    for id in sessions.keys() {
+        let (mut count, mut high, mut digest) = (0u64, 0i64, Rows::SEED);
+        let mut seen = HashSet::new();
+        let mut current = id.as_str();
+        // The walk [`session_lineage_root_to_tip`] makes, over the rows just read.
+        loop {
+            if !seen.insert(current) {
+                break;
+            }
+            let Some(meta) = sessions.get(current) else { break };
+            let (n, max, active) = messages.get(current).copied().unwrap_or_default();
+            count += n;
+            high = high.max(max);
+            for part in [meta.row, n, max as u64, active as u64] {
+                digest = Rows::fold(digest, &part.to_le_bytes());
+            }
+            if meta.marked {
+                break;
+            }
+            let Some(parent) = meta.parent.as_deref() else { break };
+            digest = Rows::fold(digest, parent.as_bytes());
+            if let Some(end) = sessions.get(parent).and_then(|p| p.end_reason.as_deref()) {
+                digest = Rows::fold(digest, end.as_bytes());
+            }
+            if has_end && !compressed(parent) {
+                break;
+            }
+            current = parent;
+        }
+        for part in [children.get(id), meta_rows.get(id)] {
+            digest = Rows::fold(digest, &part.copied().unwrap_or(0).to_le_bytes());
+        }
+        out.insert(id.clone(), Rows { count, high, digest });
+    }
+    Ok(out)
+}
+
 fn compression_child(conn: &Connection, id: &str) -> Result<Option<String>> {
     let select = Select::of(conn, "sessions").always(&["id"]).probed(&["model_config"]);
     if !select.has("parent_session_id") {
@@ -2555,6 +2730,64 @@ mod tests {
             rusqlite::params![id, parent, started, ended, end_reason],
         )
         .unwrap();
+    }
+
+    /// Every corpus version: each session has a certificate, a certificate is deterministic, and
+    /// a row written to one session moves its certificate alone, while every session whose
+    /// certificate held reads exactly as it did before the write.
+    #[test]
+    fn corpus_rows_certify_each_session_and_move_only_with_its_rows() {
+        let corpus = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/corpus/hermes");
+        let mut versions: Vec<_> = std::fs::read_dir(&corpus).unwrap().map(|e| e.unwrap().path()).collect();
+        versions.sort();
+        assert!(!versions.is_empty());
+        for version in versions {
+            let world = cv_testkit::World::new("hermes-corpus-rows");
+            let db = world.base.join("state.db");
+            std::fs::copy(version.join(".hermes/state.db"), &db).unwrap();
+            let conn = Connection::open(&db).unwrap();
+            let before = rows_conn(&conn).unwrap();
+            assert_eq!(rows_conn(&conn).unwrap(), before, "{version:?}");
+            let refs = discover_conn(&conn, &db).unwrap();
+            assert!(!refs.is_empty());
+            for r in &refs {
+                assert!(before.contains_key(&r.id), "{version:?} {}", r.id);
+            }
+            let read = |conn: &Connection, r: &SessionRef| {
+                serde_json::to_string(&parse_conn_with(conn, r, &stream::Demand::RICH).unwrap().messages).unwrap()
+            };
+            let reads: Vec<String> = refs.iter().map(|r| read(&conn, r)).collect();
+            // A session no other session's read consults: no parent, no children.
+            let parents: HashSet<String> = conn
+                .prepare("SELECT parent_session_id FROM sessions WHERE parent_session_id IS NOT NULL")
+                .unwrap()
+                .query_map([], |row| row.get(0))
+                .unwrap()
+                .map(Result::unwrap)
+                .collect();
+            let leaf = refs.iter().find(|r| !parents.contains(&r.id)).expect("a leaf session");
+            conn.execute(
+                "INSERT INTO messages(session_id, role, content, timestamp) VALUES(?1, 'user', 'zqcertified', 9e9)",
+                [&leaf.id],
+            )
+            .unwrap();
+            let after = rows_conn(&conn).unwrap();
+            assert_eq!(after[&leaf.id].count, before[&leaf.id].count + 1, "{version:?}");
+            assert!(after[&leaf.id].high > before[&leaf.id].high, "{version:?}");
+            for (r, old) in refs.iter().zip(&reads) {
+                if r.id == leaf.id {
+                    assert_ne!(read(&conn, r), *old);
+                    continue;
+                }
+                assert_eq!(after[&r.id], before[&r.id], "{version:?} {}", r.id);
+                assert_eq!(
+                    read(&conn, r),
+                    *old,
+                    "{version:?} {}: certified unchanged, read changed",
+                    r.id
+                );
+            }
+        }
     }
 
     #[test]

@@ -1019,6 +1019,7 @@ struct InIndex;
 
 impl cv_core::source::Payload for InIndex {
     const TAG: &'static str = "fts";
+    const BY_ROWS: bool = true;
 }
 
 /// What planning compares each candidate with: the index's docs and the catalog's tables, read
@@ -1144,8 +1145,13 @@ impl Freshness {
         let indexed = existing.get(&r.id).copied().unwrap_or((mtime, size));
         let dependencies_fresh =
             baseline.is_some_and(|old| sig(old.primary) == indexed && old.dependencies_fresh(source, probe));
+        // A session of a shared SQLite store keeps its docs while its rows certify unchanged,
+        // though the store (the docs' stamp) moved with a write to another session.
+        let by_rows = dependencies.get(r).is_some_and(|record| record.baseline.rows.is_some());
         let fresh = mtime != 0
-            && existing.get(&r.id) == Some(&(mtime, size))
+            && existing
+                .get(&r.id)
+                .is_some_and(|&stamp| stamp == (mtime, size) || by_rows)
             && dependencies.admit(r, source, probe).is_some()
             && metadata.get(&r.id) == Some(&DiscoveryMetadata::new(r, prov));
         Freshness {
@@ -5108,6 +5114,66 @@ mod tests {
         );
         assert!(!cv_core::events::needs_ingest(&r));
         assert!(!cv_core::catalog::AffordanceTable::load().stale(&r));
+    }
+
+    /// A write to a shared store moves its files for every session in it. The sessions whose rows
+    /// certify unchanged stay fresh for search, events and counts; the written one is read again,
+    /// and so is one whose rows went backwards.
+    #[test]
+    fn a_store_write_rereads_only_the_sessions_whose_rows_moved() {
+        let _home = IsolatedHome::new();
+        let (dir, sdir) = (tmpdir(), tmpdir());
+        let db = sdir.join("state.db");
+        let writer = rusqlite::Connection::open(&db).unwrap();
+        writer.execute_batch("PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0;
+            CREATE TABLE sessions(id TEXT PRIMARY KEY,source TEXT NOT NULL,model TEXT,started_at REAL NOT NULL,ended_at REAL,message_count INTEGER DEFAULT 0,title TEXT);
+            CREATE TABLE messages(id INTEGER PRIMARY KEY AUTOINCREMENT,session_id TEXT NOT NULL,role TEXT NOT NULL,content TEXT,tool_call_id TEXT,tool_calls TEXT,tool_name TEXT,timestamp REAL NOT NULL);
+            CREATE INDEX idx_messages_session_id ON messages(session_id, id);
+            INSERT INTO sessions(id,source,started_at) VALUES('a','cli',1000),('b','cli',1000);
+            INSERT INTO messages(session_id,role,content,timestamp) VALUES('a','user','zqalpha',1001),('b','user','zqbravo',1001),('b','user','zqbravotwo',1002);").unwrap();
+        let refs: Vec<_> = ["a", "b"]
+            .into_iter()
+            .map(|id| cv_core::SessionRef {
+                harness: cv_core::Harness::Hermes,
+                path: db.clone(),
+                ..sref(id, id, "unused".into())
+            })
+            .collect();
+        assert_eq!(sweep(&dir, refs.clone(), false, false).unwrap().changed, 2);
+        assert_eq!(sweep(&dir, refs.clone(), false, false).unwrap().changed, 0);
+        writer
+            .execute(
+                "INSERT INTO messages(session_id,role,content,timestamp) VALUES('a','user','zqalphalate',1003)",
+                [],
+            )
+            .unwrap();
+        let stale = |r: &cv_core::SessionRef| {
+            (
+                cv_core::events::needs_ingest(r),
+                cv_core::catalog::AffordanceTable::load().stale(r),
+            )
+        };
+        assert_eq!((stale(&refs[0]), stale(&refs[1])), ((true, true), (false, false)));
+        let (hits, _, suffix) = search_suffixed(
+            &dir,
+            "zqalphalate",
+            10,
+            crate::SearchFilter::default(),
+            Some(LIVE_BYTES),
+            &refs,
+        )
+        .unwrap();
+        assert_eq!((hits.len(), suffix.stale, suffix.read), (1, 1, 1), "{suffix:?}");
+        assert_eq!(sweep(&dir, refs.clone(), false, false).unwrap().changed, 1);
+        assert_eq!(text_search(&dir, "zqalphalate", 10).unwrap().len(), 1);
+        // Rows that went backwards (a deletion, a rewrite) reread the session whole.
+        writer
+            .execute("DELETE FROM messages WHERE content='zqbravotwo'", [])
+            .unwrap();
+        assert_eq!(stale(&refs[1]), (true, true));
+        assert_eq!(sweep(&dir, refs.clone(), false, false).unwrap().changed, 1);
+        assert!(text_search(&dir, "zqbravotwo", 10).unwrap().is_empty());
+        assert_eq!(sweep(&dir, refs, false, false).unwrap().changed, 0);
     }
 
     /// The core invariant of `ChunkSink`: a body larger than [`CHUNK_BYTES`] is flushed into several

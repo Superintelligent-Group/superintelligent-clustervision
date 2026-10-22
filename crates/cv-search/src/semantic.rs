@@ -1956,6 +1956,7 @@ mod tests {
         store.meta[0].source = Some(Baseline {
             primary: None,
             stamp: None,
+            rows: None,
         });
         store.meta[0].session.title = Some("unused refresh title".repeat(4096));
         store.meta[0].session.message_count = Some(17);

@@ -229,10 +229,10 @@ Audited against `git log v0.17.0..HEAD` on 2026-10-21; a closure below names its
   Cursor CLI counts to exclude empty stores. Removing these reads needs to preserve inclusion and exact metadata.
   Shared selections landed for OpenClaw/Hermes/Qwen tasks/Goose/exports (`62f0ccda`, `0a6a3b22`,
   `7475e978`, `20980e64`, `646b8fb6`); native allocations and validation still cost work.
-- **Search freshness, closed.** A query is the index plus a bounded live read of what it has
-  not seen (`cv-search/src/fts/live.rs`): stale sessions read from their FTS mark into a private
-  in-memory index, ranked by the same BM25 over summed statistics, within `--live-bytes`. No timer
-  keeps search fresh; `cv index` pre-pays. `--frozen` reads nothing live.
+- **Search freshness, closed.** A query is the index plus a live read of what it has not seen
+  (`cv-search/src/fts/live.rs`), from FTS marks, same BM25 over summed statistics, within
+  `--live-bytes`; `cv index` pre-pays, no timer. A shared SQLite store's write rereads only the
+  sessions whose `source::Rows` certificate moved (Hermes); rows above the mark are not yet read alone.
 - **Archive inventory.** `archive sync` uses `index_all`'s references; `cv/src/cmd/archive` owns
   its checked artifact projection. An unavailable index falls back to discovery with a diagnostic.
 - **Three message windowings, closed.** JSON, text rendering and pack relevance excerpts share

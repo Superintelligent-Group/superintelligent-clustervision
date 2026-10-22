@@ -972,6 +972,7 @@ mod imp {
 
     impl crate::source::Payload for Counted {
         const TAG: &'static str = "counts";
+        const BY_ROWS: bool = true;
     }
     use crate::source::Payload as _;
 
@@ -1036,7 +1037,7 @@ mod imp {
             .and_then(crate::source::Record::<Counted>::decode)
             .is_some_and(|old| {
                 turns.is_none_or(|turns| old.payload.turns == Some(turns))
-                    && old.admit(source, &mut crate::source::Probe::default()).is_some()
+                    && old.admit_for(r, source, &mut crate::source::Probe::default()).is_some()
             });
         if keep && turns.is_none() {
             return;
@@ -2271,6 +2272,7 @@ mod imp {
                 Baseline {
                     primary: None,
                     stamp: None,
+                    rows: None,
                 },
                 Counted { counts, turns: Some(3) },
             );

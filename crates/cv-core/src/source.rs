@@ -8,6 +8,10 @@
 //! consumer owns its records: refreshing counts cannot make an older search index fresh, and a
 //! missing or older record rereads once.
 //!
+//! A session in a shared SQLite store adds its [`Rows`] certificate: a write to the store moves
+//! the database's identity for all its sessions, and a session whose certificate holds is admitted
+//! without rereading ([`Record::admit_for`]).
+//!
 //! These are metadata guards, not content verification. Append-safe comparisons deliberately
 //! exclude the primary identity: immutable-prefix contracts and sampled resume marks govern reuse
 //! during growth. The before-pass inventory covers adapter-declared paths; consumers additionally
@@ -258,6 +262,23 @@ impl Stamp {
         }
     }
 
+    /// [`Self::matches`] with the files in `store` left out of both sides: a shared database's
+    /// own files, which every write to any of its sessions moves.
+    fn matches_except(&self, current: &Stamp, probe: &mut Probe, store: &[PathBuf]) -> bool {
+        let kept =
+            |entries: Vec<Entry>| -> Vec<Entry> { entries.into_iter().filter(|e| !store.contains(&e.path)).collect() };
+        let (Some(old), Some(now)) = (self.entries(), current.entries()) else {
+            return false;
+        };
+        let Some(Some(reads)) = self.reads() else {
+            return false;
+        };
+        kept(old) == kept(now)
+            && kept(reads)
+                .iter()
+                .all(|entry| probe.entry(&entry.path).as_ref() == Some(entry))
+    }
+
     /// The same inventory, and every recorded read still as recorded: the stamp of a pass whose
     /// read set is unrecorded never matches.
     fn matches(&self, current: &Stamp, probe: &mut Probe) -> bool {
@@ -478,6 +499,33 @@ pub(crate) fn record_message_reads(message: &crate::Message, primary: Option<&st
 pub struct Baseline {
     pub primary: Option<FileId>,
     pub stamp: Option<Stamp>,
+    /// A session in a shared SQLite store: its own rows as the adapter certified them when this
+    /// baseline was published ([`Rows`]). Absent for every other source, and then never written.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rows: Option<Rows>,
+}
+
+/// The certificate of one session's rows in a database shared by many sessions
+/// ([`crate::harness::Adapter::rows`]): how many rows its read consults, the highest rowid among
+/// them (the high-water mark), and a digest of the small rows and flags beside them (session
+/// metadata, lineage, visibility). A write to the store moves the database's identity for every
+/// session in it; a session whose certificate is unchanged is admitted without rereading. Like a
+/// resume mark's samples, it is not a content digest: an in-place edit of a message body that
+/// changes no count, rowid, flag or session row escapes it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct Rows {
+    pub count: u64,
+    pub high: i64,
+    pub digest: u64,
+}
+
+impl Rows {
+    /// Fold `bytes` into a certificate digest (FNV-1a), for adapters building one.
+    pub fn fold(digest: u64, bytes: &[u8]) -> u64 {
+        fnv1a(digest, bytes)
+    }
+    /// The digest a certificate starts from.
+    pub const SEED: u64 = 0xcbf2_9ce4_8422_2325;
 }
 
 impl Baseline {
@@ -518,6 +566,24 @@ impl Baseline {
         self.primary.is_some() && self.primary == current.primary && self.dependencies_fresh(current, probe)
     }
 
+    /// A session in a shared SQLite store whose files moved (another session was written): the
+    /// store's own files aside, every dependency is as recorded, and `r`'s rows certify as they
+    /// did ([`Rows`]).
+    pub fn rows_fresh(&self, r: &SessionRef, current: &Self, probe: &mut Probe) -> bool {
+        let (Some(rows), Some(_), Some(old), Some(now)) =
+            (self.rows, current.primary, self.stamp.as_ref(), current.stamp.as_ref())
+        else {
+            return false;
+        };
+        let primary = probe.primary_path(r);
+        let mut store: Vec<PathBuf> = sqlite_sidecars(&primary).into();
+        store.push(primary);
+        let Some(store) = store.iter().map(|p| absolute(p)).collect::<Option<Vec<_>>>() else {
+            return false;
+        };
+        old.matches_except(now, probe, &store) && probe.rows(r) == Some(rows)
+    }
+
     /// Attach the read set captured by this consumer's complete pass, never another consumer's.
     pub fn with_reads(&self, reads: &ReadSet) -> Self {
         let stamp = (|| {
@@ -532,6 +598,7 @@ impl Baseline {
         Self {
             primary: self.primary,
             stamp,
+            rows: self.rows,
         }
     }
 }
@@ -547,6 +614,10 @@ fn fnv1a(mut hash: u64, bytes: &[u8]) -> u64 {
 pub trait Payload: Serialize + serde::de::DeserializeOwned {
     /// The consumer's name: written into every record and checked when one loads.
     const TAG: &'static str;
+    /// Whether the payload is derived from the session's own rows alone, so a SQLite session's
+    /// [`Rows`] certificate may admit it across writes to other sessions of its store. A
+    /// database-wide projection is not.
+    const BY_ROWS: bool = false;
 }
 
 /// The one envelope of everything cv stores about a session: the [`VERSION`] it was written
@@ -616,6 +687,14 @@ impl<T: Payload> Record<T> {
     pub fn admit(&self, now: &Baseline, probe: &mut Probe) -> Option<&T> {
         (self.version == VERSION && self.baseline.fresh(now, probe)).then_some(&self.payload)
     }
+
+    /// [`Self::admit`], or, for a payload of `r`'s own rows ([`Payload::BY_ROWS`]) in a shared
+    /// SQLite store, its unchanged [`Rows`] certificate ([`Baseline::rows_fresh`]).
+    pub fn admit_for(&self, r: &SessionRef, now: &Baseline, probe: &mut Probe) -> Option<&T> {
+        self.admit(now, probe).or_else(|| {
+            (T::BY_ROWS && self.version == VERSION && self.baseline.rows_fresh(r, now, probe)).then_some(&self.payload)
+        })
+    }
 }
 
 /// What an adapter declares a session reads besides its primary
@@ -628,6 +707,10 @@ pub struct Dependencies {
     pub directories: Vec<PathBuf>,
 }
 
+/// A shared SQLite store, and the certificates of its sessions ([`Probe::rows`]).
+type Store = (Harness, PathBuf);
+type Certified = Option<std::sync::Arc<HashMap<String, Rows>>>;
+
 /// File and immediate-directory probes shared within one operation. It never descends recursively.
 #[derive(Default)]
 pub struct Probe {
@@ -635,6 +718,8 @@ pub struct Probe {
     directories: HashMap<PathBuf, Option<std::sync::Arc<Vec<PathBuf>>>>,
     // Adapters resolved once per operation: detection stats roots, so not once per session.
     adapters: HashMap<Harness, Option<Box<dyn crate::harness::Adapter>>>,
+    // Shared stores certified once per operation ([`Probe::rows`]).
+    rows: HashMap<Store, Certified>,
 }
 
 enum Observation {
@@ -798,7 +883,55 @@ impl Probe {
         Baseline {
             primary: self.entry(primary).and_then(|entry| entry.state),
             stamp: self.dependencies_from(r, primary),
+            rows: None,
         }
+    }
+
+    /// `r`'s [`Rows`] certificate, when its adapter keeps it in a shared SQLite store: every
+    /// session of that store is certified at once, from one consistent read, once per store state
+    /// in this process (the state is the database's, WAL's and journal's identities, the ones a
+    /// write moves) and once per probe.
+    pub fn rows(&mut self, r: &SessionRef) -> Option<Rows> {
+        type State = Vec<Option<FileId>>;
+        type Stores = std::sync::Mutex<HashMap<Store, (State, Certified)>>;
+        static STORES: std::sync::LazyLock<Stores> = std::sync::LazyLock::new(Default::default);
+        let store = (r.harness, absolute(&r.path)?);
+        if !self.rows.contains_key(&store) {
+            let adapter = self
+                .adapters
+                .entry(r.harness)
+                .or_insert_with(|| crate::harness::for_harness(r.harness));
+            let adapter = adapter
+                .as_ref()
+                .filter(|adapter| adapter.sqlite_source(r) == Some(true));
+            let state = |path: &Path| -> State {
+                let mut files: Vec<PathBuf> = sqlite_sidecars(path).into();
+                files.push(path.to_path_buf());
+                files.iter().map(|f| FileId::at(f)).collect()
+            };
+            let certified = adapter.and_then(|adapter| {
+                let before = state(&store.1);
+                let cached = STORES
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .get(&store)
+                    .filter(|(at, _)| *at == before)
+                    .map(|(_, certified)| certified.clone());
+                cached.unwrap_or_else(|| {
+                    let certified = adapter.rows(&r.path).map(std::sync::Arc::new);
+                    // Kept only when no write landed while certifying.
+                    if state(&store.1) == before {
+                        STORES
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .insert(store.clone(), (before, certified.clone()));
+                    }
+                    certified
+                })
+            });
+            self.rows.insert(store.clone(), certified);
+        }
+        self.rows.get(&store)?.as_ref()?.get(&r.id).copied()
     }
 }
 
@@ -875,9 +1008,9 @@ impl<T: Payload> Table<T> {
         self.rows.get(&key(r))
     }
 
-    /// [`Record::admit`] of `r`'s record.
+    /// [`Record::admit_for`] of `r`'s record.
     pub fn admit(&self, r: &SessionRef, now: &Baseline, probe: &mut Probe) -> Option<&T> {
-        self.get(r)?.admit(now, probe)
+        self.get(r)?.admit_for(r, now, probe)
     }
 
     /// The records of `consumer` (`T::TAG`, or a tagged instance such as one index's `fts:<id>`).
@@ -945,7 +1078,7 @@ pub(crate) fn fresh_in<T: Payload + PartialEq>(
     payload: &T,
 ) -> bool {
     record_in::<T>(conn, consumer, r)
-        .is_some_and(|record| record.payload == *payload && record.admit(now, &mut Probe::default()).is_some())
+        .is_some_and(|record| record.payload == *payload && record.admit_for(r, now, &mut Probe::default()).is_some())
 }
 
 /// A 64-bit digest of `bytes`, for a payload that binds output the consumer keeps elsewhere.
@@ -978,10 +1111,17 @@ pub(crate) fn publish_in<T: Payload>(
         .stamp
         .as_ref()
         .is_some_and(|stamp| matches!(stamp.reads(), Some(Some(_))));
+    // A shared store's certificate is taken before the identity check: the store unchanged since
+    // the capture means the certificate describes the rows this pass read.
+    let rows = if T::BY_ROWS { probe.rows(r) } else { None };
     if complete && unchanged_with(r, &probe.primary_path(r), baseline, probe) {
+        let baseline = Baseline {
+            rows,
+            ..baseline.clone()
+        };
         conn.execute(
             "INSERT INTO source_dependencies(consumer,harness,id,path,record) VALUES(?1,?2,?3,?4,?5)",
-            rusqlite::params![consumer, h, id, path, encode(VERSION, baseline, payload)],
+            rusqlite::params![consumer, h, id, path, encode(VERSION, &baseline, payload)],
         )?;
     }
     Ok(())
