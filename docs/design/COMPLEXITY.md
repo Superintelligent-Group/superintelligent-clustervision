@@ -46,6 +46,7 @@ or rewritten. Paths are relative to `crates/`.
 | `cv watch` archive | O(S) | O(n) baseline checks + 2n stats | O(appended) | `watch.rs` `offer_sources`, `archive/reuse.rs` |
 | `events ingest` | O(S) | O(n) | one reparse | `events.rs` `ingest_all` |
 | Workflow listing | O(r) state parses + r stats | same | same | `claude_workflow.rs` |
+| `agent-…` lookup, workflow by name | O(n) catalog rows + a sidecar readdir per session | same | same | `lib.rs` `workflow_sessions` |
 | distill | O(s) | — | — | `distill.rs` (commit set) |
 | prune / rewind / emit / dataset | O(s) per session | — | — | linear passes, hashed sets |
 | Task log, per command | O(E) replay | O(E) | O(E) | `task/store.rs` (open, below) |
@@ -65,8 +66,9 @@ or rewritten. Paths are relative to `crates/`.
 - **MCP observe cursor**: keeps reader state for only 8 sessions. Every other changed session
   is reparsed on each call. Needs the reader state kept server-side as a `source::Record`
   (about 120 lines).
-- **`agent-…` lookups**: rediscover the Claude harness on every call, O(n). Needs an
-  agent → parent index (about 100 lines).
+- **`agent-…` lookups** read the catalog, not a rediscovery, but still list each session's
+  sidecar dir. A by-id index cannot replace that: the scan cache holds an agent only after its
+  forest was read and flushed, and an agent written since (or a copy) is in no record.
 - **`show --tree`**: indents by chain depth, so output is O(e²). Fixing it changes output.
 
 ## Surviving thresholds
