@@ -111,14 +111,11 @@ static CACHE: OnceLock<RwLock<HashMap<PathBuf, std::sync::Weak<Cache>>>> = OnceL
 fn cache_for(path: &Path) -> Arc<Cache> {
     let mut active = CACHE.get_or_init(Default::default).write().unwrap();
     active.retain(|_, cache| cache.strong_count() != 0);
-    active
-        .get(path)
-        .and_then(std::sync::Weak::upgrade)
-        .unwrap_or_else(|| {
-            let cache = Arc::new(load());
-            active.insert(path.to_path_buf(), Arc::downgrade(&cache));
-            cache
-        })
+    active.get(path).and_then(std::sync::Weak::upgrade).unwrap_or_else(|| {
+        let cache = Arc::new(load());
+        active.insert(path.to_path_buf(), Arc::downgrade(&cache));
+        cache
+    })
 }
 #[cfg(all(test, feature = "sqlite"))]
 fn current_cache() -> Arc<Cache> {

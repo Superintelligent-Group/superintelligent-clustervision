@@ -211,7 +211,10 @@ pub(crate) fn emit_to(
             // The emitter writes the sub-agent transcript in place: the root's id on every record,
             // the sidechain markers, no title record (`EmitOptions::sidechain_of`).
             let opts = EmitOptions {
-                sidechain_of: Some(SidechainOf { root: root.id.clone(), agent: agent.clone() }),
+                sidechain_of: Some(SidechainOf {
+                    root: root.id.clone(),
+                    agent: agent.clone(),
+                }),
                 ..Default::default()
             };
             let res = emit_resumable(ir, &sub, &opts)?;

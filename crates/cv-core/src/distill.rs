@@ -268,10 +268,7 @@ static RES: [OnceLock<Regex>; 14] = [const { OnceLock::new() }; 14];
 
 fn re(which: Re) -> &'static Regex {
     let (cell, pat) = match which {
-        Re::Commit => (
-            &RES[0],
-            r"(?m)^\[([^\]\s]+)(?: \([^)]*\))? ([0-9a-f]{7,40})\] (.+)$",
-        ),
+        Re::Commit => (&RES[0], r"(?m)^\[([^\]\s]+)(?: \([^)]*\))? ([0-9a-f]{7,40})\] (.+)$"),
         Re::OnBranch => (&RES[1], r"(?m)^On branch (\S+)"),
         Re::NewBranch => (
             &RES[2],

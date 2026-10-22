@@ -982,7 +982,10 @@ mod tests {
         for mode in [ThinkingMode::Native, ThinkingMode::Text, ThinkingMode::Drop] {
             for sidechain in [
                 None,
-                Some(SidechainOf { root: "root".into(), agent: "agent".into() }),
+                Some(SidechainOf {
+                    root: "root".into(),
+                    agent: "agent".into(),
+                }),
             ] {
                 let opts = EmitOptions {
                     new_id: Some("fixed-id".into()),
@@ -1434,7 +1437,10 @@ mod tests {
         for (verb, session) in verbs {
             for sidechain in [
                 None,
-                Some(SidechainOf { root: "rootsess".into(), agent: "afedcba9876543210".into() }),
+                Some(SidechainOf {
+                    root: "rootsess".into(),
+                    agent: "afedcba9876543210".into(),
+                }),
             ] {
                 let out = temp_dir();
                 let opts = EmitOptions {
@@ -2484,7 +2490,6 @@ mod tests {
                 );
             }
         }
-
     }
 
     // --------------------------------------------------------------------------------------------
