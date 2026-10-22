@@ -217,7 +217,7 @@ mod imp {
     /// The catalog's schema, stamped in `PRAGMA user_version`: the one stored-format version
     /// ([`crate::source::VERSION`]). Every table here is derived from the transcripts, so a
     /// catalog of any other stamp is dropped whole and rebuilt: there are no migrations. Change
-    /// any table's shape and bump that version (6 is above every stamp an older cv wrote).
+    /// any table's shape and bump that version (7 is above every stamp an older cv wrote).
     const SCHEMA: i64 = crate::source::VERSION as i64;
 
     fn open_writable(path: &Path) -> rusqlite::Result<Connection> {

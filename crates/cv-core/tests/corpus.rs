@@ -1022,3 +1022,107 @@ fn query_facts_match_collected_corpus() {
     assert!(checked.len() >= 10, "cross-harness coverage: {checked:?}");
     eprintln!("query oracle checked native sessions: {checked:?}");
 }
+
+/// The count contract ([`SessionRef::message_count`]): the number a listing shows is the number
+/// of turns ([`cv_core::ir::Message::is_turn`]) a full read of the same session yields. For an
+/// adapter whose discovery counts, that is the discovered count; for one that defers, it is the
+/// count the catalog holds after an index pass records it, as `cv index` then `cv ls` see it.
+#[test]
+fn every_listed_count_is_the_full_read_turn_count() {
+    fn copy_tree(from: &Path, to: &Path) {
+        fs::create_dir_all(to).unwrap();
+        for entry in fs::read_dir(from).unwrap() {
+            let entry = entry.unwrap();
+            let target = to.join(entry.file_name());
+            if entry.file_type().unwrap().is_dir() {
+                copy_tree(&entry.path(), &target);
+            } else {
+                fs::copy(entry.path(), target).unwrap();
+            }
+        }
+    }
+    let world = World::in_process("count_contract", cv_core::env::Env::enter_isolated);
+    let mut wrong = Vec::new();
+    let mut checked = BTreeMap::<&str, (usize, usize)>::new();
+    for harness in HARNESSES {
+        for version in subdirs(&corpus_root().join(harness.name)) {
+            let scratch = world
+                .base
+                .join("count-corpus")
+                .join(harness.name)
+                .join(version.file_name().unwrap());
+            copy_tree(&version, &scratch);
+            let adapter = (harness.adapter)(&scratch);
+            let mut refs = adapter.discover().unwrap();
+            if let Some(children) = harness.children {
+                let kids: Vec<SessionRef> = refs.iter().flat_map(children).collect();
+                refs.extend(kids);
+            }
+            for r in refs {
+                let turns = |demand: &cv_core::Demand| {
+                    cv_core::stream::collect_with(adapter.as_ref(), &r, demand)
+                        .unwrap()
+                        .messages
+                        .iter()
+                        .filter(|m| m.is_turn())
+                        .count()
+                };
+                let reference = turns(&cv_core::Demand::LEAN.with_spans());
+                // A complete read also carries rows outside the conversation (rewound, superseded,
+                // carried) for round-trip, and never certifies a count: every other tier agrees.
+                for demand in [cv_core::Demand::USAGE, cv_core::Demand::FACTS, cv_core::Demand::RICH] {
+                    let n = turns(&demand);
+                    if n != reference {
+                        wrong.push(format!(
+                            "{} {} {}: {demand:?} reads {n} turns, lean {reference}",
+                            harness.name,
+                            version.file_name().unwrap().to_string_lossy(),
+                            r.id
+                        ));
+                    }
+                }
+                let entry = checked.entry(harness.name).or_default();
+                let listed = match r.message_count {
+                    Some(n) => {
+                        entry.0 += 1;
+                        n
+                    }
+                    None => {
+                        // Deferred: what `cv index` records, then what the catalog lists.
+                        entry.1 += 1;
+                        cv_core::catalog::sync(std::slice::from_ref(&r));
+                        // A complete read first (an export, a port) must not decide the count.
+                        cv_core::stream::collect_with(adapter.as_ref(), &r, &cv_core::Demand::COMPLETE).unwrap();
+                        cv_core::stream::stream_counted(
+                            adapter.as_ref(),
+                            &r,
+                            &cv_core::Demand::LEAN.with_spans(),
+                            &mut cv_core::stream::Discard,
+                            cv_core::stream::Pass::RECORD,
+                        )
+                        .unwrap();
+                        cv_core::catalog::lookup(&r.id, Some(r.harness))
+                            .into_iter()
+                            .find(|l| l.path == r.path)
+                            .and_then(|l| l.message_count)
+                            .unwrap_or_else(|| panic!("{} {}: indexed but still uncounted", harness.name, r.id))
+                    }
+                };
+                if listed != reference {
+                    wrong.push(format!(
+                        "{} {} {}: listed {listed}, full read {reference} turns",
+                        harness.name,
+                        version.file_name().unwrap().to_string_lossy(),
+                        r.id
+                    ));
+                }
+            }
+        }
+    }
+    eprintln!("count contract checked (discovered, deferred) per harness: {checked:?}");
+    assert!(
+        wrong.is_empty(),
+        "listed counts break the contract:\n{}",
+        wrong.join("\n")
+    );
+}

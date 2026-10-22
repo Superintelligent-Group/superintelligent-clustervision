@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+**Breaking: commands, MCP, HTTP and JSON.**
+- `message_count` is prompts and replies only: Claude, Cline and Roo stop counting tool results, OpenClaw sub-agent returns; OpenCode counts at `cv index`.
+
+**After upgrading, once.**
+- `source::VERSION` is 7: listings rediscover once, so rc.1's cached Claude, Cline and OpenClaw counts are recounted.
+
+**Listing and counts.**
+- A round-trip read (`Demand::COMPLETE`) never records counts: Hermes's rewound and superseded rows no longer inflate a session's count.
+
 ## 0.18.0-rc.1 — 2026-10-22 — the release an agent can trust
 
 **Breaking: commands, MCP, HTTP and JSON.** A removed name exits 2 with a pointer to its replacement; a changed shape is named here.

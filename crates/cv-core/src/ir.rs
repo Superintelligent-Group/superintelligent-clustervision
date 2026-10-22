@@ -1155,11 +1155,13 @@ pub struct SessionRef {
     /// messages, not from a proxy like file count.
     ///
     /// `None` means **not counted yet**: a listing that read only the session's metadata (Zed,
-    /// Hermes, Goose, Kimi, Kimi Code, Codex and Grok defer counting, because for them counting
-    /// means decoding every message) until a full read or `cv index` certifies the number. An
-    /// adapter whose discovery reads every turn record anyway (Claude, Cursor, Cline, Continue,
-    /// Devin, Gemini, Qwen, LM Studio, OpenClaw, OpenCode, OpenSession, the exports) always
-    /// counts, so `Some(0)` is a session with no turns, never a placeholder. Listings print a
+    /// Hermes, Goose, Kimi, Kimi Code, Codex, Grok and OpenCode defer counting, because for them
+    /// counting means decoding every message, or an OpenCode message's parts) until a full read
+    /// or `cv index` certifies the number; a [`crate::stream::Demand::COMPLETE`] read, which also
+    /// carries rewound and superseded rows, never does. An adapter whose discovery reads every
+    /// turn record anyway (Claude, Cursor, Cline, Continue, Devin, Gemini, Qwen, LM Studio,
+    /// OpenClaw, OpenSession, the exports) always counts, by the rule its parser kinds turns
+    /// with, so `Some(0)` is a session with no turns, never a placeholder. Listings print a
     /// dash and `--json` emits `null` for an uncounted session; sorting by messages puts
     /// uncounted sessions last.
     #[serde(default)]

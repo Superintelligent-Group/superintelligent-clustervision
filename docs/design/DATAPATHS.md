@@ -106,7 +106,7 @@ Compressed, encoded, scanned, decoded and emitted bytes must be labeled separate
 | Operation | Actual work | Optimization boundary |
 |---|---|---|
 | Warm ls/stats | Catalog probe, metadata rows, sort/filter; query presence shares its source Probe, JSON rendering rechecks metadata in bounded batches | Preserve freshness between phases; measure discovery separately |
-| Full discovery | Metadata projection, certified count reuse and cache/catalog publication; Codex, Grok, Kimi, Kimi Code, Hermes, Goose and Zed defer cold counts, Claude counts from its record heads | Remaining count-only adapter scans must go; exact fallback metadata and validation may still require EOF |
+| Full discovery | Metadata projection, certified count reuse and cache/catalog publication; Codex, Grok, Kimi, Kimi Code, Hermes, Goose, Zed and OpenCode defer cold counts, Claude counts from its record heads | Remaining count-only adapter scans must go; exact fallback metadata and validation may still require EOF |
 | Text windows / last N | Lazy range or deque, selected messages materialized | Already useful bounds; giant selected output is still output-sized |
 | JSON show / MCP show | CLI show/export stages resolved frames and envelopes in bounded spill storage; EOF metadata retained. MCP stages selected windows | CLI Last retains lazy tail descriptors; owned adapter extras and redaction trees remain; MCP client payload size and subprocess startup |
 | Affordance view | Facts projection into classified rows; checked bounded text summaries | Unprojected adapters retain rich extras; side stores and result rows; escaped validation still traverses the whole field |
@@ -133,16 +133,19 @@ Key sources: `cv/src/cmd/view.rs`, `cv-core/src/{api,affordance,watch,lazy,strea
 
 A listing reports what the metadata read already produced and nothing it would have to read more
 for. A JSONL adapter whose discovery walks every record head anyway (Claude, and the adapters that
-read every turn: Cursor, Cline, Devin, Gemini, LM Studio, OpenClaw, OpenCode's database,
-OpenSession, the exports) counts for free and reports `Some(n)`, so `Some(0)` is a session with no
-turns. An adapter for which counting means decoding message bodies, opening a second store or
-reading files the listing does not need (Codex, Grok, Kimi, Kimi Code, Qwen, Zed, Hermes, Goose,
-Continue, OpenCode's JSON tree) reports `None`, "not counted", until a full
-read or `cv index` certifies the number; the catalog keeps a certified count across metadata
-refreshes that leave the source unchanged and drops it when the source changes. `--json` emits
-`null`, the table a dash, `--sort-by messages` ranks uncounted sessions last, `cv stats` reports
-"N not counted yet". The contract is the doc comment on `SessionRef::message_count`
-(`cv-core/src/ir.rs`); a count is never a proxy such as file count or an extrapolation.
+read every turn: Cursor, Cline, Devin, Gemini, LM Studio, OpenClaw, OpenSession, the exports)
+counts for free and reports `Some(n)`, so `Some(0)` is a session with no turns. It counts by its
+parser's own turn rule ([`Message::is_turn`]: a typed prompt or a reply), read from the same head:
+a user record carrying only tool results, injected context or a sub-agent's return is no turn. An
+adapter for which counting means decoding message bodies, opening a second store or reading files
+the listing does not need (Codex, Grok, Kimi, Kimi Code, Qwen, Zed, Hermes, Goose, Continue,
+OpenCode, whose turn kinds rest on parts) reports `None`, "not counted", until a full read or `cv
+index` certifies the number; a complete (round-trip) read, which carries rewound and superseded
+rows, never certifies. The catalog keeps a certified count across metadata refreshes that leave
+the source unchanged and drops it when the source changes. `--json` emits `null`, the table a
+dash, `--sort-by messages` ranks uncounted sessions last, `cv stats` reports "N not counted yet".
+The contract is the doc comment on `SessionRef::message_count`, held over every corpus session by
+`every_listed_count_is_the_full_read_turn_count`; a count is never a proxy or an extrapolation.
 
 ## Correctness boundaries before reuse
 
