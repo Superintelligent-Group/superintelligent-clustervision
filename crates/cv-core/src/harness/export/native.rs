@@ -81,7 +81,7 @@ fn load_bounded(path: &Path, selected: Option<&str>, admission_bytes: usize) -> 
             let mut guard = cache.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(position) = guard.entries.iter().position(|e| e.path == key) {
                 let hit = guard.entries.remove(position).unwrap();
-                if hit.archive.source.same_identity(&source) {
+                if hit.archive.source == source {
                     let archive = hit.archive.clone();
                     guard.entries.push_back(hit);
                     return Ok(archive);
@@ -379,10 +379,8 @@ pub(super) fn stream(kind: Kind, r: &SessionRef, opts: &Demand, sink: &mut dyn M
     // Cached archives own metadata only. Generated multipart backing belongs to this read,
     // not to the cache's JsonSource/arena and its uncharged lifetime.
     let source = JsonSource::capture(&r.path)?;
-    anyhow::ensure!(
-        source.same_identity(&archive.source),
-        "export source changed before selected read"
-    );
+    // `JsonSource` equality is identity: the same path carrying the same captured bytes.
+    anyhow::ensure!(source == archive.source, "export source changed before selected read");
     let value = source.validated_range(entry.offset, entry.len)?;
     value.with_view(|view| {
         let conv = Fields::parse(view, CONVERSATION_FIELDS)?.context("export conversation is not an object")?;

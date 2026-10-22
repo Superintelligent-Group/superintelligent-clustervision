@@ -67,7 +67,7 @@ impl SourceText {
                 scratch.clear();
                 scratch.push_str(&part[..end]);
                 let result = f(&scratch);
-                self.range.check()?;
+                self.range.captured_source().check()?;
                 result?;
                 part = &part[end..];
             }
