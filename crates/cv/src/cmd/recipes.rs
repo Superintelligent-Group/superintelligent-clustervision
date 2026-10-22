@@ -163,6 +163,8 @@ mod tests {
                 }
                 let mut longs = std::collections::BTreeSet::new();
                 collect(&crate::build_cli(), &mut longs);
+                // clap's own `--help`, and the harness CLIs' `--resume` the recipes hand off to.
+                longs.extend(["help".to_string(), "resume".to_string()]);
                 let mut unknown = Vec::new();
                 for word in super::RECIPES.split_whitespace() {
                     let Some(flag) = word.strip_prefix("--") else {

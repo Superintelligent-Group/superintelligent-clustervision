@@ -2597,7 +2597,8 @@ mod tests {
         );
 
         // The verifier sees no unexpected loss for this OpenCode round-trip.
-        let (_r, report) = emit_report(&s, Harness::OpenCode, &temp_dir(), &EmitOptions::default()).unwrap();
+        let scratch = temp_dir();
+        let (_r, report) = emit_report(&s, Harness::OpenCode, &scratch, &EmitOptions::default()).unwrap();
         assert!(!report.has_unexpected(), "opencode round-trip: {:?}", report.deltas);
     }
 
@@ -2802,7 +2803,8 @@ mod tests {
                 });
             }
         }
-        let (res, report) = emit_report(&s, Harness::Codex, &temp_dir(), &EmitOptions::default()).unwrap();
+        let scratch = temp_dir();
+        let (res, report) = emit_report(&s, Harness::Codex, &scratch, &EmitOptions::default()).unwrap();
         assert!(
             !report.deltas.iter().any(|d| d.what == "usage"),
             "usage must survive into Codex, got {:?}",
@@ -2835,7 +2837,8 @@ mod tests {
                 });
             }
         }
-        let (res, report) = emit_report(&s, Harness::OpenClaw, &temp_dir(), &EmitOptions::default()).unwrap();
+        let scratch = temp_dir();
+        let (res, report) = emit_report(&s, Harness::OpenClaw, &scratch, &EmitOptions::default()).unwrap();
         assert!(
             !report.deltas.iter().any(|d| d.what == "usage"),
             "usage must survive into OpenClaw, got {:?}",
@@ -2866,7 +2869,8 @@ mod tests {
                 *details = Some(serde_json::json!({ "filePath": "/w/a.rs", "structuredPatch": [1] }));
             }
         }
-        let (res, report) = emit_report(&s, Harness::OpenCode, &temp_dir(), &EmitOptions::default()).unwrap();
+        let scratch = temp_dir();
+        let (res, report) = emit_report(&s, Harness::OpenCode, &scratch, &EmitOptions::default()).unwrap();
         assert!(
             !report.deltas.iter().any(|d| d.what == "details"),
             "details must survive into OpenCode, got {:?}",
@@ -2908,7 +2912,8 @@ mod tests {
         });
         s.messages.insert(3, think);
 
-        let (_res, report) = emit_report(&s, Harness::Codex, &temp_dir(), &EmitOptions::default()).unwrap();
+        let scratch = temp_dir();
+        let (_res, report) = emit_report(&s, Harness::Codex, &scratch, &EmitOptions::default()).unwrap();
         assert!(
             report.deltas.iter().all(|d| d.expected),
             "no unexpected loss from a turn the target cannot represent, got {:?}",
@@ -2922,7 +2927,8 @@ mod tests {
         assert_eq!((d.a.as_str(), d.b.as_str()), ("1", "0"));
 
         // Into Claude itself the same turn is perfectly representable, so nothing is reported.
-        let (_res, report) = emit_report(&s, Harness::Claude, &temp_dir(), &EmitOptions::default()).unwrap();
+        let scratch = temp_dir();
+        let (_res, report) = emit_report(&s, Harness::Claude, &scratch, &EmitOptions::default()).unwrap();
         assert!(
             !report.deltas.iter().any(|d| d.what == "unrepresentable_turns"),
             "Claude holds signature-only thinking, got {:?}",
@@ -3076,7 +3082,8 @@ mod tests {
             "both tool turns are there — the paired one and the orphan"
         );
 
-        let (_r, report) = emit_report(&s, Harness::OpenCode, &temp_dir(), &EmitOptions::default()).unwrap();
+        let scratch = temp_dir();
+        let (_r, report) = emit_report(&s, Harness::OpenCode, &scratch, &EmitOptions::default()).unwrap();
         assert!(
             !report.has_unexpected(),
             "opencode orphan round-trip: {:?}",
@@ -3214,10 +3221,11 @@ mod tests {
             "the `mode` record is carried"
         );
 
+        let scratch = temp_dir();
         let (_res, report) = emit_report(
             &s,
             Harness::Claude,
-            &temp_dir(),
+            &scratch,
             &EmitOptions {
                 new_id: Some(sid.into()),
                 new_cwd: Some(PathBuf::from("/w")),
@@ -3247,7 +3255,8 @@ mod tests {
                 }
             }
         }
-        let (res, report) = emit_report(&s, Harness::Claude, &temp_dir(), &EmitOptions::default()).unwrap();
+        let scratch = temp_dir();
+        let (res, report) = emit_report(&s, Harness::Claude, &scratch, &EmitOptions::default()).unwrap();
         assert!(
             !report.deltas.iter().any(|d| d.what == "details"),
             "details must survive a port into Claude, got {:?}",
@@ -3289,7 +3298,8 @@ mod tests {
         .join("\n");
 
         let s = crate::harness::claude::parse_str("s1", &text, None);
-        let (res, _report) = emit_report(&s, Harness::Claude, &temp_dir(), &EmitOptions::default()).unwrap();
+        let scratch = temp_dir();
+        let (res, _report) = emit_report(&s, Harness::Claude, &scratch, &EmitOptions::default()).unwrap();
         let emitted: Vec<Value> = fs::read_to_string(&res.path)
             .unwrap()
             .lines()
@@ -3370,7 +3380,8 @@ mod tests {
             "the sample carries a System turn with text"
         );
         // Sanity: the report flags an unexpected loss of that text.
-        let (_r, report) = emit_report(&s, Harness::Claude, &temp_dir(), &EmitOptions::default()).unwrap();
+        let scratch = temp_dir();
+        let (_r, report) = emit_report(&s, Harness::Claude, &scratch, &EmitOptions::default()).unwrap();
         assert!(
             report
                 .deltas
@@ -3380,13 +3391,15 @@ mod tests {
             report.deltas
         );
         // Non-strict: succeeds, lists the loss.
-        let (_res, warnings) = emit_verified(&s, Harness::Claude, &temp_dir(), &EmitOptions::default()).unwrap();
+        let scratch = temp_dir();
+        let (_res, warnings) = emit_verified(&s, Harness::Claude, &scratch, &EmitOptions::default()).unwrap();
         assert!(warnings.iter().any(|w| w.contains("block:text")));
         // Strict: errors.
+        let scratch = temp_dir();
         let err = emit_verified(
             &s,
             Harness::Claude,
-            &temp_dir(),
+            &scratch,
             &EmitOptions {
                 strict: true,
                 ..Default::default()
@@ -3416,7 +3429,8 @@ mod tests {
                     });
                 }
             }
-            let (res, report) = emit_report(&s, Harness::Claude, &temp_dir(), &EmitOptions::default()).unwrap();
+            let scratch = temp_dir();
+            let (res, report) = emit_report(&s, Harness::Claude, &scratch, &EmitOptions::default()).unwrap();
             assert!(
                 !report.deltas.iter().any(|d| d.what == "usage"),
                 "usage must survive {src} → Claude, got {:?}",
@@ -3465,7 +3479,8 @@ mod tests {
                 }
             }
         }
-        let (_res, report) = emit_report(&s, Harness::Hermes, &temp_dir(), &EmitOptions::default()).unwrap();
+        let scratch = temp_dir();
+        let (_res, report) = emit_report(&s, Harness::Hermes, &scratch, &EmitOptions::default()).unwrap();
         let d = report
             .deltas
             .iter()
@@ -3473,10 +3488,11 @@ mod tests {
             .expect("the flag is reported as lost");
         assert!(d.expected, "Hermes has no column for it: {d:?}");
         // …so `--strict` does not fail on it.
+        let scratch = temp_dir();
         emit_verified(
             &s,
             Harness::Hermes,
-            &temp_dir(),
+            &scratch,
             &EmitOptions {
                 strict: true,
                 ..Default::default()
@@ -3484,7 +3500,8 @@ mod tests {
         )
         .expect("an expected loss never fails --strict");
         // A target that *does* have a slot still has to fill it.
-        let (_res, report) = emit_report(&s, Harness::Grok, &temp_dir(), &EmitOptions::default()).unwrap();
+        let scratch = temp_dir();
+        let (_res, report) = emit_report(&s, Harness::Grok, &scratch, &EmitOptions::default()).unwrap();
         assert!(
             !report.deltas.iter().any(|d| d.what == "tool result is_error"),
             "Grok carries it in updates.jsonl, got {:?}",
@@ -3501,7 +3518,8 @@ mod tests {
     fn grok_pins_a_foreign_session_model() {
         let mut s = sample_session(Harness::Claude);
         s.model = Some("claude-fable-5-1".into());
-        let (res, report) = emit_report(&s, Harness::Grok, &temp_dir(), &EmitOptions::default()).unwrap();
+        let scratch = temp_dir();
+        let (res, report) = emit_report(&s, Harness::Grok, &scratch, &EmitOptions::default()).unwrap();
         let d = report
             .deltas
             .iter()
@@ -3519,7 +3537,8 @@ mod tests {
         for m in &mut g.messages {
             m.model = g.model.clone();
         }
-        let (res, report) = emit_report(&g, Harness::Grok, &temp_dir(), &EmitOptions::default()).unwrap();
+        let scratch = temp_dir();
+        let (res, report) = emit_report(&g, Harness::Grok, &scratch, &EmitOptions::default()).unwrap();
         assert!(
             !report.deltas.iter().any(|d| d.what.starts_with("session model")),
             "a Grok model round-trips, got {:?}",
@@ -3608,7 +3627,8 @@ mod tests {
         };
 
         // --- native: today's behaviour. The signature-only turn is unrepresentable and vanishes.
-        let (res, report) = emit_report(&base, Harness::Codex, &temp_dir(), &opts(ThinkingMode::Native)).unwrap();
+        let scratch = temp_dir();
+        let (res, report) = emit_report(&base, Harness::Codex, &scratch, &opts(ThinkingMode::Native)).unwrap();
         assert!(report.deltas.iter().all(|d| d.expected), "{:?}", report.deltas);
         assert!(
             report.deltas.iter().any(|d| d.what == "unrepresentable_turns"),
@@ -3624,7 +3644,8 @@ mod tests {
         );
 
         // --- text: the turn survives, and the lost signature is still reported.
-        let (res, report) = emit_report(&base, Harness::Codex, &temp_dir(), &opts(ThinkingMode::Text)).unwrap();
+        let scratch = temp_dir();
+        let (res, report) = emit_report(&base, Harness::Codex, &scratch, &opts(ThinkingMode::Text)).unwrap();
         assert!(
             !report.deltas.iter().any(|d| d.what == "unrepresentable_turns"),
             "no turn is lost under --thinking text, got {:?}",
@@ -3662,7 +3683,8 @@ mod tests {
 
         // --- drop: no thinking at all, even into a target that could hold every payload.
         for target in [Harness::Codex, Harness::Claude] {
-            let (res, report) = emit_report(&base, target, &temp_dir(), &opts(ThinkingMode::Drop)).unwrap();
+            let scratch = temp_dir();
+            let (res, report) = emit_report(&base, target, &scratch, &opts(ThinkingMode::Drop)).unwrap();
             let re = reparse_emitted(target, &res, &Demand::RICH).unwrap();
             assert_eq!(thinking_blocks(&re), 0, "--thinking drop emits none into {target}");
             assert!(

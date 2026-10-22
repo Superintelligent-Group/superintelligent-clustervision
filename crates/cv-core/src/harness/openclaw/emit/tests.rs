@@ -310,7 +310,7 @@ fn checked_openclaw_title_policy_matches_frozen_explicit_and_meaningful_prompt()
                 let suffix = format!("{}-{meaningful}-{mode}", title.unwrap_or("none"));
                 let after = emit(
                     &session,
-                    &world.base.join(format!("new-{}", dir_title(title))),
+                    &world.base.join(format!("new-{}-{meaningful}-{mode}", dir_title(title))),
                     &options,
                 )?;
                 frozen.insert(suffix, frozen_entry(&world.base, &after)?["index"].clone());
