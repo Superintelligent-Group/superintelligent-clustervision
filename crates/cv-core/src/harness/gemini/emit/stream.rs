@@ -182,7 +182,12 @@ fn messages(
             message
                 .content
                 .iter()
-                .map(|block| crate::emit::thinking::fate(block, Harness::Gemini, mode, resolver))
+                .map(|block| match block {
+                    // `parts` skips tool blocks before reading their projection and the thoughts
+                    // loop before its Thinking match, so their fate is never read.
+                    Block::ToolUse { .. } | Block::ToolResult { .. } => Ok(ThinkingFate::Keep),
+                    block => crate::emit::thinking::fate(block, Harness::Gemini, mode, resolver),
+                })
                 .collect::<Result<_>>()?
         };
         if !first {
