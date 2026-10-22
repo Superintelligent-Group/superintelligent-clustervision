@@ -824,15 +824,14 @@ fn agents_in_dir(
         Some((|| -> Result<Option<AgentRef>> {
             #[cfg(test)]
             record_forest_read("transcript", &p);
-            let session = if rich {
-                scan(&p)?
-            } else {
-                // Retain the old open-failure exclusion even on a metadata cache hit.
-                fs::File::open(&p)?;
-                match cached_metadata(&p)? {
-                    Some(session) => session,
-                    None => return Ok(None),
-                }
+            // Every demand reads the agent's metadata through the per-file scan cache: a Rich
+            // forest (`show --tree`, `--subagents`, the sessions API, lanes) rescanned every
+            // agent transcript on every call. An unopenable transcript fails the forest even on a
+            // cache hit.
+            fs::File::open(&p)?;
+            let session = match cached_metadata(&p)? {
+                Some(session) => session,
+                None => return Ok(None),
             };
             let meta = match demand {
                 crate::SubagentDemand::Rich => read_meta(&p.with_extension("meta.json"))?,
@@ -1111,6 +1110,7 @@ fn cached_metadata(path: &Path) -> Result<Option<SessionRef>> {
     })
 }
 
+#[cfg(test)]
 fn scan(path: &Path) -> Result<SessionRef> {
     Ok(scan_at(path, None)?.0)
 }
@@ -1122,6 +1122,8 @@ fn scan_at(path: &Path, from: Option<&Checkpoint>) -> Result<(SessionRef, Option
     anyhow::ensure!(offset <= source.len(), "discovery checkpoint outside source");
     #[cfg(test)]
     metadata::FRAMED.with(|frames| frames.borrow_mut().push((offset, source.len() - offset)));
+    #[cfg(test)]
+    record_forest_read("scan", path);
     scan.read(&read, offset)?;
     let checkpoint = scan.checkpoint();
     let (session, writer_version) = scan.finish();
@@ -2305,6 +2307,37 @@ mod tests {
         FOREST_READS.lock().unwrap().0 = Some(root.clone());
         let tree = subagent_tree(&parent).unwrap();
         assert_eq!(tree.len(), 3, "two tiers: 1 direct + 2 workflow");
+        // A Rich forest over unchanged transcripts scans none of them again; a change rescans
+        // exactly the changed one.
+        let scans = |before: usize| -> Vec<PathBuf> {
+            FOREST_READS.lock().unwrap().1[before..]
+                .iter()
+                .filter(|(kind, _)| *kind == "scan")
+                .map(|(_, path)| path.clone())
+                .collect()
+        };
+        let before = FOREST_READS.lock().unwrap().1.len();
+        let again = subagent_tree(&parent).unwrap();
+        assert_eq!(
+            serde_json::to_value(&again).unwrap(),
+            serde_json::to_value(&tree).unwrap()
+        );
+        assert_eq!(
+            scans(before),
+            Vec::<PathBuf>::new(),
+            "an unchanged forest was rescanned"
+        );
+        let unchanged = std::fs::read(&a1).unwrap();
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&a1)
+            .unwrap()
+            .write_all(b"{\"type\":\"user\",\"uuid\":\"z\",\"parentUuid\":\"u\",\"message\":{\"role\":\"user\",\"content\":\"later\"}}\n")
+            .unwrap();
+        let before = FOREST_READS.lock().unwrap().1.len();
+        subagent_tree(&parent).unwrap();
+        assert_eq!(scans(before), std::slice::from_ref(&a1), "one change, one rescan");
+        std::fs::write(&a1, unchanged).unwrap();
 
         let before = FOREST_READS.lock().unwrap().1.len();
         let candidates = std::sync::atomic::AtomicUsize::new(0);
@@ -2329,7 +2362,7 @@ mod tests {
         assert!(tools[0].description.is_none() && tools[0].result_summary.is_none());
         let reads: Vec<_> = FOREST_READS.lock().unwrap().1[before..]
             .iter()
-            .filter(|(_, path)| path.starts_with(&root))
+            .filter(|(kind, path)| *kind != "scan" && path.starts_with(&root))
             .cloned()
             .collect();
         assert_eq!(
@@ -2349,7 +2382,7 @@ mod tests {
         assert_eq!(sessions.len(), 1);
         let reads: Vec<_> = FOREST_READS.lock().unwrap().1[before..]
             .iter()
-            .filter(|(_, path)| path.starts_with(&root))
+            .filter(|(kind, path)| *kind != "scan" && path.starts_with(&root))
             .cloned()
             .collect();
         assert_eq!(reads, [("transcript", a1.clone())]);
