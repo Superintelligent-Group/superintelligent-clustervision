@@ -910,8 +910,14 @@ pub fn for_harness_with_root(h: Harness, root: &Path) -> Option<Box<dyn Adapter>
         Harness::Roo => Box::new(roo::Roo::with_home(root)),
         Harness::Continue => Box::new(continuedev::Continue::with_root(root)),
         Harness::OpenCode => Box::new(opencode::OpenCode::with_data_dir(root)),
-        Harness::ChatGptExport => Box::new(export::ExportAdapter::with_roots(export::Kind::ChatGpt, vec![root.to_path_buf()])),
-        Harness::ClaudeExport => Box::new(export::ExportAdapter::with_roots(export::Kind::Claude, vec![root.to_path_buf()])),
+        Harness::ChatGptExport => Box::new(export::ExportAdapter::with_roots(
+            export::Kind::ChatGpt,
+            vec![root.to_path_buf()],
+        )),
+        Harness::ClaudeExport => Box::new(export::ExportAdapter::with_roots(
+            export::Kind::Claude,
+            vec![root.to_path_buf()],
+        )),
         Harness::OpenSession => Box::new(opensession::OpenSession::with_roots(vec![root.to_path_buf()])),
         #[cfg(feature = "sqlite")]
         Harness::Hermes => Box::new(hermes::Hermes::with_home(root)),

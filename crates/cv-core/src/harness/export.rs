@@ -53,8 +53,14 @@ pub struct ExportAdapter {
 }
 
 /// The registered-sources adapter of each shape ([`super::rootless`]).
-pub(crate) static CHATGPT_EXPORT: ExportAdapter = ExportAdapter { kind: Kind::ChatGpt, roots: None };
-pub(crate) static CLAUDE_EXPORT: ExportAdapter = ExportAdapter { kind: Kind::Claude, roots: None };
+pub(crate) static CHATGPT_EXPORT: ExportAdapter = ExportAdapter {
+    kind: Kind::ChatGpt,
+    roots: None,
+};
+pub(crate) static CLAUDE_EXPORT: ExportAdapter = ExportAdapter {
+    kind: Kind::Claude,
+    roots: None,
+};
 
 impl ExportAdapter {
     /// Discover only supplied export files/directories, without consulting configuration.

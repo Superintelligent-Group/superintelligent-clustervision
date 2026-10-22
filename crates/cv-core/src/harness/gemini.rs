@@ -864,7 +864,9 @@ fn parse_all_str_inner(harness: Harness, text: &str, source_path: Option<PathBuf
                 .any(|it| it.get("role").is_some() && it.get("parts").is_some())
         });
     if checkpoint_shaped {
-        return Ok(checkpoint(harness, (&value).into(), "", source_path)?.into_iter().collect());
+        return Ok(checkpoint(harness, (&value).into(), "", source_path)?
+            .into_iter()
+            .collect());
     }
     Ok(Vec::new())
 }
@@ -992,7 +994,14 @@ fn parse_chat_recording(
 /// top-level fields. `title` is the record's `summary` when present; the per-message scan fills in a
 /// first-user-turn fallback and the session `model`. `messages` is left empty — the caller streams
 /// them through the message codec (`record.rs`).
-const RECORD_METADATA: &[&str] = &[DOCUMENT[0], DOCUMENT[1], DOCUMENT[2], DOCUMENT[3], DOCUMENT[4], DOCUMENT[6]];
+const RECORD_METADATA: &[&str] = &[
+    DOCUMENT[0],
+    DOCUMENT[1],
+    DOCUMENT[2],
+    DOCUMENT[3],
+    DOCUMENT[4],
+    DOCUMENT[6],
+];
 
 fn record_metadata(rec: &serde_json::Map<String, Value>, harness: Harness, source_path: Option<PathBuf>) -> Session {
     let id = rec.get("sessionId").and_then(Value::as_str).unwrap_or("").to_string();
@@ -2019,7 +2028,6 @@ mod tests {
                 "stream() must reassemble the same Session for {name}, {opts:?}"
             );
         }
-
     }
 
     #[test]
@@ -2421,8 +2429,11 @@ mod tests {
         );
         assert_eq!(s.harness_extra(Harness::Gemini).unwrap()["kind"], "subagent");
         // the parent's own recording, one level up, has no parent
-        let parent_refs =
-            scan_session_file(&runtime.base.join("tmp/proj/chats/session_modern.jsonl"), Harness::Gemini).unwrap();
+        let parent_refs = scan_session_file(
+            &runtime.base.join("tmp/proj/chats/session_modern.jsonl"),
+            Harness::Gemini,
+        )
+        .unwrap();
         let mut sink = CollectSink::default();
         let p = adapter
             .stream(&parent_refs[0], &stream::Demand::RICH, &mut sink)

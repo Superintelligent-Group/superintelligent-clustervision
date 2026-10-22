@@ -265,10 +265,7 @@ fn rewind_points(dir: &Path) -> Result<Vec<crate::affordance::Affordance>> {
 
 /// Reduce a session-dir JSONL sidecar to `T`, one line at a time: a missing file is the empty
 /// reduction, any other read error propagates.
-fn reduce_jsonl<T: Default>(
-    path: &Path,
-    mut step: impl FnMut(&mut T, JsonView<'_>) -> Result<()>,
-) -> Result<T> {
+fn reduce_jsonl<T: Default>(path: &Path, mut step: impl FnMut(&mut T, JsonView<'_>) -> Result<()>) -> Result<T> {
     let mut out = T::default();
     let read = jsonl::for_each_record(path, |v| step(&mut out, v));
     if let Err(error) = read {
@@ -566,48 +563,51 @@ fn read_update_enrichment(dir: &Path) -> HashMap<String, ToolEnrich> {
     // Preserve first-seen order in the public vector without repeatedly scanning its prefix.
     // Membership belongs to this one read, not the retained enrichment or replay state.
     let mut seen_locations: HashMap<String, std::collections::HashSet<String>> = HashMap::new();
-    reduce_jsonl(&dir.join("updates.jsonl"), |map: &mut HashMap<String, ToolEnrich>, v| {
-        let Some(u) = v.get("params")?.map(|p| p.get("update")).transpose()?.flatten() else {
-            return Ok(());
-        };
-        let Some(u) = Fields::parse(
-            u,
-            &["sessionUpdate", "toolCallId", "title", "kind", "locations", "status"],
-        )?
-        else {
-            return Ok(());
-        };
-        let su = u.string("sessionUpdate")?;
-        if !matches!(su.as_deref(), Some("tool_call") | Some("tool_call_update")) {
-            return Ok(());
-        }
-        let Some(id) = u.string("toolCallId")? else {
-            return Ok(());
-        };
-        let seen = seen_locations.entry(id.clone()).or_default();
-        let e = map.entry(id).or_default();
-        if let Some(title) = u.string("title")? {
-            if su.as_deref() == Some("tool_call_update") || e.title.is_none() {
-                e.title = Some(title)
+    reduce_jsonl(
+        &dir.join("updates.jsonl"),
+        |map: &mut HashMap<String, ToolEnrich>, v| {
+            let Some(u) = v.get("params")?.map(|p| p.get("update")).transpose()?.flatten() else {
+                return Ok(());
+            };
+            let Some(u) = Fields::parse(
+                u,
+                &["sessionUpdate", "toolCallId", "title", "kind", "locations", "status"],
+            )?
+            else {
+                return Ok(());
+            };
+            let su = u.string("sessionUpdate")?;
+            if !matches!(su.as_deref(), Some("tool_call") | Some("tool_call_update")) {
+                return Ok(());
             }
-        }
-        if let Some(kind) = u.string("kind")? {
-            e.kind = Some(kind)
-        }
-        if let Some(locations) = u.get("locations").map(|v| v.array()).transpose()?.flatten() {
-            for location in locations {
-                if let Some(path) = string(Some(location?), "path")? {
-                    if seen.insert(path.clone()) {
-                        e.locations.push(path)
+            let Some(id) = u.string("toolCallId")? else {
+                return Ok(());
+            };
+            let seen = seen_locations.entry(id.clone()).or_default();
+            let e = map.entry(id).or_default();
+            if let Some(title) = u.string("title")? {
+                if su.as_deref() == Some("tool_call_update") || e.title.is_none() {
+                    e.title = Some(title)
+                }
+            }
+            if let Some(kind) = u.string("kind")? {
+                e.kind = Some(kind)
+            }
+            if let Some(locations) = u.get("locations").map(|v| v.array()).transpose()?.flatten() {
+                for location in locations {
+                    if let Some(path) = string(Some(location?), "path")? {
+                        if seen.insert(path.clone()) {
+                            e.locations.push(path)
+                        }
                     }
                 }
             }
-        }
-        if let Some(status) = u.string("status")? {
-            e.status = Some(status)
-        }
-        Ok(())
-    })
+            if let Some(status) = u.string("status")? {
+                e.status = Some(status)
+            }
+            Ok(())
+        },
+    )
     .unwrap_or_default()
 }
 
