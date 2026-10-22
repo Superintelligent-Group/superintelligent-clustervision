@@ -665,27 +665,27 @@ fn record(view: JsonView<'_>, session: &mut Session, spans: bool) -> Result<(Opt
         None
     };
     let system_text = if role == Some("system") && session.system_prompt.is_none() {
-            let mut text = String::new();
-            text_views(content, false, |view| {
-                let mut started = false;
-                if let Some(view) = view {
-                    view.for_each_str_chunk(|chunk| {
-                        if !chunk.is_empty() && !started {
-                            if !text.is_empty() {
-                                text.push('\n');
-                            }
-                            started = true;
+        let mut text = String::new();
+        text_views(content, false, |view| {
+            let mut started = false;
+            if let Some(view) = view {
+                view.for_each_str_chunk(|chunk| {
+                    if !chunk.is_empty() && !started {
+                        if !text.is_empty() {
+                            text.push('\n');
                         }
-                        text.push_str(chunk);
-                        Ok(())
-                    })?;
-                }
-                Ok(())
-            })?;
-            Some(text)
-        } else {
-            None
-        };
+                        started = true;
+                    }
+                    text.push_str(chunk);
+                    Ok(())
+                })?;
+            }
+            Ok(())
+        })?;
+        Some(text)
+    } else {
+        None
+    };
     let mut blocks = Vec::new();
     if let Some(content) = content {
         if let Some(text) = content.lazy_text(spans)? {

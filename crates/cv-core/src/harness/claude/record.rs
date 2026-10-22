@@ -1354,8 +1354,8 @@ impl NotificationSummary {
             let n = body.len().min(7);
             bridge[self.workflow..self.workflow + n].copy_from_slice(&body.as_bytes()[..n]);
             let bridge = &bridge[..self.workflow + n];
-            self.workflow_found = contains_ascii_insensitive(bridge, WORD)
-                || contains_ascii_insensitive(body.as_bytes(), WORD);
+            self.workflow_found =
+                contains_ascii_insensitive(bridge, WORD) || contains_ascii_insensitive(body.as_bytes(), WORD);
             self.workflow = suffix(if body.len() < 7 { bridge } else { body.as_bytes() }, WORD, true);
         }
     }

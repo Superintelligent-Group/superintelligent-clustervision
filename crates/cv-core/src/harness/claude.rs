@@ -682,9 +682,7 @@ fn user_kind_from_head(origin: Origin, head: &str) -> (MessageKind, Origin) {
     }
     if head.starts_with("<task-notification>") {
         let summary = tag_inner(head, "summary").unwrap_or("").trim_start();
-        if summary.starts_with("Agent ")
-            || record::contains_ascii_insensitive(summary.as_bytes(), b"workflow")
-        {
+        if summary.starts_with("Agent ") || record::contains_ascii_insensitive(summary.as_bytes(), b"workflow") {
             return (MessageKind::SubagentReturn, Origin::Subagent);
         }
     }

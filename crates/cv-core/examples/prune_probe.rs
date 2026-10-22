@@ -62,9 +62,7 @@ fn main() -> Result<()> {
         }
     }
     let start = std::time::Instant::now();
-    let (result, heap) = measure(|| {
-        prune_session(cv_core::Harness::Claude, std::path::Path::new(&args[1]), &options)
-    });
+    let (result, heap) = measure(|| prune_session(cv_core::Harness::Claude, std::path::Path::new(&args[1]), &options));
     let result = result?;
     let elapsed = start.elapsed().as_secs_f64();
     println!(
