@@ -560,22 +560,55 @@ fn selected_tool_agents(
         }
         matches_workflow && matches_agent(agent, id.strip_prefix("agent-").unwrap_or(id))
     })?;
-    anyhow::ensure!(
-        workflow.is_none()
-            || if agent.is_some() {
-                workflow_member.load(std::sync::atomic::Ordering::Relaxed)
-            } else {
-                !selected.is_empty()
-            },
-        "no agents found for workflow {:?} in {}",
-        workflow.unwrap_or_default(),
-        r.id
-    );
+    if let Some(workflow) = workflow {
+        let members = workflow_member.load(std::sync::atomic::Ordering::Relaxed);
+        workflow_selection(&r.id, workflow, agent, members, !selected.is_empty())?;
+    }
     Ok(selected)
+}
+
+/// Refuse a workflow selection that found nothing, naming the selector that failed: a workflow
+/// with no agents, or an agent (other than the orchestrator, which no workflow contains) that is
+/// not one of the workflow's.
+fn workflow_selection(
+    session: &str,
+    workflow: &str,
+    agent: Option<&str>,
+    members: bool,
+    selected: bool,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(members, "no agents found for workflow {workflow:?} in {session}");
+    match agent {
+        Some(agent) if !selected && agent != ORCHESTRATOR => {
+            anyhow::bail!("no agent {agent:?} in workflow {workflow:?} in {session}")
+        }
+        _ => Ok(()),
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn an_empty_workflow_selection_names_the_selector_that_failed() {
+        use super::workflow_selection as check;
+        let message = |r: anyhow::Result<()>| r.unwrap_err().to_string();
+        assert_eq!(
+            message(check("s", "wf", None, false, false)),
+            "no agents found for workflow \"wf\" in s"
+        );
+        assert_eq!(
+            message(check("s", "wf", Some("a"), false, false)),
+            "no agents found for workflow \"wf\" in s"
+        );
+        assert_eq!(
+            message(check("s", "wf", Some("a"), true, false)),
+            "no agent \"a\" in workflow \"wf\" in s"
+        );
+        check("s", "wf", Some("a"), true, true).unwrap();
+        check("s", "wf", Some(super::ORCHESTRATOR), true, false).unwrap();
+        check("s", "wf", None, true, true).unwrap();
+    }
+
     #[test]
     fn selected_tools_preserve_unfiltered_native_edit_attribution() {
         let session = crate::harness::codex::parse_str(
