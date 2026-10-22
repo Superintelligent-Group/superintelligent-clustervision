@@ -1206,7 +1206,7 @@ mod tests {
     #[test]
     fn shared_classification_preserves_missing_role_and_canonical_meta() -> Result<()> {
         let raw = [
-            r#"{"type":"session_meta","payload":{"id":"child","cwd":"/child","cli_version":"0.163","subagent_history_start_ordinal":5,"agent_path":"child"}}"#,
+            r#"{"type":"session_meta","payload":{"id":"child","cwd":"/child","cli_version":"0.163.0","subagent_history_start_ordinal":5,"agent_path":"child"}}"#,
             r#"{"ordinal":1,"type":"session_meta","payload":{"id":"parent","cwd":"/parent","cli_version":"99","subagent_history_start_ordinal":0}}"#,
             r#"{"ordinal":2,"type":"response_item","payload":{"type":"message","content":"parent prompt"}}"#,
             r#"{"ordinal":6,"type":"response_item","payload":{"type":"message","content":"own prompt"}}"#,
@@ -1231,7 +1231,7 @@ mod tests {
         assert!(out.is_empty(), "the metadata demand builds no message");
         assert_eq!(scan.id, "child");
         assert_eq!(scan.cwd.as_deref(), Some(Path::new("/child")));
-        assert_eq!(ctx.writer_version.as_deref(), Some("0.163"));
+        assert_eq!(ctx.writer_version.as_deref(), Some("0.163.0"));
         assert_eq!(scan.title.as_deref(), Some("own prompt"));
         let session = parse_str("child", &raw, true, None);
         assert_eq!(
