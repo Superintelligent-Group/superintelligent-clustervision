@@ -28,6 +28,14 @@
 
 - Goose legacy `.jsonl` sessions are rescanned at discovery only when the file changes.
 
+- `cv index` reads compressed Codex rollouts in parallel, charging each its decoded size instead of the whole 2 GiB guard.
+
+- Claude sub-agent trees (`show --tree`, `--subagents`, lanes) reuse each unchanged agent's scan instead of rereading every transcript.
+
+- Codex forests and the edit guard walk the lane ledger through an index, not a scan of every row per parent.
+
+- A watch checkpoint or archive resume state of any size is kept; past 64 KiB or 1 MiB they were silently dropped.
+
 - OpenClaw SQLite stores are rediscovered only when the store changes, not on every listing refresh.
 
 - A copied SQLite store with WAL frames is copied once per command, however large, not again whenever another database opens.
