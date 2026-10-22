@@ -5,6 +5,7 @@ this being hella fast." Stream, never materialize a session or store you do not 
 re-read bytes already seen; use all cores; keep heap bounded by work in flight, not file size;
 every index or mark over a file verifies itself on use. The datapath design and open gaps are in
 [`DATAPATHS.md`](DATAPATHS.md); the dated logs and per-change evidence files are in git history.
+Per-path costs and the no-mode-switch rule for thresholds: [`COMPLEXITY.md`](COMPLEXITY.md).
 
 ## Regression checks
 
