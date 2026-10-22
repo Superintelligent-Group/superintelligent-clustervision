@@ -234,7 +234,7 @@ fn real_downloads_exports_parse() {
     let env = crate::env::Env::from_process().enter();
     env.set("CV_EXPORTS", dirs::home_dir().unwrap().join("Downloads"));
     for kind in [Kind::ChatGpt, Kind::Claude] {
-        let refs = discover_kind(kind);
+        let refs = discover_kind_under(kind, export_dirs());
         eprintln!("{:?}: {} conversation(s)", kind, refs.len());
         if let Some(r) = refs.iter().find(|r| r.message_count.is_some_and(|n| n > 0)) {
             let mut sink = CollectSink::default();

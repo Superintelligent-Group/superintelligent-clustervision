@@ -814,8 +814,8 @@ pub fn rootless(h: Harness) -> Option<&'static dyn Adapter> {
         Harness::Cline => &cline::ROOTLESS,
         Harness::Roo => &roo::ROOTLESS,
         Harness::Continue => &continuedev::ROOTLESS,
-        Harness::ChatGptExport => &export::ChatGptExport,
-        Harness::ClaudeExport => &export::ClaudeExport,
+        Harness::ChatGptExport => &export::CHATGPT_EXPORT,
+        Harness::ClaudeExport => &export::CLAUDE_EXPORT,
         Harness::OpenSession => &opensession::OpenSession,
         #[cfg(feature = "sqlite")]
         Harness::Hermes => &hermes::ROOTLESS,
@@ -870,8 +870,8 @@ pub fn for_harness(h: Harness) -> Option<Box<dyn Adapter>> {
         Harness::Cline => Box::new(cline::Cline::detect()),
         Harness::Roo => Box::new(roo::Roo::detect()),
         Harness::Continue => Box::new(continuedev::Continue::detect()),
-        Harness::ChatGptExport => Box::new(export::ChatGptExport),
-        Harness::ClaudeExport => Box::new(export::ClaudeExport),
+        Harness::ChatGptExport => Box::new(export::CHATGPT_EXPORT.clone()),
+        Harness::ClaudeExport => Box::new(export::CLAUDE_EXPORT.clone()),
         Harness::OpenSession => Box::new(opensession::OpenSession),
         #[cfg(feature = "sqlite")]
         Harness::Hermes => Box::new(hermes::Hermes::detect()),
@@ -910,8 +910,8 @@ pub fn for_harness_with_root(h: Harness, root: &Path) -> Option<Box<dyn Adapter>
         Harness::Roo => Box::new(roo::Roo::with_home(root)),
         Harness::Continue => Box::new(continuedev::Continue::with_root(root)),
         Harness::OpenCode => Box::new(opencode::OpenCode::with_data_dir(root)),
-        Harness::ChatGptExport => Box::new(export::ChatGptExport::with_roots(vec![root.to_path_buf()])),
-        Harness::ClaudeExport => Box::new(export::ClaudeExport::with_roots(vec![root.to_path_buf()])),
+        Harness::ChatGptExport => Box::new(export::ExportAdapter::with_roots(export::Kind::ChatGpt, vec![root.to_path_buf()])),
+        Harness::ClaudeExport => Box::new(export::ExportAdapter::with_roots(export::Kind::Claude, vec![root.to_path_buf()])),
         Harness::OpenSession => Box::new(opensession::OpenSession::with_roots(vec![root.to_path_buf()])),
         #[cfg(feature = "sqlite")]
         Harness::Hermes => Box::new(hermes::Hermes::with_home(root)),
