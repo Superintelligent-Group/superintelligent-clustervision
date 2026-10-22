@@ -229,8 +229,7 @@ impl Adapter for Grok {
 /// puts back. Each line is a checkpoint.
 fn rewind_points(dir: &Path) -> Result<Vec<crate::affordance::Affordance>> {
     use crate::affordance::{Affordance, Kind};
-    let mut out = Vec::new();
-    let read = jsonl::for_each_record(&dir.join("rewind_points.jsonl"), |v| {
+    reduce_jsonl(&dir.join("rewind_points.jsonl"), |out: &mut Vec<Affordance>, v| {
         let Some(v) = Fields::parse(v, &["created_at", "file_snapshots", "prompt_index"])? else {
             return Ok(());
         };
@@ -261,13 +260,22 @@ fn rewind_points(dir: &Path) -> Result<Vec<crate::affordance::Affordance>> {
             &summary,
         ));
         Ok(())
-    });
+    })
+}
+
+/// Reduce a session-dir JSONL sidecar to `T`, one line at a time: a missing file is the empty
+/// reduction, any other read error propagates.
+fn reduce_jsonl<T: Default>(
+    path: &Path,
+    mut step: impl FnMut(&mut T, JsonView<'_>) -> Result<()>,
+) -> Result<T> {
+    let mut out = T::default();
+    let read = jsonl::for_each_record(path, |v| step(&mut out, v));
     if let Err(error) = read {
         if !super::is_not_found(&error) {
             return Err(error);
         }
     }
-
     Ok(out)
 }
 
@@ -292,8 +300,7 @@ fn string(v: Option<JsonView<'_>>, key: &str) -> Result<Option<String>> {
 /// at the line boundary but never materialized.
 fn hook_runs(dir: &Path) -> Result<Vec<crate::affordance::Affordance>> {
     use crate::affordance::{Affordance, Kind};
-    let mut out = Vec::new();
-    let read = jsonl::for_each_record(&dir.join("updates.jsonl"), |v| {
+    reduce_jsonl(&dir.join("updates.jsonl"), |out: &mut Vec<Affordance>, v| {
         let Some(params) = v.get("params")? else { return Ok(()) };
         let Some(u) = params.get("update")? else { return Ok(()) };
         if string(Some(u), "sessionUpdate")?.as_deref() != Some("hook_execution") {
@@ -338,14 +345,7 @@ fn hook_runs(dir: &Path) -> Result<Vec<crate::affordance::Affordance>> {
             }
         }
         Ok(())
-    });
-    if let Err(error) = read {
-        if !super::is_not_found(&error) {
-            return Err(error);
-        }
-    }
-
-    Ok(out)
+    })
 }
 
 /// Static metadata/enrichment shared by whole and suffix passes. Mutable sidecars are verified
@@ -354,10 +354,7 @@ fn session_header(r: &SessionRef) -> (Session, HashMap<String, ToolEnrich>) {
     // r.path is the session directory. `summary.json` (small) carries all session-level
     // metadata; the transcript is `chat_history.jsonl`, one record per line — streamed.
     let dir = &r.path;
-    let summary: Value = fs::read_to_string(dir.join("summary.json"))
-        .ok()
-        .and_then(|t| serde_json::from_str(&t).ok())
-        .unwrap_or(Value::Null);
+    let summary = read_summary(&dir.join("summary.json")).unwrap_or(Value::Null);
 
     let mut s = Session {
         cwd: summary
@@ -566,11 +563,10 @@ impl ToolEnrich {
 /// Parse `updates.jsonl` into per-`toolCallId` enrichment. Tolerant: missing/empty/malformed file
 /// yields an empty map and zero behavior change.
 fn read_update_enrichment(dir: &Path) -> HashMap<String, ToolEnrich> {
-    let mut map: HashMap<String, ToolEnrich> = HashMap::new();
     // Preserve first-seen order in the public vector without repeatedly scanning its prefix.
     // Membership belongs to this one read, not the retained enrichment or replay state.
     let mut seen_locations: HashMap<String, std::collections::HashSet<String>> = HashMap::new();
-    if jsonl::for_each_record(&dir.join("updates.jsonl"), |v| {
+    reduce_jsonl(&dir.join("updates.jsonl"), |map: &mut HashMap<String, ToolEnrich>, v| {
         let Some(u) = v.get("params")?.map(|p| p.get("update")).transpose()?.flatten() else {
             return Ok(());
         };
@@ -612,20 +608,21 @@ fn read_update_enrichment(dir: &Path) -> HashMap<String, ToolEnrich> {
         }
         Ok(())
     })
-    .is_err()
-    {
-        map.clear();
-    }
+    .unwrap_or_default()
+}
 
-    map
+/// `summary.json`: the small session-level metadata sidecar. Missing or malformed is `Null` for
+/// callers that tolerate it; [`scan`] propagates instead.
+fn read_summary(path: &Path) -> Result<Value> {
+    let text = fs::read_to_string(path)?;
+    Ok(serde_json::from_str(&text)?)
 }
 
 /// `summary_path` is `.../<sid>/summary.json`; the session dir is its parent.
 fn scan(summary_path: &Path) -> Result<Option<SessionRef>> {
     let dir = summary_path.parent().map(Path::to_path_buf);
     let Some(dir) = dir else { return Ok(None) };
-    let text = fs::read_to_string(summary_path)?;
-    let summary: Value = serde_json::from_str(&text)?;
+    let summary = read_summary(summary_path)?;
 
     let id = summary
         .pointer("/info/id")
@@ -948,13 +945,18 @@ mod tests {
         const CHILD: &str = "CV_TEST_GROK_CALLBACK_BACKING";
         if std::env::var_os(CHILD).is_none() {
             use std::os::unix::process::CommandExt;
+            // The child must prove it ran: a drifted `--exact` filter runs zero tests and still
+            // exits 0.
+            let world = cv_testkit::World::new("grok-callback-backing");
+            let ran = world.base.join("child-ran");
             let mut command = std::process::Command::new(std::env::current_exe().unwrap());
             command
                 .args([
                     "--exact",
                     "harness::grok::tests::callback_boundaries_and_held_eof_verify_the_backing",
                 ])
-                .env(CHILD, "1");
+                .env(CHILD, "1")
+                .env(format!("{CHILD}_RAN"), &ran);
             // A regressed mapped read may fail in the child, never in the shared runner.
             unsafe {
                 command.pre_exec(|| {
@@ -973,6 +975,10 @@ mod tests {
             loop {
                 if let Some(status) = child.try_wait().unwrap() {
                     assert!(status.success(), "Grok callback child {} failed: {status}", child.id());
+                    assert!(
+                        ran.exists(),
+                        "the child body never ran (the exact filter matched nothing)"
+                    );
                     return;
                 }
                 if std::time::Instant::now() >= deadline {
@@ -982,6 +988,9 @@ mod tests {
                 }
                 std::thread::sleep(std::time::Duration::from_millis(10));
             }
+        }
+        if let Some(ran) = std::env::var_os(format!("{CHILD}_RAN")) {
+            fs::write(ran, b"ran").unwrap();
         }
         eprintln!("GROK_CALLBACK_CHILD pid={}", std::process::id());
         struct Callback {
@@ -1636,9 +1645,7 @@ mod tests {
     #[test]
     fn parses_fixture_session_v1() {
         let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/grok/v1_tools");
-        if !dir.exists() {
-            return; // fixture optional in minimal checkouts
-        }
+        assert!(dir.exists(), "missing committed fixture {}", dir.display());
         let r = scan(&dir.join("summary.json")).unwrap().unwrap();
         let grok = Grok { root: None };
         let s = grok.parse(&r).unwrap();
