@@ -658,34 +658,34 @@ fn record(view: JsonView<'_>, session: &mut Session, spans: bool) -> Result<(Opt
     let metadata = Value::Object(record.project(&MESSAGE_FIELDS[..MESSAGE_FIELDS.len() - 1])?);
     let boundary = condense_boundary(&metadata, session.harness);
     let content = record.get("content");
-    let summary = if metadata.get("role").and_then(Value::as_str) == Some("user") {
+    let role = metadata.get("role").and_then(Value::as_str);
+    let summary = if role == Some("user") {
         Some(prompt::summarize(|feed| visit_text(content, false, feed))?)
     } else {
         None
     };
-    let system_text =
-        if metadata.get("role").and_then(Value::as_str) == Some("system") && session.system_prompt.is_none() {
-            let mut text = String::new();
-            text_views(content, false, |view| {
-                let mut started = false;
-                if let Some(view) = view {
-                    view.for_each_str_chunk(|chunk| {
-                        if !chunk.is_empty() && !started {
-                            if !text.is_empty() {
-                                text.push('\n');
-                            }
-                            started = true;
+    let system_text = if role == Some("system") && session.system_prompt.is_none() {
+        let mut text = String::new();
+        text_views(content, false, |view| {
+            let mut started = false;
+            if let Some(view) = view {
+                view.for_each_str_chunk(|chunk| {
+                    if !chunk.is_empty() && !started {
+                        if !text.is_empty() {
+                            text.push('\n');
                         }
-                        text.push_str(chunk);
-                        Ok(())
-                    })?;
-                }
-                Ok(())
-            })?;
-            Some(text)
-        } else {
-            None
-        };
+                        started = true;
+                    }
+                    text.push_str(chunk);
+                    Ok(())
+                })?;
+            }
+            Ok(())
+        })?;
+        Some(text)
+    } else {
+        None
+    };
     let mut blocks = Vec::new();
     if let Some(content) = content {
         if let Some(text) = content.lazy_text(spans)? {

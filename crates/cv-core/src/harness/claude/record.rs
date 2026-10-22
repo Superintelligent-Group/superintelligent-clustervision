@@ -1355,14 +1355,8 @@ impl NotificationSummary {
             let n = body.len().min(7);
             bridge[self.workflow..self.workflow + n].copy_from_slice(&body.as_bytes()[..n]);
             let bridge = &bridge[..self.workflow + n];
-            let contains = |bytes: &[u8]| {
-                memchr::memchr2_iter(b'w', b'W', bytes).any(|at| {
-                    bytes
-                        .get(at..at + 8)
-                        .is_some_and(|word| word.eq_ignore_ascii_case(WORD))
-                })
-            };
-            self.workflow_found = contains(bridge) || contains(body.as_bytes());
+            self.workflow_found =
+                contains_ascii_insensitive(bridge, WORD) || contains_ascii_insensitive(body.as_bytes(), WORD);
             self.workflow = suffix(if body.len() < 7 { bridge } else { body.as_bytes() }, WORD, true);
         }
     }
@@ -1381,6 +1375,16 @@ fn suffix(body: &[u8], wanted: &[u8], insensitive: bool) -> usize {
             }
         })
         .unwrap_or(0)
+}
+
+/// ASCII-case-insensitive substring search, allocation-free (the tests' oracle spells the same
+/// check `to_ascii_lowercase().contains`).
+pub(super) fn contains_ascii_insensitive(bytes: &[u8], word: &[u8]) -> bool {
+    memchr::memchr2_iter(word[0], word[0].to_ascii_uppercase(), bytes).any(|at| {
+        bytes
+            .get(at..at + word.len())
+            .is_some_and(|found| found.eq_ignore_ascii_case(word))
+    })
 }
 
 #[cfg(test)]

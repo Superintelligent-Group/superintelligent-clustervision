@@ -682,14 +682,7 @@ fn user_kind_from_head(origin: Origin, head: &str) -> (MessageKind, Origin) {
     }
     if head.starts_with("<task-notification>") {
         let summary = tag_inner(head, "summary").unwrap_or("").trim_start();
-        if summary.starts_with("Agent ")
-            || memchr::memchr2_iter(b'w', b'W', summary.as_bytes()).any(|at| {
-                summary
-                    .as_bytes()
-                    .get(at..at + 8)
-                    .is_some_and(|word| word.eq_ignore_ascii_case(b"workflow"))
-            })
-        {
+        if summary.starts_with("Agent ") || record::contains_ascii_insensitive(summary.as_bytes(), b"workflow") {
             return (MessageKind::SubagentReturn, Origin::Subagent);
         }
     }
@@ -1761,32 +1754,15 @@ mod tests {
         assert!(details.is_none());
     }
 
-    /// Every record field the Claude adapter keeps that the IR does not first-class, with the
-    /// spelling Claude itself uses. Nesting them under `extra["claude"]` (IR v2) is what keeps the
-    /// top level of `extra` free for cv's own bookkeeping.
-    const FORMER_FLAT_KEYS: &[&str] = &[
-        "logicalParentUuid",
-        "isSidechain",
-        "isMeta",
-        "isCompactSummary",
-        "isApiErrorMessage",
-        "agentId",
-        "slug",
-        "version",
-        "requestId",
-        "parentToolUseID",
-        "toolUseID",
-        "sourceToolAssistantUUID",
-        "attributionAgent",
-        "attributionMcpServer",
-        "attributionMcpTool",
-        "attributionSkill",
-        "userType",
-        "message.id",
-        "message.stop_reason",
-        "message.stop_sequence",
-        "message.stop_details",
-    ];
+    /// Every bag key `collect_extra` produces for the kitchen-sink meta record, derived from the
+    /// capture lists themselves (plus the `sourceToolUseID` special case) so this test cannot
+    /// drift from the codec's lists.
+    fn expected_bag_keys() -> Vec<String> {
+        let mut keys: Vec<String> = CLAUDE_EXTRA_TOP.iter().map(|k| k.to_string()).collect();
+        keys.push("sourceToolUseID".into());
+        keys.extend(CLAUDE_EXTRA_MSG.iter().map(|k| format!("{MESSAGE_EXTRA_PREFIX}{k}")));
+        keys
+    }
 
     /// Two records covering everything `collect_extra` captures: one carrying every non-first-class
     /// field, one carrying a `toolUseResult` sidecar.
@@ -1798,7 +1774,8 @@ mod tests {
             "isCompactSummary": true, "isApiErrorMessage": false,
             "agentId": "a4a55af", "slug": "magical-wondering-rabbit", "version": "2.1.278",
             "requestId": "req_123", "parentToolUseID": "toolu_parent", "toolUseID": "toolu_self",
-            "sourceToolAssistantUUID": "u-src", "attributionAgent": "general-purpose",
+            "sourceToolAssistantUUID": "u-src", "sourceToolUseID": "toolu_self",
+            "attributionAgent": "general-purpose",
             "attributionMcpServer": "scry", "attributionMcpTool": "sql",
             "attributionSkill": "code-review", "userType": "internal",
             "message": {"role": "user", "content": "hi", "id": "msg_abc", "stop_reason": "tool_use",
@@ -1830,8 +1807,8 @@ mod tests {
 
         // 2. Every remaining Claude fact is in the bag, with Claude's own spelling.
         let meta = &s.messages[0];
-        for k in FORMER_FLAT_KEYS {
-            assert!(cl(meta).contains_key(*k), "`{k}` must live in extra[\"claude\"]");
+        for k in expected_bag_keys() {
+            assert!(cl(meta).contains_key(&k), "`{k}` must live in extra[\"claude\"]");
         }
         assert_eq!(cl(meta)["agentId"], "a4a55af");
         assert_eq!(cl(meta)["message.stop_reason"], "tool_use");

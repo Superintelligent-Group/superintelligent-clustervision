@@ -861,7 +861,7 @@ impl Reader<'_> {
         // no longer trails): its usage is a duplicate — keep only the rate-limit/context-window
         // snapshot.
         let twin_of_record = match (&usage, &self.ctx.pending_record_usage) {
-            (Some(u), Some(r)) => usage_eq(u, r),
+            (Some(u), Some(r)) => u == r,
             _ => false,
         };
         if twin_of_record {

@@ -183,14 +183,15 @@ fn scan(path: &Path, sid: &str) -> Result<SessionRef> {
         for message in messages.array()?.context("SDK messages array")? {
             count += 1;
             let message = message?;
-            if let Some(record) = Fields::parse(message, &["ts", "role", "content"])? {
+            // A message entry, not the document-level `record` above.
+            if let Some(entry) = Fields::parse(message, &["ts", "role", "content"])? {
                 if first && r.created_at.is_none() {
-                    r.created_at = record.value("ts")?.and_then(|v| v.as_i64()).and_then(ts_from_epoch);
+                    r.created_at = entry.value("ts")?.and_then(|v| v.as_i64()).and_then(ts_from_epoch);
                 }
-                if !first_user && record.string("role")?.as_deref() == Some("user") {
+                if !first_user && entry.string("role")?.as_deref() == Some("user") {
                     first_user = true;
                     if r.title.is_none() {
-                        r.title = super::wire::text_title(record.get("content"))?;
+                        r.title = super::wire::text_title(entry.get("content"))?;
                     }
                 }
             }
@@ -225,14 +226,16 @@ pub(crate) fn stream_with_options(path: &Path, id: &str, opts: &Demand, sink: &m
             "messages",
         ];
         let record = Fields::parse(view, &keys)?;
+        // `messages` streams below; every other parsed key projects into the document value.
+        let [doc_keys @ .., messages_key] = keys;
         let doc = Value::Object(
             record
                 .as_ref()
-                .map(|r| r.project(&keys[..keys.len() - 1]))
+                .map(|r| r.project(&doc_keys))
                 .transpose()?
                 .unwrap_or_default(),
         );
-        let messages = record.as_ref().and_then(|r| r.get("messages"));
+        let messages = record.as_ref().and_then(|r| r.get(messages_key));
         let mut s = Session::new(id.to_string(), Harness::Cline);
         s.source_path = Some(path.to_path_buf());
         let sid = id.split('/').next().unwrap_or(id);
@@ -266,7 +269,7 @@ pub(crate) fn stream_with_options(path: &Path, id: &str, opts: &Demand, sink: &m
             if let Some(o) = origin {
                 bag.insert("origin".into(), o.clone());
             }
-            if let Some(row) = row.as_ref().filter(|_| lead) {
+            if let Some(row) = row.as_ref() {
                 for k in [
                     "source",
                     "status",
@@ -283,17 +286,18 @@ pub(crate) fn stream_with_options(path: &Path, id: &str, opts: &Demand, sink: &m
             }
         }
         if !lead {
-            s.lineage.parent = origin
-                .and_then(|o| o.get("parentThreadId"))
-                .and_then(Value::as_str)
-                .map(str::to_string)
-                .or_else(|| Some(sid.to_string()));
+            s.lineage.parent = Some(
+                origin
+                    .and_then(|o| o.get("parentThreadId"))
+                    .and_then(Value::as_str)
+                    .unwrap_or(sid)
+                    .to_string(),
+            );
             s.lineage.agent_path = origin
                 .and_then(|o| o.get("subagent"))
                 .and_then(Value::as_str)
                 .map(str::to_string);
         }
-        let row = row.filter(|_| lead);
         s.cwd = row
             .as_ref()
             .and_then(|m| m.get("cwd"))
@@ -381,9 +385,11 @@ fn view_message(view: JsonView<'_>, spans: bool, lead: bool, prompted: &mut bool
     let Some(record) = Fields::parse(view, &keys)? else {
         return Ok(None);
     };
-    let meta = Value::Object(record.project(&keys[..keys.len() - 1])?);
+    // `content` decodes into blocks below; the other parsed keys project into the meta value.
+    let [meta_keys @ .., content_key] = keys;
+    let meta = Value::Object(record.project(&meta_keys)?);
     let mut blocks = Vec::new();
-    if let Some(content) = record.get("content") {
+    if let Some(content) = record.get(content_key) {
         if let Some(text) = content.lazy_text(spans)? {
             blocks.push(Block::Text { text });
         } else if let Some(items) = content.array()? {

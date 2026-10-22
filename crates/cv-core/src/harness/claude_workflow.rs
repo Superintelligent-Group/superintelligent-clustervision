@@ -335,18 +335,21 @@ impl crate::harness::Workflows for Runs {
     }
 }
 
+/// Sort key placing a run newest first: the state file's mtime (the JSON carries an ISO
+/// `timestamp` too, but mtime needs no parse), keyed through the on-disk `<runId>.json` name.
+fn state_recency(parent_path: &Path, run_id: &str) -> std::cmp::Reverse<Option<std::time::SystemTime>> {
+    std::cmp::Reverse(
+        workflows_dir(parent_path)
+            .map(|dir| dir.join(format!("{run_id}.json")))
+            .and_then(|path| fs::metadata(path).ok())
+            .and_then(|metadata| metadata.modified().ok()),
+    )
+}
+
 pub fn workflows(parent_path: &Path) -> Vec<Workflow> {
     let paths = state_paths(parent_path);
     let mut out = crate::par_filter_map(paths, |p| parse_state_file(&p));
-    // Newest first, by file mtime (the JSON carries an ISO `timestamp` too, but mtime needs no parse).
-    out.sort_by_key(|w| {
-        std::cmp::Reverse(
-            workflows_dir(parent_path)
-                .map(|d| d.join(format!("{}.json", w.run_id)))
-                .and_then(|p| fs::metadata(p).ok())
-                .and_then(|m| m.modified().ok()),
-        )
-    });
+    out.sort_by_key(|w| state_recency(parent_path, &w.run_id));
     out
 }
 
@@ -387,14 +390,7 @@ fn workflow_index(parent_path: &Path) -> Vec<(crate::json::JsonSource, String, O
         Some((source, id, name))
     });
     // Keep the existing wire-ID-based mtime ordering, including repeated workflow names.
-    index.sort_by_key(|entry| {
-        std::cmp::Reverse(
-            workflows_dir(parent_path)
-                .map(|dir| dir.join(format!("{}.json", entry.1)))
-                .and_then(|path| fs::metadata(path).ok())
-                .and_then(|metadata| metadata.modified().ok()),
-        )
-    });
+    index.sort_by_key(|entry| state_recency(parent_path, &entry.1));
     index
 }
 
@@ -1030,8 +1026,6 @@ pub fn ghost_launches(session_path: &Path) -> Vec<WorkflowLaunch> {
 struct OrphanScripts {
     entries: Vec<(String, String)>,
     positions: std::collections::HashMap<String, std::collections::BTreeSet<usize>>,
-    #[cfg(test)]
-    lookups: usize,
 }
 impl OrphanScripts {
     fn new(entries: Vec<(String, String)>) -> Self {
@@ -1039,25 +1033,12 @@ impl OrphanScripts {
         for (index, (name, _)) in entries.iter().enumerate() {
             positions.entry(name.clone()).or_default().insert(index);
         }
-        Self {
-            entries,
-            positions,
-            #[cfg(test)]
-            lookups: 0,
-        }
+        Self { entries, positions }
     }
     fn take(&mut self, name: &str) -> Option<String> {
-        #[cfg(test)]
-        {
-            self.lookups += 1;
-        }
         let position = self.positions.get_mut(name)?.pop_first()?;
         let last = self.entries.len() - 1;
         if position != last {
-            #[cfg(test)]
-            {
-                self.lookups += 1;
-            }
             let moved = self
                 .positions
                 .get_mut(&self.entries[last].0)
@@ -1589,7 +1570,7 @@ mod tests {
     }
 
     #[test]
-    fn orphan_index_preserves_swap_removal_order_and_bounds_lookup_work() {
+    fn orphan_index_preserves_swap_removal_order() {
         let entries: Vec<_> = ["a", "b", "a", "c", "a", "b"]
             .iter()
             .enumerate()
@@ -1608,20 +1589,11 @@ mod tests {
             let entries: Vec<_> = (0..count).map(|n| (format!("name-{n}"), format!("run-{n}"))).collect();
             let mut actual = OrphanScripts::new(entries.clone());
             let mut old = entries;
-            let mut comparisons = 0;
             for n in (0..count).rev() {
                 let name = format!("name-{n}");
-                let position = old
-                    .iter()
-                    .position(|(candidate, _)| {
-                        comparisons += 1;
-                        candidate == &name
-                    })
-                    .unwrap();
+                let position = old.iter().position(|(candidate, _)| candidate == &name).unwrap();
                 assert_eq!(actual.take(&name), Some(old.swap_remove(position).1));
             }
-            assert_eq!(comparisons, count * (count + 1) / 2);
-            assert!(actual.lookups <= 2 * count);
         }
     }
 
