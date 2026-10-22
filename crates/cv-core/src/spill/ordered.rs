@@ -92,9 +92,11 @@ struct Spill {
     _owner: Owner,
 }
 impl<T: Record> Ordered<T> {
+    #[cfg(any(test, feature = "sqlite"))]
     pub(crate) fn len(&self) -> usize {
         self.len
     }
+    #[cfg(any(test, feature = "sqlite"))]
     pub(crate) fn spilled_bytes(&self) -> Result<u64> {
         match &self.spill {
             None => Ok(0),

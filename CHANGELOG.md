@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Builds without `sqlite` count extracted events instead of spooling them to private memory and temporary files that nothing could publish.
 - Followers announce a session unreadable when they started as new once it reads, instead of tracking it from a guessed message count.
 - `created:` no longer answers from the update time when a listing lacks a creation time; the parsed session decides, and none means no match.
 - A refused exclusive rename says whether the platform lacks it or the kernel/filesystem declined, with the OS error, instead of blaming the filesystem.
