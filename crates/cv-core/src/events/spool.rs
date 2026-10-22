@@ -154,7 +154,10 @@ impl SpoolingSink {
         }
         if self.inner.observe_message(message) == Flow::Stop {
             self.latch.capture(&mut self.inner);
-            self.latch.fail(anyhow::anyhow!("event spool has already failed"));
+            // `EventSink` stops only once its latch holds a failure, so `capture` has latched
+            // it; should it ever stop without one, the extraction (not the spool) is to blame.
+            self.latch
+                .fail(anyhow::anyhow!("event extraction stopped without naming an error"));
             return Flow::Stop;
         }
         for event in self.inner.events.drain(..) {
