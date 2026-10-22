@@ -154,7 +154,7 @@ pub(crate) fn files_under(
 fn is_conversations_file(p: &Path) -> bool {
     p.file_name()
         .and_then(|n| n.to_str())
-        .is_some_and(|n| n.starts_with("conversations") && n.ends_with(".json"))
+        .is_some_and(|n| n == "conversations.json" || (n.starts_with("conversations") && n.ends_with(".json")))
 }
 
 /// [`discover_kind_in`] over every `conversations*.json` under `roots`; an unreadable dir is
