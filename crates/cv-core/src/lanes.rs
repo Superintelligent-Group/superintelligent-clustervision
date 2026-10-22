@@ -219,6 +219,7 @@ pub struct LedgerIndex {
     pub rows: std::sync::Arc<[LaneEvent]>,
     by_session: HashMap<String, Vec<usize>>,
     started: HashMap<String, usize>,
+    stopped: HashMap<String, DateTime<Utc>>,
 }
 
 impl LedgerIndex {
@@ -229,8 +230,14 @@ impl LedgerIndex {
         };
         for (at, row) in index.rows.iter().enumerate() {
             index.by_session.entry(row.session_id.clone()).or_default().push(at);
-            if row.event == LaneEventKind::Start {
-                index.started.insert(row.agent_id.clone(), at);
+            match row.event {
+                LaneEventKind::Start => {
+                    index.started.insert(row.agent_id.clone(), at);
+                }
+                LaneEventKind::Stop => {
+                    let ts = index.stopped.entry(row.agent_id.clone()).or_insert(row.ts);
+                    *ts = (*ts).max(row.ts);
+                }
             }
         }
         index
@@ -238,6 +245,10 @@ impl LedgerIndex {
     /// The positions of the rows naming `session` as their parent, in file order.
     pub fn rows_of(&self, session: &str) -> &[usize] {
         self.by_session.get(session).map_or(&[], Vec::as_slice)
+    }
+    /// The latest `stop` of `agent`, any parent's.
+    pub fn latest_stop(&self, agent: &str) -> Option<DateTime<Utc>> {
+        self.stopped.get(agent).copied()
     }
     /// The last `start` row registering `agent`.
     pub fn latest_start(&self, agent: &str) -> Option<&LaneEvent> {
@@ -263,9 +274,12 @@ pub fn ledger_index() -> std::sync::Arc<LedgerIndex> {
 
 /// The latest `stop` per bare agent id among the rows `keep` admits — what [`status_of`]
 /// consults. The parent scope keeps one parent's rows; the forest scope keeps the lanes' own.
-fn ledger_stops(rows: &[LaneEvent], mut keep: impl FnMut(&LaneEvent) -> bool) -> HashMap<String, DateTime<Utc>> {
+fn ledger_stops<'a>(
+    rows: impl IntoIterator<Item = &'a LaneEvent>,
+    mut keep: impl FnMut(&LaneEvent) -> bool,
+) -> HashMap<String, DateTime<Utc>> {
     let mut m: HashMap<String, DateTime<Utc>> = HashMap::new();
-    for r in rows.iter().filter(|r| r.event == LaneEventKind::Stop && keep(r)) {
+    for r in rows.into_iter().filter(|r| r.event == LaneEventKind::Stop && keep(r)) {
         let e = m.entry(r.agent_id.clone()).or_insert(r.ts);
         *e = (*e).max(r.ts);
     }
@@ -926,12 +940,17 @@ pub fn lanes_of(parent: &SessionRef) -> Result<Vec<Lane>> {
         .map(|adapter| adapter.task_notices(parent))
         .transpose()?
         .unwrap_or_default();
-    let rows = read_ledger();
+    // From the ledger's index: a parent's rows, or each lane's latest stop, never a scan of the
+    // whole ledger per parent (`cv lanes` asks once per session).
+    let index = ledger_index();
     let ledger = match crate::harness::rootless(parent.harness).and_then(|adapter| adapter.capabilities().lane_stops) {
-        Some(StopScope::Parent) => ledger_stops(&rows, |row| row.session_id == parent.id),
+        Some(StopScope::Parent) => ledger_stops(index.rows_of(&parent.id).iter().map(|&at| &index.rows[at]), |_| true),
         Some(StopScope::Forest) => {
             let agents: std::collections::HashSet<_> = subs.iter().map(|sub| sub.agent_id()).collect();
-            ledger_stops(&rows, |row| agents.contains(row.agent_id.as_str()))
+            agents
+                .into_iter()
+                .filter_map(|agent| index.latest_stop(agent).map(|ts| (agent.to_owned(), ts)))
+                .collect()
         }
         None => HashMap::new(),
     };
