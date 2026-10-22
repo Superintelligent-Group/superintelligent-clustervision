@@ -114,7 +114,23 @@ impl Context {
         f()
     }
     pub(super) fn cache(&self) -> Arc<super::Cache> {
-        self.0.cache.get_or_init(|| super::cache_for(&self.0.path)).clone()
+        let mut built = None;
+        let cache = self
+            .0
+            .cache
+            .get_or_init(|| {
+                let cache = super::cache_for(&self.0.path);
+                // Pin a newly built catalog cache to the environment, so it stays alive while
+                // this home is in use ([`crate::env::Env::retained`]), not just while this
+                // context lives.
+                built = Some(Arc::new((self.0.path.clone(), cache.clone())));
+                cache
+            })
+            .clone();
+        if let Some(pinned) = built {
+            *crate::env::Env::current().retained().lock().unwrap() = Some(pinned);
+        }
+        cache
     }
     #[cfg(feature = "sqlite")]
     pub(super) fn cached(&self) -> Option<Arc<super::Cache>> {
