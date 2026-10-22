@@ -285,7 +285,11 @@ fn build_page(
         who,
         plen: project::unique_prefix_len(model.tasks.keys().map(String::as_str), 8),
         // Only rich rows carry notes, so only they name a split decision.
-        children: if rich { decisions_from_notes(model) } else { HashMap::new() },
+        children: if rich {
+            decisions_from_notes(model)
+        } else {
+            HashMap::new()
+        },
         authors: last_authors(model, &outcome.events),
         now,
         rich,

@@ -46,11 +46,13 @@ impl ExactStrings {
     }
 
     pub(crate) fn contains(&mut self, text: &str) -> Result<bool> {
-        if self.spill.is_some() {
-            let hash = self.hash(text);
-            return Ok(self.spill.as_mut().unwrap().find(text.as_bytes(), hash)?.1);
+        match self.spill.as_mut() {
+            Some(disk) => {
+                let hash = Self::hash(&self.hashes, text);
+                Ok(disk.find(text.as_bytes(), hash)?.1)
+            }
+            None => Ok(self.memory.contains(text)),
         }
-        Ok(self.memory.contains(text))
     }
 
     /// True only on first insertion. Empty strings, embedded NUL and hash collisions are exact.
@@ -106,7 +108,7 @@ impl ExactStrings {
         }
         let mut disk = Disk::new(self.memory.len())?;
         for old in &self.memory {
-            disk.insert(old.as_bytes(), self.hash(old))?;
+            disk.insert(old.as_bytes(), Self::hash(&self.hashes, old))?;
         }
         self.spill = Some(disk);
         self.memory = HashSet::new();
@@ -127,13 +129,17 @@ impl ExactStrings {
         if self.spill.is_none() && estimated > self.limit {
             self.spill_memory()?;
         }
-        if self.spill.is_some() {
-            let hash = self.hash(&text);
-            return self.spill.as_mut().unwrap().insert(text.as_bytes(), hash);
+        match self.spill.as_mut() {
+            Some(disk) => {
+                let hash = Self::hash(&self.hashes, &text);
+                disk.insert(text.as_bytes(), hash)
+            }
+            None => {
+                let text = text.into_owned();
+                self.bytes += text.capacity();
+                Ok(self.memory.insert(text))
+            }
         }
-        let text = text.into_owned();
-        self.bytes += text.capacity();
-        Ok(self.memory.insert(text))
     }
 
     fn memory_cost(&self, additional: usize) -> usize {
@@ -160,8 +166,8 @@ impl ExactStrings {
         self.bytes = 0;
     }
 
-    fn hash(&self, text: &str) -> u64 {
-        let mut hasher = self.hashes.build_hasher();
+    fn hash(hashes: &std::collections::hash_map::RandomState, text: &str) -> u64 {
+        let mut hasher = hashes.build_hasher();
         // Fixed write boundaries make even hashers whose write calls are significant
         // produce the same hash for arbitrary decoded source chunk partitions.
         for chunk in text.as_bytes().chunks(COMPARE_BYTES) {

@@ -542,10 +542,7 @@ fn bare_message(role: Role, model: Option<&str>) -> Message {
 fn sess(primary: Option<&str>, turn_models: &[Option<&str>]) -> Session {
     Session {
         model: primary.map(str::to_string),
-        messages: turn_models
-            .iter()
-            .map(|m| bare_message(Role::Assistant, *m))
-            .collect(),
+        messages: turn_models.iter().map(|m| bare_message(Role::Assistant, *m)).collect(),
         ..Session::new("s", Harness::Claude)
     }
 }

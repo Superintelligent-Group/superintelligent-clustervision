@@ -397,7 +397,13 @@ mod tests {
             ),
             (TaskEventKind::Claimed { assignee: "a".into() }, "claimed"),
             (TaskEventKind::Released {}, "released"),
-            (TaskEventKind::Noted { text: "n".into(), session_ref: None }, "noted"),
+            (
+                TaskEventKind::Noted {
+                    text: "n".into(),
+                    session_ref: None,
+                },
+                "noted",
+            ),
             (
                 TaskEventKind::Done {
                     observed: None,

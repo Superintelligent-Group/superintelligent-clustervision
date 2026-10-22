@@ -413,13 +413,7 @@ fn agent_block(view: JsonView<'_>, spans: bool) -> Result<Option<Block>> {
                 .transpose()?
                 .flatten()
                 .unwrap_or_default(),
-            signature: nonempty(
-                fields
-                    .as_ref()
-                    .map(|v| v.string("signature"))
-                    .transpose()?
-                    .flatten(),
-            ),
+            signature: nonempty(fields.as_ref().map(|v| v.string("signature")).transpose()?.flatten()),
             encrypted: None,
             redacted: false,
         }));

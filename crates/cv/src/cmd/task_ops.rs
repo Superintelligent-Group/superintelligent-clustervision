@@ -799,12 +799,9 @@ mod tests {
                 .filter_map(|row| row.decision.as_ref())
                 .filter_map(|d| d.resolution.as_ref())
                 .all(|r| r.note.is_none()));
-            assert!(full
-                .items
-                .iter()
-                .any(|row| {
-                    row.body.as_deref() == Some(body.as_str()) && row.status.as_deref() == Some(body.as_str())
-                }));
+            assert!(full.items.iter().any(|row| {
+                row.body.as_deref() == Some(body.as_str()) && row.status.as_deref() == Some(body.as_str())
+            }));
         }
         assert_eq!(outcome.model.tasks[&action_id].body, body);
         assert_eq!(outcome.model.tasks[&action_id].notes[0].text, body);
