@@ -505,7 +505,7 @@ fn call_chat(
     let agent = agent(Duration::from_secs(180));
 
     // OpenAI-compatible providers (OpenRouter, LM Studio) share a body/parse shape.
-    let openai_call = |url: String, bearer: Option<&str>| -> Result<String> {
+    let openai_call = |who: &str, url: String, bearer: Option<&str>| -> Result<String> {
         let mut msgs: Vec<ChatMessage> = Vec::new();
         if let Some(s) = system {
             if !s.is_empty() {
@@ -519,15 +519,16 @@ fn call_chat(
             req = openrouter_headers(req, b);
         }
         let v = read_json(req.send_json(body), "chat").with_context(|| format!("POST to {url}"))?;
-        v["choices"][0]["message"]["content"]
-            .as_str()
-            .map(str::to_string)
-            .ok_or_else(|| anyhow!("chat response missing message content: {v}"))
+        extract_openai_text(&v, who)
     };
 
     match provider {
-        Provider::OpenRouter { key } => openai_call("https://openrouter.ai/api/v1/chat/completions".into(), Some(key)),
-        Provider::LmStudio { base } => openai_call(format!("{base}/chat/completions"), None),
+        Provider::OpenRouter { key } => openai_call(
+            "OpenRouter",
+            "https://openrouter.ai/api/v1/chat/completions".into(),
+            Some(key),
+        ),
+        Provider::LmStudio { base } => openai_call("LM Studio", format!("{base}/chat/completions"), None),
         Provider::Anthropic { key } => {
             let (sys, msgs) = normalize_for_anthropic(system, messages)?;
             let mut body = json!({ "model": model, "max_tokens": max_tokens, "messages": msgs });
