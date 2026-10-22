@@ -511,12 +511,13 @@ impl Adapter for OpenCode {
                     continue;
                 };
                 if let Some(dir) = self.part_dir(record.id().unwrap_or("")) {
-                    sink.dependency(&dir);
+                    // `dependencies` already inventories this directory and all its parts
+                    // before the read. Re-reporting them retains a duplicate per-part read set
+                    // through counted publication, even when the consumer discards every turn.
                     // Parts in file-name order, one file at a time.
                     let mut paths = listing(&dir)?;
                     paths.sort_by(|a, b| a.file_name().cmp(&b.file_name()));
                     for path in paths {
-                        sink.dependency(&path);
                         let part = document(&path, |view, source| {
                             record.part(view, None, record::Ctx::new(opts.spans, source, &arena))
                         })?;
@@ -1116,6 +1117,53 @@ mod db {
 mod tests {
     use super::*;
     use crate::harness::Parse;
+
+    #[test]
+    fn json_tree_guard_rejects_part_changes_after_streaming() -> Result<()> {
+        for change in ["rewrite", "create", "delete", "retarget"] {
+            let world = crate::test_world("opencode-tree-guard");
+            let root = world.base.join("storage");
+            for dir in ["session/project", "message/ses_guard", "part/actual-id"] {
+                fs::create_dir_all(root.join(dir))?;
+            }
+            let path = root.join("session/project/ses_guard.json");
+            fs::write(&path, "{}")?;
+            let header = root.join("message/ses_guard/noncanonical.json");
+            fs::write(&header, r#"{"id":"actual-id","role":"user"}"#)?;
+            let part = root.join("part/actual-id/part.json");
+            fs::write(&part, r#"{"type":"text","text":"before"}"#)?;
+            let adapter = OpenCode::with_root(root.clone());
+            let reference = SessionRef::new("ses_guard", Harness::OpenCode, path);
+            let mut messages = 0;
+            let mut sink = crate::stream::TryFnSink::new(|_: Message| {
+                messages += 1;
+                Ok(Flow::Continue)
+            });
+            let done = crate::stream::stream_counted(
+                &adapter,
+                &reference,
+                &Demand::LEAN.with_spans(),
+                &mut sink,
+                crate::stream::Pass {
+                    record: false,
+                    guard: true,
+                    ..crate::stream::Pass::RECORD
+                },
+            )?;
+            assert_eq!(messages, 1);
+            let guard = done.guard.unwrap();
+            guard.verify(&reference)?;
+            match change {
+                "rewrite" => fs::write(&part, r#"{"type":"text","text":"after!"}"#)?,
+                "create" => fs::write(root.join("part/actual-id/new.json"), "{}")?,
+                "delete" => fs::remove_file(&part)?,
+                "retarget" => fs::write(&header, r#"{"id":"different","role":"user"}"#)?,
+                _ => unreachable!(),
+            }
+            assert!(guard.verify(&reference).is_err(), "{change} escaped the read guard");
+        }
+        Ok(())
+    }
 
     fn parts(json_strs: &[&str]) -> Vec<Value> {
         json_strs.iter().map(|s| serde_json::from_str(s).unwrap()).collect()
