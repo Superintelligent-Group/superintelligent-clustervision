@@ -52,6 +52,10 @@ or rewritten. Paths are relative to `crates/`.
 
 ## Open (structural, not yet fixed)
 
+- **Exports roster cache** (`harness/export/native.rs` `CACHE_BYTES` 8 MiB, 8 entries): a mode
+  switch. Past it every conversation read re-parses its whole archive, O(n_a·S_a). Owned by the
+  open-cliffs lane (the exports offset index), as are that lane's other items.
+
 - **Task log replay**: every command, prompt hook and API request replays all E events.
   E appends cost O(E²) in total. Needs a persisted reducer snapshot plus a suffix fold
   (about 150 lines).
@@ -101,4 +105,3 @@ Removed mode switches:
 - Archive: the 1 MiB resume-state limit.
 - The `.zst` whole-guard charge.
 - The shared inventory budget.
-- The exports' 8 MiB roster cache: the exports offset index, open-cliffs lane.
