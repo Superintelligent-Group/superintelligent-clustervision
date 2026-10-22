@@ -180,7 +180,7 @@ impl<W: Write> MessageSink for ShareSink<'_, W> {
         }
         if let Err(error) = m.materialize(&self.resolver).and_then(|()| {
             if self.redact {
-                redact_message(&mut m, &self.opts, &mut self.stats)?;
+                redact_message(&mut m, &self.opts, &mut self.stats, &self.resolver)?;
             }
             Ok(())
         }) {
@@ -203,7 +203,7 @@ impl<W: Write> MessageSink for ShareSink<'_, W> {
             }
         }
         let mut rendered = String::new();
-        if let Err(error) = html::share_message(&m, self.count, &mut rendered) {
+        if let Err(error) = html::share_message(&m, self.count, &mut rendered, &self.resolver) {
             self.frames.result = Err(std::io::Error::other(error));
             return Flow::Stop;
         }

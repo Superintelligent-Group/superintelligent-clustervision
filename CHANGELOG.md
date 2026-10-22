@@ -3,6 +3,8 @@
 ## Unreleased
 
 - `prune`, `rewind`, and `port` accept `--skills keep|drop|drop-stale`, including legacy command-file skills; the default preserves restored skills unchanged.
+- **Breaking (library):** redaction and HTML message rendering require a resolver; Markdown consumers use `write_md_message`/`write_md_block` instead of removed buffering wrappers.
+
 - **Breaking (library):** unresolved `Text` formatting errors; `matches_str` replaces string equality, and `is_lazy` replaces `is_span`.
 
 - Compressed Codex rollouts use the independent `zstd` feature; disabled decoding errors explicitly instead of reading compressed bytes as JSONL.

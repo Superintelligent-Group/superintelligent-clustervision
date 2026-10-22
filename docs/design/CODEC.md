@@ -100,3 +100,11 @@ exact source comparison. Native ordering, affinities and collations remain autho
 Portable `selection::Positions` indexes Qwen task times and export IDs without copying payloads.
 Goose retains its already indexed scalar family selection. Page-cache settings and inventory
 admission charges do not bound individual SQLite cells or demanded candidate vectors.
+
+**Bounded projections and temporary bytes.** `projection::Head` owns both explicit budgets: an
+exact UTF-8 byte prefix for search, or a character label with trim/ellipsis policy for titles.
+Unresolved `Text` refuses `Display`; inline-only comparison returns `Option<bool>`. Markdown,
+HTML and redaction take the caller's resolver. Fidelity has only the streaming accumulator,
+checked against frozen feature counts. Arena copies and quoted JSON use one bounded scratch
+writer; exact-string storage works without SQLite. The independent `zstd` feature selects the
+decoder; a compressed read without it fails instead of interpreting compressed bytes as JSONL.

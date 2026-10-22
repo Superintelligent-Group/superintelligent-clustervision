@@ -682,12 +682,13 @@ pub(crate) fn stage_export(
         return Ok((body, bytes));
     }
     let mut output = std::io::BufWriter::with_capacity(64 * 1024, cv_core::bytes::ByteStage::default());
+    let resolver = cv_core::Resolver::new(Some(r.path.clone()));
     let outcome = stream_session_render_inner(
         adapter,
         r,
         &mut output,
         md_header,
-        md_message,
+        |m| md_message(m, &resolver),
         RenderOpts::default(),
         Mode::CheckedMarkdown,
     )?;
@@ -711,6 +712,7 @@ pub(crate) fn cmd_export(
     // `--redact`: the same scrubber `cv share` runs (API keys, private keys, JWTs, emails,
     // assignments, high-entropy blobs), applied per block before anything is rendered; the
     // per-class counts go to stderr so stdout stays the document.
+    let resolver = cv_core::Resolver::new(Some(r.path.clone()));
     let opts = RedactOptions::default();
     let stats = std::cell::RefCell::new(RedactStats::default());
     match format {
@@ -739,11 +741,11 @@ pub(crate) fn cmd_export(
                 },
                 |m| {
                     if !redact {
-                        return md_message(m);
+                        return md_message(m, &resolver);
                     }
                     let mut m = m.clone();
-                    redact_message(&mut m, &opts, &mut stats.borrow_mut())?;
-                    md_message(&m)
+                    redact_message(&mut m, &opts, &mut stats.borrow_mut(), &resolver)?;
+                    md_message(&m, &resolver)
                 },
                 RenderOpts {
                     range,
@@ -1561,11 +1563,11 @@ fn md_header(h: &HeaderInfo) -> String {
     )
 }
 
-/// One `cv export md` section: [`cv_core::render::md_message`] as a `String`.
-fn md_message(m: &Message) -> Result<String> {
-    let mut out = String::new();
-    cv_core::render::md_message(m, &mut out)?;
-    Ok(out)
+/// One `cv export md` section: [`cv_core::render::write_md_message`] as a `String`.
+fn md_message(m: &Message, resolver: &cv_core::Resolver) -> Result<String> {
+    let mut out = Vec::new();
+    cv_core::render::write_md_message(m, &mut out, resolver)?;
+    Ok(String::from_utf8(out)?)
 }
 
 #[cfg(test)]
@@ -1782,7 +1784,7 @@ mod tests {
             &reference,
             &mut native,
             md_header,
-            md_message,
+            |m| md_message(m, &cv_core::Resolver::new(Some(reference.path.clone()))),
             RenderOpts::default(),
         )?;
         struct Lazy;
@@ -2930,10 +2932,10 @@ mod tests {
                 shown.starts_with(&format!("── {label} ──\n")) && shown.contains(&text),
                 "{shown}"
             );
-            let md = md_message(m).unwrap();
+            let md = md_message(m, &cv_core::Resolver::new(None)).unwrap();
             assert!(md.starts_with(&format!("## {label}\n\n")) && md.contains(&text), "{md}");
             let mut html = String::new();
-            cv_core::html::share_message(m, 0, &mut html).unwrap();
+            cv_core::html::share_message(m, 0, &mut html, &cv_core::Resolver::new(None)).unwrap();
             assert!(
                 html.contains(&format!("<span class=\"role\">{label}</span>")) && html.contains(&text),
                 "{html}"

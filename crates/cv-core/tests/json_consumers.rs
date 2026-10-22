@@ -66,8 +66,14 @@ fn json_consumers_owned_and_source_full_outputs_match() {
     }
     let mut owned = String::new();
     let mut source = String::new();
-    cv_core::html::share_message(&fixture.owned.messages[1], 1, &mut owned).unwrap();
-    cv_core::html::share_message(&fixture.sourced.messages[1], 1, &mut source).unwrap();
+    cv_core::html::share_message(&fixture.owned.messages[1], 1, &mut owned, &fixture.sourced.resolver()).unwrap();
+    cv_core::html::share_message(
+        &fixture.sourced.messages[1],
+        1,
+        &mut source,
+        &fixture.sourced.resolver(),
+    )
+    .unwrap();
     assert_eq!(owned, source);
     let redacted_owned = cv_core::redact::redact(&fixture.owned).unwrap();
     let redacted_source = cv_core::redact::redact(&fixture.sourced).unwrap();
@@ -96,7 +102,9 @@ fn json_consumers_unreadable_sources_return_errors_before_emit_writes() {
     let fixture = Fixture::new();
     fixture.invalidate();
     let mut html = String::new();
-    assert!(cv_core::html::share_message(&fixture.sourced.messages[1], 0, &mut html).is_err());
+    assert!(
+        cv_core::html::share_message(&fixture.sourced.messages[1], 0, &mut html, &fixture.sourced.resolver()).is_err()
+    );
     assert!(cv_core::dataset::write_record(
         &fixture.sourced,
         &mut Vec::new(),
@@ -170,7 +178,13 @@ fn json_consumers_changed_source_is_an_error_in_full_and_mutable_paths() {
     let fixture = Fixture::new();
     std::fs::write(fixture.dir.join("input.json"), b"{}").unwrap();
     assert!(cv_core::redact::redact(&fixture.sourced).is_err());
-    assert!(cv_core::html::share_message(&fixture.sourced.messages[1], 1, &mut String::new()).is_err());
+    assert!(cv_core::html::share_message(
+        &fixture.sourced.messages[1],
+        1,
+        &mut String::new(),
+        &fixture.sourced.resolver()
+    )
+    .is_err());
     assert!(cv_core::dataset::write_record(
         &fixture.sourced,
         &mut Vec::new(),

@@ -254,18 +254,9 @@ pub fn share_begin(meta: &ShareMeta) -> String {
 
 /// One message card. `idx` becomes the anchor id (`#m0`, `#m1`, …) used by keyboard nav.
 /// A source error may leave a prefix in `out`; callers must discard the staged card on failure.
-pub fn share_message(m: &Message, idx: usize, out: &mut String) -> anyhow::Result<()> {
-    share_message_with_resolver(m, idx, out, &crate::Resolver::new(None))
-}
-
 /// Render lazy text using the caller's session source for implicit spans. Failed source reads
 /// leave only a staged prefix, which the caller must discard.
-pub fn share_message_with_resolver(
-    m: &Message,
-    idx: usize,
-    out: &mut String,
-    resolver: &crate::Resolver,
-) -> anyhow::Result<()> {
+pub fn share_message(m: &Message, idx: usize, out: &mut String, resolver: &crate::Resolver) -> anyhow::Result<()> {
     use std::fmt::Write as _;
     let role = role_class(m.role);
     let _ = writeln!(out, "<section class=\"msg msg-{role}\" id=\"m{idx}\">");
@@ -792,7 +783,7 @@ mod tests {
         let meta = sample_share_meta(redacted);
         let mut doc = share_begin(&meta);
         for (i, m) in session.messages.iter().enumerate() {
-            share_message(m, i, &mut doc).unwrap();
+            share_message(m, i, &mut doc, &crate::Resolver::new(None)).unwrap();
         }
         doc.push_str(&share_end(&meta, 3, "0.9.11"));
         doc
@@ -943,13 +934,13 @@ mod tests {
         owned.materialize(&crate::Resolver::new(None))?;
         let mut before = String::new();
         let mut after = String::new();
-        share_message(&owned, 0, &mut before)?;
-        share_message(&lazy, 0, &mut after)?;
+        share_message(&owned, 0, &mut before, &crate::Resolver::new(None))?;
+        share_message(&lazy, 0, &mut after, &crate::Resolver::new(None))?;
         assert_eq!(before, after);
         assert!(!after.contains("<script>bad"));
         assert!(after.contains("&lt;script&gt;bad"));
         std::fs::write(&path, b"changed")?;
-        assert!(share_message(&lazy, 0, &mut String::new()).is_err());
+        assert!(share_message(&lazy, 0, &mut String::new(), &crate::Resolver::new(None)).is_err());
         Ok(())
     }
 }

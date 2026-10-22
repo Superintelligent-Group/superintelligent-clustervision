@@ -171,7 +171,7 @@ pub fn redact_with(session: &Session, opts: &RedactOptions) -> anyhow::Result<(S
         scrub_value(v, opts, &mut stats);
     }
     for msg in &mut out.messages {
-        redact_message_with_resolver(msg, opts, &mut stats, &resolver)?;
+        redact_message(msg, opts, &mut stats, &resolver)?;
     }
 
     Ok((out, stats))
@@ -185,11 +185,7 @@ pub fn redact_text(s: &str) -> String {
 
 /// Redact secrets from a single message in place. Public so streaming consumers (dataset export) can
 /// scrub one message at a time without materializing the whole session.
-pub fn redact_message(msg: &mut Message, opts: &RedactOptions, stats: &mut RedactStats) -> anyhow::Result<()> {
-    redact_message_with_resolver(msg, opts, stats, &crate::Resolver::new(None))
-}
-
-fn redact_message_with_resolver(
+pub fn redact_message(
     msg: &mut Message,
     opts: &RedactOptions,
     stats: &mut RedactStats,
@@ -1395,7 +1391,13 @@ mod tests {
         let mut stale = session.messages[0].clone();
         std::fs::write(&path, b"replacement")?;
         let mut failed_stats = RedactStats::default();
-        assert!(redact_message(&mut stale, &RedactOptions::default(), &mut failed_stats).is_err());
+        assert!(redact_message(
+            &mut stale,
+            &RedactOptions::default(),
+            &mut failed_stats,
+            &session.resolver()
+        )
+        .is_err());
         assert_eq!(failed_stats.total(), 0);
         Ok(())
     }
@@ -1419,6 +1421,15 @@ mod tests {
         });
         session.messages.push(message);
         assert!(!serde_json::to_string(&redact(&session)?)?.contains(&secret));
+        let resolver = session.resolver();
+        let mut message = session.messages[0].clone();
+        redact_message(
+            &mut message,
+            &RedactOptions::default(),
+            &mut RedactStats::default(),
+            &resolver,
+        )?;
+        assert!(!serde_json::to_string(&message)?.contains(&secret));
         Ok(())
     }
 

@@ -153,23 +153,6 @@ pub fn md_header(
     out
 }
 
-/// One Markdown section per turn: `## <turn label>` then every block through [`md_block`].
-pub fn md_message(m: &Message, out: &mut String) -> anyhow::Result<()> {
-    let mut bytes = Vec::new();
-    write_md_message(m, &mut bytes, &crate::Resolver::new(None))?;
-    out.push_str(&String::from_utf8(bytes)?);
-    Ok(())
-}
-
-/// Append one block using the checked Markdown writer. Use `write_md_block` to avoid retaining
-/// the complete rendered block when writing a stream or staging a document.
-pub fn md_block(b: &Block, out: &mut String) -> anyhow::Result<()> {
-    let mut bytes = Vec::new();
-    write_md_block(b, &mut bytes, &crate::Resolver::new(None))?;
-    out.push_str(&String::from_utf8(bytes)?);
-    Ok(())
-}
-
 fn file_label(path: &Option<String>, source: &Option<String>) -> String {
     path.as_deref().or(source.as_deref()).unwrap_or("?").to_string()
 }
