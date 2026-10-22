@@ -141,12 +141,24 @@ fn operation_boundary(namespace: &snapshots::Namespace) -> std::sync::Arc<ReadBo
 }
 
 fn reader_scope() -> ReadScope {
-    use std::sync::{Arc, Mutex, OnceLock, Weak};
-    static ACTIVE: OnceLock<Mutex<Weak<SnapshotCache>>> = OnceLock::new();
-    let mut active = ACTIVE
-        .get_or_init(|| Mutex::new(Weak::new()))
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    use std::sync::{Mutex, Weak};
+    #[cfg(not(test))]
+    static ACTIVE: std::sync::OnceLock<Mutex<Weak<SnapshotCache>>> = std::sync::OnceLock::new();
+    // libtest runs tests concurrently in one process. A reader in another test must not
+    // retain this test's idle backings after its final scope drops.
+    #[cfg(test)]
+    thread_local! {
+        static ACTIVE: Mutex<Weak<SnapshotCache>> = const { Mutex::new(Weak::new()) };
+    }
+    #[cfg(test)]
+    return ACTIVE.with(scope_from);
+    #[cfg(not(test))]
+    scope_from(ACTIVE.get_or_init(|| Mutex::new(Weak::new())))
+}
+
+fn scope_from(active: &std::sync::Mutex<std::sync::Weak<SnapshotCache>>) -> ReadScope {
+    use std::sync::{Arc, Mutex};
+    let mut active = active.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let cache = active.upgrade().unwrap_or_else(|| {
         let cache = Arc::new(SnapshotCache {
             state: Mutex::new(SnapshotCacheState::default()),
@@ -944,6 +956,8 @@ mod tests {
         let second_database = directory.join("other.db");
         let _second_writer = live_store(&second_database, "CREATE TABLE t(x);");
         let scope = read_scope();
+        // Model another libtest thread retaining a scope across this test's cleanup.
+        let unrelated = std::thread::spawn(read_scope).join().unwrap();
         let first = open_ro(&database).unwrap();
         let first_backing = first._snapshot.as_ref().unwrap().directory.clone();
         let second = open_ro(&second_database).unwrap();
@@ -958,6 +972,7 @@ mod tests {
         drop(scope);
         assert!(!first_backing.exists());
         assert!(!second_backing.exists());
+        drop(unrelated);
         std::fs::remove_dir_all(directory).unwrap();
     }
 
@@ -1030,6 +1045,48 @@ mod tests {
         drop(second);
         drop(scope);
         std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    /// An isolated home whose catalog directory is `<root>/catalog`.
+    fn catalog_home() -> (std::path::PathBuf, crate::env::Scope) {
+        let root = std::env::temp_dir().join(format!("cv-derived-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join("home")).unwrap();
+        let scope = crate::env::Env::from_vars([
+            ("HOME", root.join("home")),
+            ("CLUSTERVISION_HOME", root.join("catalog")),
+        ])
+        .enter();
+        (root, scope)
+    }
+
+    /// A cold WAL copy is staged under cv's catalog directory, not the temporary directory,
+    /// and is gone once its reader and scope are.
+    #[test]
+    fn cold_copy_lands_beside_the_catalog_and_is_removed_after_the_pass() {
+        let _serial = SNAPSHOT_TEST.lock().unwrap();
+        let (root, _env) = catalog_home();
+        let (directory, database) = fixture();
+        let _writer = live_store(&database, "CREATE TABLE t(x); INSERT INTO t VALUES(7);");
+        let scope = read_scope();
+        let mut staged = None;
+        let reader = open_ro_with_copy_check(&database, |copied| {
+            staged = Some(copied.to_path_buf());
+            Ok(())
+        })
+        .unwrap();
+        let staged = staged.unwrap();
+        assert!(
+            staged.starts_with(root.join("catalog").join("cv-sqlite-owners-v1")),
+            "{}",
+            staged.display()
+        );
+        assert!(staged.exists());
+        drop(reader);
+        drop(scope);
+        assert!(!staged.exists());
+        assert!(!staged.parent().unwrap().exists());
+        std::fs::remove_dir_all(directory).unwrap();
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
