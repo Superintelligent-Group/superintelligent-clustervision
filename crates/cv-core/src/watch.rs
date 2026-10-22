@@ -511,9 +511,12 @@ impl Watcher {
             // (codex/hermes/claude add reasoning/tool/system turns), so seeding from it makes the
             // first `Updated` poll re-emit messages that predate the watcher. Record the true
             // baseline instead — a byte mark where the transcript is append-only (see [`baseline`]).
-            let (mark, read) = capture_baseline(&r, || {
-                baseline(&r).unwrap_or(Mark::Messages(r.message_count.unwrap_or(0)))
-            });
+            // A session without one (unreadable now) stays unseen: the next poll surfaces it as
+            // New rather than following it from a guessed position, which would replay or skip.
+            let (mark, read) = capture_baseline(&r, || baseline(&r));
+            let Some(mark) = mark else {
+                continue;
+            };
             self.seen.insert(
                 Self::key(&r),
                 State {
@@ -1001,6 +1004,27 @@ mod tests {
             )
             .unwrap();
         assert_eq!(texts, ["appended\n"]);
+    }
+
+    #[test]
+    fn a_session_unreadable_at_prime_is_announced_new_not_followed_from_a_guess() {
+        static PATH: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+        let world = crate::test_world("unreadable-at-prime");
+        PATH.set(world.base.join("later.jsonl")).unwrap();
+        fn discover() -> Vec<SessionRef> {
+            vec![SessionRef::new("later", Harness::Claude, PATH.get().unwrap())]
+        }
+        let mut watcher = Watcher::with_discovery(Filter::default(), false, discover);
+        assert_eq!(watcher.following(), 0, "an unreadable session got a guessed position");
+        let lines = [
+            serde_json::json!({"type":"user", "uuid":"u0", "message":{"role":"user", "content":"one"}}),
+            serde_json::json!({"type":"user", "uuid":"u1", "message":{"role":"user", "content":"two"}}),
+        ];
+        std::fs::write(PATH.get().unwrap(), cv_testkit::jsonl(&lines)).unwrap();
+        let events = events(&mut watcher);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].kind, EventKind::New);
+        assert_eq!(events[0].new_messages.len(), 2);
     }
 
     #[test]
