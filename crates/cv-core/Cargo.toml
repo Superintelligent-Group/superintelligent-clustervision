@@ -65,6 +65,9 @@ ruzstd = { workspace = true, optional = true }
 
 [features]
 zip-ingest = ["dep:zip"]
+# Sabotage moves for integration tests in dependent crates (their dev-dependency enables
+# this); needs the SQLite catalog.
+test-support = ["sqlite"]
 default = ["sqlite", "parallel", "mmap", "zstd"]
 # `mmap` resolves lazy content spans by memory-mapping the source file (only touched pages page in).
 # Off for wasm32 (no mmap); the resolver falls back to a positioned ranged read, behavior identical.

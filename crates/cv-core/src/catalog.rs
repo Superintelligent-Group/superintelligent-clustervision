@@ -67,6 +67,10 @@ pub(crate) enum Watched {
     Is(crate::source::FileId),
 }
 
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+pub use imp::test_support;
+
 #[cfg(feature = "sqlite")]
 mod imp {
     use super::*;
@@ -120,6 +124,51 @@ mod imp {
     /// `None` on any error; callers degrade.
     pub(crate) fn open_db() -> Option<Connection> {
         open()
+    }
+
+    /// Sabotage moves for integration tests in dependent crates: the SQL lives here, beside the
+    /// schema it names, instead of being re-rolled as raw reach-ins from another crate's tests.
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub mod test_support {
+        use super::Connection;
+
+        /// Forget every source dependency recorded for `consumer`, so the next pass must
+        /// re-establish its baselines from scratch.
+        pub fn forget_source_dependencies(consumer: &str) {
+            super::open_db()
+                .expect("catalog at CLUSTERVISION_HOME")
+                .execute("DELETE FROM source_dependencies WHERE consumer=?1", [consumer])
+                .expect("forget source dependencies");
+        }
+
+        /// Reject INSERTs into `table` while the returned guard lives, failing each with
+        /// `reason`. `when_sql` narrows the rejected rows (e.g. a consumer or session id); it
+        /// is spliced into the trigger's WHEN clause, so it must be a test-controlled literal.
+        pub struct RejectInserts {
+            conn: Connection,
+            name: String,
+        }
+        impl RejectInserts {
+            pub fn on(table: &str, when_sql: Option<&str>, reason: &str) -> Self {
+                let name = format!("test_support_reject_{table}");
+                let when = when_sql.map(|w| format!(" WHEN {w}")).unwrap_or_default();
+                let conn = super::open_db().expect("catalog at CLUSTERVISION_HOME");
+                conn.execute_batch(&format!(
+                    "CREATE TRIGGER {name} BEFORE INSERT ON {table}{when}
+                     BEGIN SELECT RAISE(ABORT, '{reason}'); END;"
+                ))
+                .expect("create reject trigger");
+                RejectInserts { conn, name }
+            }
+        }
+        impl Drop for RejectInserts {
+            fn drop(&mut self) {
+                self.conn
+                    .execute_batch(&format!("DROP TRIGGER {};", self.name))
+                    .expect("drop reject trigger");
+            }
+        }
     }
 
     #[cfg(test)]

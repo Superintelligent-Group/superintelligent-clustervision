@@ -412,19 +412,17 @@ pub fn cmd_blame(file: &str, lines: Option<&str>, show: bool) -> Result<()> {
         eprintln!("(event catalog is empty — run `cv index` first to ingest tool events)");
     }
 
+    let more = if total > commits.len() {
+        format!(" (of {total}; showing the most recent)")
+    } else {
+        String::new()
+    };
     match lines {
         Some(spec) => println!(
-            "✦ blame {rel} -L {spec} — {} commit(s) own those lines\n",
+            "✦ blame {rel} -L {spec} — {} commit(s) own those lines{more}\n",
             commits.len()
         ),
-        None => {
-            let more = if total > commits.len() {
-                format!(" (of {total}; showing the most recent)")
-            } else {
-                String::new()
-            };
-            println!("✦ blame {rel} — {} commit(s){more}\n", commits.len());
-        }
+        None => println!("✦ blame {rel} — {} commit(s){more}\n", commits.len()),
     }
 
     // The exact tier: candidate sessions whose own tool output shows one of these commits made.
@@ -434,7 +432,8 @@ pub fn cmd_blame(file: &str, lines: Option<&str>, show: bool) -> Result<()> {
     let mut matched_commits = 0usize;
     let mut best_overall: Option<(String, String, i64)> = None; // (harness, session_id, msg_idx)
     for c in &commits {
-        println!("◆ {} {}  {}", c.short, date(c.time), c.summary);
+        let summary = if c.summary.is_empty() { "(no message)" } else { &c.summary };
+        println!("◆ {} {}  {summary}", c.short, date(c.time));
         let ranked = rank_commit(&c.sha, &exact, correlate(c.time, &edits, &root), &edits);
         if ranked.is_empty() {
             println!("  (no agent session found)");
@@ -498,7 +497,7 @@ fn print_match(e: &EditEvent, m: &SessionMatch) {
     let (s, end) = range_hint(e.msg_idx);
     println!(
         "    ↳ cv show {} --range {s}..{end}",
-        crate::util::short_id(&e.session_id)
+        hint_id(&e.session_id)
     );
 }
 
@@ -677,7 +676,7 @@ fn blame_event_only(file: &str, abs: &Path) -> Result<()> {
         let (s, end) = range_hint(e.msg_idx);
         println!(
             "    ↳ cv show {} --range {s}..{end}",
-            crate::util::short_id(&e.session_id)
+            hint_id(&e.session_id)
         );
     }
     Ok(())

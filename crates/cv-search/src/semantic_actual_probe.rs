@@ -6,10 +6,18 @@
 use super::*;
 use std::cell::Cell;
 thread_local! { static CALLS: Cell<[usize; 3]> = const { Cell::new([0; 3]) }; }
-fn record(index: usize) {
+
+/// The observed operation boundaries, in `CALLS` slot order.
+#[derive(Clone, Copy)]
+enum Observed {
+    ReadCorpusDoc,
+    LoadModel,
+    SaveStore,
+}
+fn record(observed: Observed) {
     CALLS.with(|calls| {
         let mut value = calls.get();
-        value[index] += 1;
+        value[observed as usize] += 1;
         calls.set(value);
     });
 }
@@ -26,15 +34,15 @@ fn embed_sessions(path: &Path, refs: &[cv_core::SessionRef]) -> Result<usize> {
         path,
         refs,
         |r| {
-            record(0);
+            record(Observed::ReadCorpusDoc);
             crate::read_corpus_doc(r)
         },
         |spec| {
-            record(1);
+            record(Observed::LoadModel);
             load_model(spec)
         },
         |path, store| {
-            record(2);
+            record(Observed::SaveStore);
             save_store(path, store)
         },
     )
@@ -46,7 +54,7 @@ fn semantic_search(path: &Path, query: &str, k: usize) -> Result<Vec<Hit>> {
         crate::SearchFilter::default(),
         || resolve_model(false),
         |spec| {
-            record(1);
+            record(Observed::LoadModel);
             load_model(spec)
         },
         |model, query| model.encode_single(query),
