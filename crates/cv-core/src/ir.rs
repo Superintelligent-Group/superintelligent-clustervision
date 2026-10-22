@@ -743,8 +743,8 @@ impl Serialize for Message {
     }
 }
 
-/// Deserialize with `kind` / `origin` optional: IR JSON written before they existed (and
-/// hand-written test fixtures) get the role-implied defaults instead of failing.
+/// The wire form [`Message`]'s `Serialize` writes, read back; `kind` and `origin` are required
+/// (every cv since IR v2 writes them, and OpenSession 0.3 requires them).
 impl<'de> Deserialize<'de> for Message {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         #[derive(Deserialize)]
@@ -754,10 +754,8 @@ impl<'de> Deserialize<'de> for Message {
             #[serde(default)]
             parent_id: Option<String>,
             role: Role,
-            #[serde(default)]
-            kind: Option<MessageKind>,
-            #[serde(default)]
-            origin: Option<Origin>,
+            kind: MessageKind,
+            origin: Origin,
             #[serde(default)]
             timestamp: Option<DateTime<Utc>>,
             #[serde(default)]
@@ -774,8 +772,8 @@ impl<'de> Deserialize<'de> for Message {
             id: w.id,
             parent_id: w.parent_id,
             role: w.role,
-            kind: w.kind.unwrap_or_else(|| MessageKind::for_role(w.role)),
-            origin: w.origin.unwrap_or_else(|| Origin::for_role(w.role)),
+            kind: w.kind,
+            origin: w.origin,
             timestamp: w.timestamp,
             model: w.model,
             content: w.content,
@@ -1766,6 +1764,12 @@ mod tests {
         let bare = serde_json::to_value(Message::new(Role::User)).unwrap();
         let keys: Vec<&str> = bare.as_object().unwrap().keys().map(String::as_str).collect();
         assert_eq!(keys, ["role", "kind", "origin", "content"]);
+        // `kind` and `origin` are part of the wire form: a message without them is not IR.
+        for missing in ["kind", "origin"] {
+            let mut partial = bare.clone();
+            partial.as_object_mut().unwrap().remove(missing);
+            assert!(serde_json::from_value::<Message>(partial).is_err(), "{missing}");
+        }
     }
 
     /// Every `Option` set, so serde emits every field: the key set is exactly `FIELDS`, in order.

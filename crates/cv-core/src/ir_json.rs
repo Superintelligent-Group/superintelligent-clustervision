@@ -558,7 +558,7 @@ mod tests {
             {"type":"file","mime":"text/plain","path":"/file","source":"reference"}
         ]);
         let mut message: Message = serde_json::from_value(json!({
-            "id":"msg","parent_id":"parent","role":"assistant","timestamp":"2026-10-12T00:00:00Z","model":"model",
+            "id":"msg","parent_id":"parent","role":"assistant","kind":"reply","origin":"model","timestamp":"2026-10-12T00:00:00Z","model":"model",
             "content":blocks,
             "usage":{"input_tokens":1,"output_tokens":2,"cache_read_tokens":3,"cache_creation_tokens":4,"reasoning_tokens":5},
             "extra":{"claude":{"field":[1,{"a":true}]},"_record":{"type":"record"}}

@@ -120,6 +120,7 @@
 - Codex tool results use only recorded status, removing invented `completed` and `error` values.
 - Zed reports the recorded model; the provider moves to `extra.zed.provider` and never substitutes for a missing model.
 - **Breaking:** `extra.openclaw` keys copied from records keep native camelCase (`stopReason`, `customType`, `error.errorCode`); `custom_details` and `branch_from_id` become `details` and `fromId`.
+- **Breaking:** an IR or OpenSession 0.3 message without `kind` or `origin` is refused instead of inferred from its role; cv has written both since 0.11.
 - Codex outputs beginning `[error] ` stay verbatim unless cv wrote the rollout; only cv provenance enables the error sentinel.
 - `cv distill` and `cv adopt --model` share the `general-purpose` agent type default, applied only when the source names none.
 - **Breaking (library):** `ParseOptions` and `ExtraProjection` become `Demand { tier, spans, offsets }`; the five `Watcher` poll methods become `poll`/`try_poll(Poll { .. })`.

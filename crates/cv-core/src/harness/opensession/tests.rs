@@ -359,9 +359,9 @@ fn discovers_documents_in_registered_sources() {
     let doc = json!({
         "open_session": "0.3", "harness": "codex", "id": "disco-1", "title": "found me",
         "messages": [
-            { "role": "user", "kind": "prompt", "content": [{ "type": "text", "text": "hi" }] },
-            { "role": "assistant", "kind": "reply", "content": [{ "type": "text", "text": "yo" }] },
-            { "role": "tool", "kind": "tool_result", "content": [
+            { "role": "user", "kind": "prompt", "origin": "human", "content": [{ "type": "text", "text": "hi" }] },
+            { "role": "assistant", "kind": "reply", "origin": "model", "content": [{ "type": "text", "text": "yo" }] },
+            { "role": "tool", "kind": "tool_result", "origin": "harness", "content": [
                 { "type": "tool_result", "tool_use_id": "c", "content": "out" }] }
         ]
     });
@@ -840,7 +840,7 @@ fn opaque_principal_round_trips_in_owned_positioned_and_checked_json_paths() -> 
         json!("opaque-owner"),
         json!({"id":"opaque-owner","kind":"human","domain_extension":{"roles":["opaque"],"unknown":null}}),
     ] {
-        let value = json!({"open_session":"0.3","id":"principal-session","harness":"claude","cwd":"/unrelated/project","principal":principal,"future_session_field":{"ignored":true},"messages":[{"role":"user","content":[{"type":"text","text":"hello","future_block_field":42}],"future_message_field":true}]});
+        let value = json!({"open_session":"0.3","id":"principal-session","harness":"claude","cwd":"/unrelated/project","principal":principal,"future_session_field":{"ignored":true},"messages":[{"role":"user","kind":"prompt","origin":"human","content":[{"type":"text","text":"hello","future_block_field":42}],"future_message_field":true}]});
         let text = serde_json::to_string(&value)?;
         let owned = from_str(&text)?;
         let expected: Principal = serde_json::from_value(principal.clone())?;
