@@ -495,11 +495,7 @@ fn print_match(e: &EditEvent, m: &SessionMatch) {
         when,
         elsewhere,
     );
-    let (s, end) = range_hint(e.msg_idx);
-    println!(
-        "    ↳ cv show {} --range {s}..{end}",
-        crate::util::short_id(&e.session_id)
-    );
+    println!("{}", show_hint(&e.session_id, e.msg_idx));
 }
 
 /// An exact-evidence line: the session, where the commit output landed, the label — and the
@@ -520,10 +516,15 @@ fn print_exact(x: &ExactMatch, c: &CommitInfo) {
         x.evidence.msg_idx,
         x.evidence.kind.label(),
     );
-    let id = hint_id(&x.session_id);
-    println!("    ↳ cv rewind {id} --at {}", c.short);
-    let (s, end) = range_hint(x.evidence.msg_idx as i64);
-    println!("    ↳ cv show {id} --range {s}..{end}");
+    println!("    ↳ cv rewind {} --at {}", hint_id(&x.session_id), c.short);
+    println!("{}", show_hint(&x.session_id, x.evidence.msg_idx as i64));
+}
+
+/// The copy-pasteable `cv show --range` line under a match: every tier spells the session the
+/// same way ([`hint_id`]).
+fn show_hint(session_id: &str, msg_idx: i64) -> String {
+    let (s, end) = range_hint(msg_idx);
+    format!("    ↳ cv show {} --range {s}..{end}", hint_id(session_id))
 }
 
 /// The id a copy-pasteable hint uses: the short prefix, except for a sub-agent (`agent-…`), whose
@@ -674,11 +675,7 @@ fn blame_event_only(file: &str, abs: &Path) -> Result<()> {
             e.title.as_deref().map(|t| truncate(t, 48)).unwrap_or_default(),
             e.msg_idx,
         );
-        let (s, end) = range_hint(e.msg_idx);
-        println!(
-            "    ↳ cv show {} --range {s}..{end}",
-            crate::util::short_id(&e.session_id)
-        );
+        println!("{}", show_hint(&e.session_id, e.msg_idx));
     }
     Ok(())
 }
@@ -935,6 +932,15 @@ mod tests {
         ];
         let ids: Vec<String> = candidate_ids(&edits).into_iter().map(|(_, id)| id).collect();
         assert_eq!(ids, ["solo", "agent-a7f5", "orchestrator", "agent-b8e6"]);
+    }
+
+    #[test]
+    fn every_show_hint_spells_a_sub_agent_in_full() {
+        assert_eq!(show_hint("blame-e2e-session", 1), "    ↳ cv show blame-e2 --range 0..4");
+        assert_eq!(
+            show_hint("agent-a1b2c3d4e5f6", 142),
+            "    ↳ cv show agent-a1b2c3d4e5f6 --range 139..145"
+        );
     }
 
     #[test]

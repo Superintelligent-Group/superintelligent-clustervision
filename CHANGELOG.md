@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- `cv blame` spells sub-agent sessions in full in every `cv show` hint, not only under exact matches.
 - A refused write after a failed JSONL record names that record and its cause, instead of only saying the stage failed.
 - Claude, Gemini and Qwen port resume hints are one runnable line, `cd <dir> && <harness> --resume <id>`, instead of a command plus prose.
 - Long-running `serve`, `mcp` and followers resolve Gemini/Qwen projects registered after they started, instead of leaving those sessions without a working directory.
