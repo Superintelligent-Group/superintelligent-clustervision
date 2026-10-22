@@ -20,6 +20,8 @@
 
 - Codex sub-agent forests parse the lane ledger once per ledger state, not once per parent.
 
+- Kimi Code discovery rescans only a new session, not every session, when the session index grows.
+
 - Search staleness counts the preferred copy of each session, avoiding false drift from older duplicates.
 
 ## 0.18.0-rc.1 — 2026-10-22 — the release an agent can trust

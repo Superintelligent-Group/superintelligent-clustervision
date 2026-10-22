@@ -220,9 +220,6 @@ impl Adapter for KimiCode {
         let Some(root) = &self.root else {
             return Ok(Default::default());
         };
-        let mut shared_reads = crate::source::ReadSet::default();
-        shared_reads.record(&root.join("session_index.jsonl"));
-        shared_reads.record(&root.join("workspaces.json"));
         // An unreadable index, dir or wire log is skipped and reported; a torn index keeps the
         // tombstones read before the tear.
         let mut out = crate::Discovered::default();
@@ -272,13 +269,20 @@ impl Adapter for KimiCode {
                 dirs.push((sdir, id.to_string(), fallback_cwd));
             }
         }
+        // The index and `workspaces.json` supply only the cwd fallback, applied after the cache:
+        // in the key, the index's one new line per new session rescanned every session.
         let scanned = crate::par_discovery_filter_map(dirs, |(sdir, id, fallback_cwd)| {
-            let mut reads = shared_reads.clone();
+            let mut reads = crate::source::ReadSet::default();
             reads.record(&sdir.join("state.json"));
             let key = main_wire(&sdir);
             reads.record(&key);
             let key = if key.exists() { key } else { sdir.join("state.json") };
-            let r = crate::discover_cache::cached_scan_with_reads(&key, reads, || scan(&sdir, &id, fallback_cwd));
+            let r = crate::discover_cache::cached_scan_with_reads(&key, reads, || scan(&sdir, &id, None)).map(|r| {
+                r.map(|mut r| {
+                    r.cwd = r.cwd.or(fallback_cwd);
+                    r
+                })
+            });
             crate::Skipped::listed(&key, r)
         });
         scanned.into_iter().for_each(|found| out.push(found));
@@ -716,7 +720,12 @@ fn read_workspaces(path: &Path) -> HashMap<String, PathBuf> {
 
 /// Native state metadata wins; read wire only for missing titles/timestamps. Exact turn counts
 /// are deferred to complete reads or indexing.
+#[cfg(test)]
+static SCANNED: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
+
 fn scan(session_dir: &Path, id: &str, fallback_cwd: Option<PathBuf>) -> Result<Option<SessionRef>> {
+    #[cfg(test)]
+    SCANNED.lock().unwrap().push(session_dir.to_path_buf());
     let state = read_discovery_state(session_dir);
     let wire = main_wire(session_dir);
     if !wire.exists() && state.is_null() {
@@ -2094,6 +2103,51 @@ mod tests {
         fs::write(dir.join("state.json"), "{\"cwd\":\"/state\"}")?;
         assert_eq!(adapter.discover()?[0].cwd.as_deref(), Some(Path::new("/state")));
         assert_eq!(fs::read_to_string(wire)?, body);
+        Ok(())
+    }
+
+    /// The index grows by one line per new session; that rescans the new session alone, and
+    /// every other session keeps its index cwd.
+    #[test]
+    fn a_new_session_rescans_only_itself() -> Result<()> {
+        let world = crate::test_world("kimi_code_new_sibling");
+        let context = crate::discover_cache::read::Context::current();
+        let _scope = context.enter();
+        let home = world.home.join(".kimi-code");
+        let index = home.join("session_index.jsonl");
+        let add = |name: &str| -> Result<()> {
+            let wire = main_wire(&home.join("sessions/wd_test").join(name));
+            fs::create_dir_all(wire.parent().unwrap())?;
+            fs::write(
+                &wire,
+                "{\"type\":\"context.append_message\",\"message\":{\"role\":\"user\",\"content\":\"hi\"}}\n",
+            )?;
+            let mut f = fs::OpenOptions::new().create(true).append(true).open(&index)?;
+            std::io::Write::write_all(
+                &mut f,
+                format!("{{\"sessionId\":\"{name}\",\"workDir\":\"/cwd-{name}\"}}\n").as_bytes(),
+            )?;
+            Ok(())
+        };
+        let scanned = || {
+            let mut all = SCANNED.lock().unwrap();
+            let mine: Vec<PathBuf> = all.iter().filter(|p| p.starts_with(&home)).cloned().collect();
+            all.retain(|p| !p.starts_with(&home));
+            mine
+        };
+        for i in 0..5 {
+            add(&format!("session_{i}"))?;
+        }
+        let adapter = KimiCode::with_home(&home);
+        assert_eq!(adapter.discover()?.len(), 5);
+        assert_eq!(scanned().len(), 5);
+        add("session_new")?;
+        let refs = adapter.discover()?;
+        assert_eq!(scanned(), vec![home.join("sessions/wd_test/session_new")]);
+        for r in &refs {
+            let name = r.path.file_name().unwrap().to_string_lossy();
+            assert_eq!(r.cwd.as_deref(), Some(Path::new(&format!("/cwd-{name}"))));
+        }
         Ok(())
     }
 
