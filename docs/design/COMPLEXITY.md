@@ -63,7 +63,12 @@ or rewritten. Paths are relative to `crates/`.
 - **`agent-…` lookups** read the catalog, not a rediscovery, but still list each session's
   sidecar dir. A by-id index cannot replace that: the scan cache holds an agent only after its
   forest was read and flushed, and an agent written since (or a copy) is in no record.
-- **`show --tree`**: indents by chain depth, so output is O(e²). Fixing it changes output.
+- **`show --tree`** (`cv/src/cmd/view.rs` `print_tree`): each row is indented two spaces per
+  ancestor, and a transcript's parent links form one chain, so row i sits at depth i and the
+  indentation alone is e(e-1) bytes: about 1 MB for 1,000 messages beside ~100 KB of preview,
+  100 MB for 10,000. Indenting only below a fork (an only child keeps its parent's depth) makes
+  it O(e·line + e·forks). That changes the leading spaces of every `•` row under a parent link
+  (the threaded view of every harness that records parents); flat lists are unchanged.
 
 ## Surviving thresholds
 
