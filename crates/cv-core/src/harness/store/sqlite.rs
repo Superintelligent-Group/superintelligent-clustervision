@@ -21,8 +21,12 @@ use rusqlite::{Connection, OpenFlags};
 use std::collections::HashSet;
 use std::path::Path;
 
+mod derived;
 #[cfg(test)]
 pub(crate) mod export_tests;
+pub(crate) use derived::derived;
+#[cfg(test)]
+pub(crate) use derived::DERIVE_OPENS;
 mod selection;
 mod snapshots;
 pub(crate) use selection::Selection;
