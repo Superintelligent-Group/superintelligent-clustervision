@@ -171,8 +171,14 @@ fn install_is_idempotent_show_reports_and_remove_restores_the_file() {
     let (ok, code, _, err) = w.cv(&["hooks", "install", "gemini"]);
     assert!(!ok && code == 1, "unknown harness errors");
     assert!(err.contains("no verified hook contract"), "{err}");
+}
 
-    // doctor says whether the hooks are installed (project scope here) and the policy in force.
+/// `cv doctor` says whether the hooks are installed (project scope here) and the policy in force.
+#[test]
+fn doctor_reports_hook_install_state_and_policy() {
+    let w = World::new("doctor-hooks");
+    let out = cv_ok(&w, &["hooks", "install", "claude", "--scope", "project"]);
+    assert!(out.contains("installed"), "{out}");
     w.write_session(
         "docsess",
         &[
@@ -309,7 +315,10 @@ fn each_hook_answers_the_docs_payload_for_its_event() {
         !ctx.contains("elsewher"),
         "another directory's session is not listed:\n{ctx}"
     );
-    assert!(ctx.chars().count() <= 4000);
+    assert!(
+        ctx.chars().count() <= 4000,
+        "the start pack stays under its 4,000-char cap (START_PACK_MAX):\n{ctx}"
+    );
     // Nothing to say, nothing printed.
     let out = hook(
         &w,
