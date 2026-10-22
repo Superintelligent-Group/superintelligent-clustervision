@@ -189,7 +189,7 @@
 - Every waiting command announces what it waits for on stderr within a second, before its first discovery; daemons print their ready line first.
 - `cv workflow --follow` gains `--for <duration>`: stop after that long and render the run as it stands.
 - `cv hook` with a terminal on stdin exits 2 with usage; `cv mcp` and `cv task … -` say what they are reading.
-- MCP tools generated from the CLI omit `--follow` (no Ctrl-C in a tool call); `for` stays.
+- MCP tools generated from the CLI omit `--follow` (no Ctrl-C in a tool call); a `follow` argument is refused with a pointer to `for`.
 - `tests/announce.rs` pins it: every command on a pipe exits within 5 s or is a daemon that announced within the 3 s test allowance.
 - **Breaking:** watch and `observe_stream` cursors are version 2 (one mark per position); a 0.17 cursor starts a fresh baseline.
 - `ls --json --asc` with a query selects the same sessions as descending, reversed; an absent session no longer takes a window slot.
@@ -257,7 +257,8 @@
 - `emit::Delta {field, before, after}` and `formats::Finding` become one `emit::Divergence {what, a, b, expected, at}`; serialized, `at` is `where` and `FidelityReport.deltas` elements change keys.
 - `SubagentInfo` and `claude::subagent_refs` become `ir::AgentRef` and `subagent_tree_of`; `claude::CARRIER_KEY` is `ir::CARRIER_KEY`.
 - Modules move: `handoff` is `codex_handoff`, `loom` is `splice`, `harness::harmony` is `harness::wire::harmony`.
-- `Watcher::run` is gone (callers own scheduling around `poll`); `cline::discover_in` and `cline_sdk::discover` return `Discovered`.
+- `Watcher::run` is gone (callers own scheduling around `poll`); `poll_sources` is `offer_sources`.
+- `cline::discover_in` returns `Discovered`; `cline_sdk::discover` takes `&mut Discovered` and fills it instead of returning refs.
 - `distill::distill` splits into `prepare_distill` and `distill_pack`; `Session::first_user_text` and `searchable_text` are gone.
 - `SearchRow::to_json` is `to_json_with(&SearchRowContext)`; `scan::live_search` is `live_search_filtered`; `lazy::read_head` is `read_head_checked`, returning `Result`.
 - `RedactOptions.keep_emails` is `classes.emails`, inverted: `false` keeps emails. `task::AppendOutcome.replay_warnings` (always empty) is gone.
@@ -270,6 +271,23 @@
 - `source::rename_consumer` is gone: a consumer missing its baselines under a new identity rereads the source instead of migrating them.
 - `query::WindowPresence` is gone: `filter_refs_limited` drops its presence argument and always skips absent sources before choosing the window.
 - `lanes::Lane.status` is a `LaneStatus` (`Running`, `Stopped`, `Returned`, `Recorded(word)`; `as_str` and JSON unchanged); `LaneEvent.event` is `LaneEventKind`.
+- `MessageSink::extra_projection` is `MessageSink::tier`, returning a `Tier`; a sink that overrode it overrides `tier`.
+- `one_agent_across` returns `Result<bool>`: an unreadable forest is an error, not `false`.
+- `wire::harmony::decode_content` takes a call-id generator; derive position ids with `ir::derived_call_id`.
+- `export::ChatGptExport`, `ClaudeExport` and their `with_roots` are gone; use `harness::for_harness_with_root(Harness::ChatGptExport, dir)` (or `ClaudeExport`).
+- `codex::parse_str`, `gemini::parse_all_str`, `parse_all_str_for` and `ingest::ingest_files` return `Result`; a codec failure is an error, not a partial session.
+- `affordance::classify_tool` is private and `items_of`/`item_of` are gone; use `classify_tool_json`/`classify_tool_view` and `items_of_view`/`item_of_view`.
+- `projection::Head::push` returns `bool`, `true` once the budget is full, so a caller stops feeding text.
+- `lazy::json_string_span` is gone (adapters build `Text::Source`); `try_resolve_prefix` budgets decoded bytes, not raw (`max_raw` is `max`).
+- `html::share_message_with_resolver` is `share_message(.., resolver)`; `redact::scrub_value`/`scrub_cow` are private: use `redact_with`, `redact_message` or `redact_text`.
+- `resume::version` returns `String`, not `Option<String>`; `resume::MarkUpdate` is a struct `{session, mark}`, not a tuple.
+- `EmitOptions.sidechain_of` is `Option<SidechainOf {root, agent}>`; `PruneOptions`/`RewindOptions` gain `skills_policy` and their results `skills`, breaking exhaustive literals.
+- `lanes::STRAND_PATTERNS` is private: `lanes::text_is_waiting` is the strand check.
+- `ForestTools::for_workflow` is gone; `tools::forest_tools_selected(r, None, Some(run_id), None)` reads only that workflow.
+- `query::HAS_FLAGS` rows are `(name, help, Cost)` triples; destructuring code takes three fields.
+- `task::store::append_agent_event` (the free function) is gone; call `TaskStore::default_store().append_agent_event(event)`.
+- `Env::enter_isolated` returns `Isolated(armed, Scope)`, which derefs to the scope, instead of a bare `Scope`.
+- cv-testkit: `claude::user` takes the session id first: `user(sid, uuid, ts, text)`.
 
 **After upgrading, once.**
 - The first listing rediscovers the fleet (announced on stderr; `cv index` does it ahead): catalog schema 4 drops an older catalog and rebuilds it.

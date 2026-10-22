@@ -472,6 +472,7 @@ pub(crate) fn build_argv(cmd: &CommandSpec, args: &Value) -> Result<Vec<String>>
             ("prune", "range") => Some("keep"),
             ("prune", "retrieve") => Some("cat tool with session and tool_use_id"),
             ("rewind", "from_compaction") => Some("full (omit it to start at the last compaction)"),
+            (_, "follow") if cmd.arg("for").is_some() => Some("for"),
             _ => None,
         };
         if let Some(replacement) = replacement {
@@ -963,6 +964,7 @@ mod tests {
                 ("pack", "to", "harness"),
                 ("dataset", "out", "file"),
                 ("deferrals", "since", "at"),
+                ("workflow", "follow", "for"),
             ] {
                 let commands = CliTools::from_tree(&crate::build_cli()).unwrap();
                 let command = commands.commands().iter().find(|cmd| cmd.name == name).unwrap();
