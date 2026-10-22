@@ -5432,6 +5432,65 @@ mod tests {
         assert_eq!(refresh(), 0);
     }
 
+    /// A Kimi Code session's main agent rewrites `state.json` every turn: a sub-agent is
+    /// certified by its own slice of it, so the main agent's turn rereads the main agent alone,
+    /// and a change to one sub-agent's entry rereads that sub-agent (and the main agent, which
+    /// lists every sub-agent).
+    #[test]
+    fn a_kimi_code_state_rewrite_rereads_only_the_agents_whose_slice_moved() {
+        use std::io::Write as _;
+        let _home = IsolatedHome::new();
+        let (dir, sdir) = (tmpdir(), tmpdir());
+        let session = sdir.join("session_0000");
+        let line = |text: &str| {
+            format!(
+                "{}\n",
+                serde_json::json!({"type":"context.append_message","message":{"role":"user","content":text}})
+            )
+        };
+        for agent in ["main", "agent-1", "agent-2"] {
+            let wire = session.join("agents").join(agent).join("wire.jsonl");
+            std::fs::create_dir_all(wire.parent().unwrap()).unwrap();
+            std::fs::write(&wire, line(&format!("zqkimi {agent}"))).unwrap();
+        }
+        let state = |prompt: &str, labels: &str| {
+            serde_json::json!({"id":"session_0000","cwd":"/work","lastPrompt":prompt,"agents":{
+                "main":{"type":"main"},
+                "agent-1":{"type":"explore","parentAgentId":"main","labels":["one"]},
+                "agent-2":{"type":"explore","parentAgentId":"main","labels":[labels]}}})
+            .to_string()
+        };
+        std::fs::write(session.join("state.json"), state("first", "two")).unwrap();
+        let main = cv_core::SessionRef::new("0000", cv_core::Harness::KimiCode, &*session);
+        let refs: Vec<_> = std::iter::once(main.clone())
+            .chain(["agent-1", "agent-2"].map(|agent| {
+                cv_core::SessionRef::new(
+                    format!("0000/{agent}"),
+                    cv_core::Harness::KimiCode,
+                    session.join("agents").join(agent),
+                )
+            }))
+            .collect();
+        let refresh = || sweep(&dir, refs.clone(), false, false).unwrap().changed;
+        assert_eq!(refresh(), 3);
+        assert_eq!(refresh(), 0);
+        // A main-agent turn: its wire grows and the state is rewritten.
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(session.join("agents/main/wire.jsonl"))
+            .unwrap()
+            .write_all(line("zqkimi again").as_bytes())
+            .unwrap();
+        std::fs::write(session.join("state.json"), state("second", "two")).unwrap();
+        assert_eq!(refresh(), 1);
+        assert!(!cv_core::events::needs_ingest(&refs[1]));
+        std::fs::write(session.join("state.json"), state("second", "relabelled")).unwrap();
+        assert!(cv_core::events::needs_ingest(&refs[2]));
+        assert!(!cv_core::events::needs_ingest(&refs[1]));
+        assert_eq!(refresh(), 2);
+        assert_eq!(refresh(), 0);
+    }
+
     /// The core invariant of `ChunkSink`: a body larger than [`CHUNK_BYTES`] is flushed into several
     /// tantivy docs that all share the session id. Search must (a) still find a term living only in a
     /// late chunk, and (b) dedup a term present in *every* chunk back to a single row per id.

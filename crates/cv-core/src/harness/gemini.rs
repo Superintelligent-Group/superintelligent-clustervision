@@ -107,8 +107,8 @@ impl Adapter for Gemini {
     }
 
     /// A `logs.json` holds a whole project's sessions: each is certified by its own entries.
-    fn certifies_rows(&self, r: &SessionRef) -> bool {
-        is_logs(&r.path)
+    fn rows_store(&self, r: &SessionRef) -> Option<PathBuf> {
+        is_logs(&r.path).then(|| r.path.clone())
     }
 
     /// Every session's certificate in the `logs.json` at `store` ([`logs`]).

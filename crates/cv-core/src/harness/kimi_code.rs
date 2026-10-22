@@ -212,6 +212,22 @@ impl Adapter for KimiCode {
         Some(())
     }
 
+    /// A sub-agent reads its own slice of the session's `state.json`, which the main agent
+    /// rewrites every turn: it is certified by that slice ([`state_rows`]).
+    fn rows_store(&self, r: &SessionRef) -> Option<PathBuf> {
+        let (session, agent) = split_agent_path(&r.path);
+        (agent != "main").then(|| session.join("state.json"))
+    }
+
+    fn rows(&self, store: &Path) -> Option<HashMap<String, crate::source::Rows>> {
+        state_rows(store)
+    }
+
+    /// A sub-agent's certificate is keyed by its agent id.
+    fn rows_key<'a>(&self, r: &'a SessionRef) -> &'a str {
+        split_agent_path(&r.path).1
+    }
+
     fn roots(&self) -> Vec<PathBuf> {
         self.root.clone().into_iter().collect()
     }
@@ -637,6 +653,46 @@ pub fn subagent_refs(main: &SessionRef) -> Result<Vec<SessionRef>> {
     }
     out.sort_by_key(|(n, _)| *n);
     Ok(out.into_iter().map(|(_, r)| r).collect())
+}
+
+/// Each sub-agent's certificate in the session `state.json` at `store`, by agent id: the slice a
+/// sub-agent's read takes from it ([`session_header`]), the session's `cwd` (its fallback) and
+/// its own `agents.<id>` entry (`parentAgentId`, `labels`), digested as JSON. Every `agent-N` the
+/// session holds is certified, listed in the state or not.
+fn state_rows(store: &Path) -> Option<HashMap<String, crate::source::Rows>> {
+    use crate::source::Rows;
+    let session_dir = store.parent()?;
+    let state = read_state(session_dir);
+    let mut agents: std::collections::BTreeSet<String> = state
+        .get("agents")
+        .and_then(Value::as_object)
+        .map(|agents| agents.keys().filter(|k| k.starts_with("agent-")).cloned().collect())
+        .unwrap_or_default();
+    if let Ok(entries) = fs::read_dir(session_dir.join("agents")) {
+        agents.extend(
+            entries
+                .flatten()
+                .filter_map(|e| e.file_name().into_string().ok())
+                .filter(|name| name.starts_with("agent-")),
+        );
+    }
+    let slice = |agent: &str| serde_json::json!([state.get("cwd"), state.pointer(&format!("/agents/{agent}"))]);
+    Some(
+        agents
+            .into_iter()
+            .map(|agent| {
+                let digest = Rows::fold(Rows::SEED, &serde_json::to_vec(&slice(&agent)).unwrap_or_default());
+                (
+                    agent,
+                    Rows {
+                        count: 1,
+                        high: 0,
+                        digest,
+                    },
+                )
+            })
+            .collect(),
+    )
 }
 
 fn read_state(session_dir: &Path) -> Value {

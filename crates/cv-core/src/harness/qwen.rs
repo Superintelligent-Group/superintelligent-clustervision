@@ -114,8 +114,8 @@ impl Adapter for Qwen {
 
     /// A gemini-cli `logs.json` holds a whole project's sessions: each is certified by its own
     /// entries ([`crate::harness::gemini::logs`]).
-    fn certifies_rows(&self, r: &SessionRef) -> bool {
-        crate::harness::gemini::is_logs(&r.path)
+    fn rows_store(&self, r: &SessionRef) -> Option<PathBuf> {
+        crate::harness::gemini::is_logs(&r.path).then(|| r.path.clone())
     }
 
     fn rows(&self, store: &Path) -> Option<std::collections::HashMap<String, crate::source::Rows>> {

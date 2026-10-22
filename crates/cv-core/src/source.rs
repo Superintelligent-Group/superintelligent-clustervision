@@ -642,18 +642,29 @@ impl Baseline {
                 .is_some_and(|(old, now)| old.matches(now, probe))
     }
 
-    /// A session in a shared SQLite store whose files moved (another session was written): the
+    /// A session in a store shared by many whose files moved (another session was written): the
     /// store's own files aside, every dependency is as recorded, and `r`'s rows certify as they
-    /// did ([`Rows`]).
+    /// did ([`Rows`]). The store is `r`'s primary (a SQLite database, a `logs.json`) or a shared
+    /// side file of it ([`crate::harness::Adapter::rows_store`]), when its primary must be as it
+    /// was.
     pub fn rows_fresh(&self, r: &SessionRef, current: &Self, probe: &mut Probe) -> bool {
         let (Some(rows), Some(_), Some(old), Some(now)) =
             (self.rows, current.primary, self.stamp.as_ref(), current.stamp.as_ref())
         else {
             return false;
         };
+        let Some(shared) = probe.rows_store(r) else {
+            return false;
+        };
+        // A store that is not the session's primary certifies its slice of a shared side file;
+        // the primary itself must be as it was. (A primary store's replacement is in its
+        // certificate: [`store_birth`].)
         let primary = probe.primary_path(r);
-        let mut store: Vec<PathBuf> = sqlite_sidecars(&primary).into();
-        store.push(primary);
+        if absolute(&shared) != absolute(&primary) && self.primary != current.primary {
+            return false;
+        }
+        let mut store: Vec<PathBuf> = sqlite_sidecars(&shared).into();
+        store.push(shared);
         let Some(store) = store.iter().map(|p| absolute(p)).collect::<Option<Vec<_>>>() else {
             return false;
         };
@@ -1013,22 +1024,28 @@ impl Probe {
         }
     }
 
-    /// `r`'s [`Rows`] certificate, when its adapter keeps it in a shared store (a SQLite database,
-    /// a gemini-cli `logs.json`; [`crate::harness::Adapter::certifies_rows`]): every
-    /// session of that store is certified at once, from one consistent read, once per store state
-    /// in this process (the state is the database's, WAL's and journal's identities, the ones a
-    /// write moves) and once per probe.
+    /// The store whose certificate covers `r` ([`crate::harness::Adapter::rows_store`]).
+    pub fn rows_store(&mut self, r: &SessionRef) -> Option<PathBuf> {
+        self.adapters
+            .entry(r.harness)
+            .or_insert_with(|| crate::harness::for_harness(r.harness))
+            .as_ref()?
+            .rows_store(r)
+    }
+
+    /// `r`'s [`Rows`] certificate, when its adapter keeps it in a store shared by many sessions
+    /// ([`crate::harness::Adapter::rows_store`]: a SQLite database, a gemini-cli `logs.json`, a
+    /// Kimi Code `state.json`): every session of that store is certified at once, from one
+    /// consistent read, once per store state in this process (the state is the store's, WAL's and
+    /// journal's identities, the ones a write moves) and once per probe.
     pub fn rows(&mut self, r: &SessionRef) -> Option<Rows> {
         type State = Vec<Option<FileId>>;
         type Stores = std::sync::Mutex<HashMap<Store, (State, Certified)>>;
         static STORES: std::sync::LazyLock<Stores> = std::sync::LazyLock::new(Default::default);
-        let store = (r.harness, absolute(&r.path)?);
+        let shared = self.rows_store(r)?;
+        let store = (r.harness, absolute(&shared)?);
         if !self.rows.contains_key(&store) {
-            let adapter = self
-                .adapters
-                .entry(r.harness)
-                .or_insert_with(|| crate::harness::for_harness(r.harness));
-            let adapter = adapter.as_ref().filter(|adapter| adapter.certifies_rows(r));
+            let adapter = self.adapters.get(&r.harness).and_then(Option::as_ref);
             let state = |path: &Path| -> State {
                 let mut files: Vec<PathBuf> = sqlite_sidecars(path).into();
                 files.push(path.to_path_buf());
@@ -1043,10 +1060,15 @@ impl Probe {
                     .filter(|(at, _)| *at == before)
                     .map(|(_, certified)| certified.clone());
                 cached.unwrap_or_else(|| {
-                    let born = store_birth(&store.1);
-                    let certified = adapter.rows(&r.path).map(|mut rows| {
-                        for certificate in rows.values_mut() {
-                            certificate.digest = Rows::fold(certificate.digest, &born);
+                    // A session's own store carries its birth; a shared side file's slice is
+                    // certified by content, whatever file holds it (side files are commonly
+                    // replaced by an atomic rename on every write).
+                    let born = (shared == r.path).then(|| store_birth(&store.1));
+                    let certified = adapter.rows(&shared).map(|mut rows| {
+                        if let Some(born) = born {
+                            for certificate in rows.values_mut() {
+                                certificate.digest = Rows::fold(certificate.digest, &born);
+                            }
                         }
                         std::sync::Arc::new(rows)
                     });

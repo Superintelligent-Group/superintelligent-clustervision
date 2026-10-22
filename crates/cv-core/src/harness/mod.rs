@@ -612,10 +612,13 @@ pub trait Adapter: Send + Sync {
         None
     }
 
-    /// Whether `r` is one session of a store shared by many, certified by [`Self::rows`].
-    /// Default: a SQLite store ([`Self::sqlite_source`]).
-    fn certifies_rows(&self, r: &SessionRef) -> bool {
-        self.sqlite_source(r) == Some(true)
+    /// The store shared by many sessions whose [`Self::rows`] certify `r`: its primary when that
+    /// is shared (a SQLite database, a gemini-cli `logs.json`), or a side file every session of a
+    /// group reads its own slice of (a Kimi Code sub-agent's `state.json`). `None`: `r` is
+    /// certified by its files alone. Default: `r`'s path when it is a SQLite store
+    /// ([`Self::sqlite_source`]).
+    fn rows_store(&self, r: &SessionRef) -> Option<PathBuf> {
+        (self.sqlite_source(r) == Some(true)).then(|| r.path.clone())
     }
 
     /// The key of `r`'s certificate in [`Self::rows`]: its id, unless its read is wholly another
