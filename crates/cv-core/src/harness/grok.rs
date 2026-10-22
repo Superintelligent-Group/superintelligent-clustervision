@@ -201,6 +201,7 @@ impl Adapter for Grok {
                 spans: opts.spans.then_some(read.source()),
                 wire: &wire,
                 pending: None,
+                resolver: crate::Resolver::new(Some(wire.clone())),
             };
             jsonl::drive(&read, from, codec, &mut spawns)
         })
@@ -412,13 +413,14 @@ struct History<'r> {
     spans: Option<&'r JsonSource>,
     wire: &'r Path,
     pending: Option<Message>,
+    resolver: crate::Resolver,
 }
 
 impl jsonl::Codec for History<'_> {
     const VERSION: u32 = 1;
 
     fn record(&mut self, view: JsonView<'_>, _: u64, sink: &mut dyn MessageSink) -> Result<Flow> {
-        let (is_reasoning, message) = record::message(view, self.spans, self.enrich)?;
+        let (is_reasoning, message) = record::message(view, self.spans, self.enrich, &self.resolver)?;
         let Some(mut m) = message else {
             return Ok(Flow::Continue);
         };
@@ -706,7 +708,9 @@ mod tests {
 
     /// The record codec over an owned value, no spans.
     fn chat_message(v: &Value, enrich: &HashMap<String, ToolEnrich>) -> Option<Message> {
-        record::message(v.into(), None, enrich).unwrap().1
+        record::message(v.into(), None, enrich, &crate::Resolver::new(None))
+            .unwrap()
+            .1
     }
 
     /// A whole stream of `r`, messages collected.

@@ -73,6 +73,7 @@ pub(super) fn message(
     view: JsonView<'_>,
     spans: Option<&JsonSource>,
     enrich: &HashMap<String, ToolEnrich>,
+    resolver: &crate::Resolver,
 ) -> Result<(bool, Option<Message>)> {
     let Some(Record { top, kind }) = Record::parse(view)? else {
         return Ok((false, None));
@@ -132,7 +133,7 @@ pub(super) fn message(
     match role {
         // The system prompt (also `system_prompt.txt`, mirrored into `Session::system_prompt`).
         Role::System => m.kind = MessageKind::SystemPrompt,
-        Role::User => (m.kind, m.origin) = user_kind_origin(synthetic.as_deref(), &content)?,
+        Role::User => (m.kind, m.origin) = user_kind_origin(synthetic.as_deref(), &content, resolver)?,
         _ => {}
     }
 
@@ -233,10 +234,15 @@ fn join(view: Option<JsonView<'_>>, spans: Option<&JsonSource>) -> Result<Text> 
 /// `<system-reminder>` skill/rule blocks and background-task notices (flagged by
 /// `synthetic_reason`) and the unflagged `<user_info>` environment block — all InjectedContext /
 /// Harness. A `compaction_meta` turn is the summary that seeds the post-compaction window.
-fn user_kind_origin(synthetic: Option<&str>, content: &Text) -> Result<(MessageKind, Origin)> {
+fn user_kind_origin(
+    synthetic: Option<&str>,
+    content: &Text,
+    resolver: &crate::Resolver,
+) -> Result<(MessageKind, Origin)> {
     let user_info = || -> Result<bool> {
-        let (head, _) = document::text_head(content, &crate::lazy::Resolver::new(None), 11, true)?;
-        Ok(head == "<user_info>")
+        const USER_INFO: &str = "<user_info>";
+        let (head, _) = document::text_head(content, resolver, USER_INFO.chars().count(), true)?;
+        Ok(head == USER_INFO)
     };
     Ok(match synthetic {
         // After a compaction 1.0.5x re-tags the leading `<user_info>` block `compaction_meta` too;
