@@ -372,6 +372,23 @@ fn discovers_documents_in_registered_sources() {
     std::fs::write(dir.join("some-session.json"), by_key.to_string()).unwrap();
     std::fs::write(dir.join("settings.json"), json!({ "theme": "dark" }).to_string()).unwrap();
     std::fs::write(dir.join("notes.txt"), "not json").unwrap();
+    // A plain .json naming its version past 64 KiB (the old head-sniff limit) is still found; a
+    // nested version key, a top-level array and broken JSON are not documents.
+    let mut late = doc.as_object().unwrap().clone();
+    let version = late.remove("open_session").unwrap();
+    late.insert("id".into(), json!("disco-3"));
+    late.insert("padding".into(), json!("x".repeat(100 * 1024)));
+    let late = serde_json::to_string(&late).unwrap();
+    let late = format!("{},\"open_session\":{version}}}", &late[..late.len() - 1]);
+    assert!(late.find("open_session").unwrap() > 64 * 1024);
+    std::fs::write(dir.join("late-key.json"), late).unwrap();
+    std::fs::write(
+        dir.join("nested.json"),
+        json!({"inner": {"open_session": "0.3"}}).to_string(),
+    )
+    .unwrap();
+    std::fs::write(dir.join("array.json"), json!([{"open_session": "0.3"}]).to_string()).unwrap();
+    std::fs::write(dir.join("broken.json"), r#"{"theme": dark, "open_session": "0.3"}"#).unwrap();
 
     let env =
         crate::env::Env::from_vars([("XDG_CONFIG_HOME", dir.join("no-config")), ("CV_EXPORTS", dir.clone())]).enter();
@@ -380,7 +397,11 @@ fn discovers_documents_in_registered_sources() {
 
     let mut ids: Vec<&str> = refs.iter().map(|r| r.id.as_str()).collect();
     ids.sort();
-    assert_eq!(ids, ["disco-1", "disco-2"], "by name and by sniff, and nothing else");
+    assert_eq!(
+        ids,
+        ["disco-1", "disco-2", "disco-3"],
+        "by name and by top-level key, and nothing else"
+    );
     let one = refs.iter().find(|r| r.id == "disco-1").unwrap();
     assert_eq!(one.harness, Harness::OpenSession);
     assert_eq!(one.title.as_deref(), Some("found me"));

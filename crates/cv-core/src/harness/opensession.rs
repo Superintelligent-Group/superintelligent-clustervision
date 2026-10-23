@@ -53,11 +53,6 @@ pub const VERSION: &str = "0.3";
 const VERSION_KEY: &str = "open_session";
 const VERSION_KEY_V02: &str = "openSession";
 
-/// How much of a plain `*.json` file's head is read to decide whether it is an OpenSession
-/// document. cv writes the version marker as the FIRST key, so this is generous; a hand-written
-/// document that buries it past 64 KiB is out of scope (name it `*.opensession.json` instead).
-const SNIFF_BYTES: usize = 64 * 1024;
-
 // Projection vocabularies are pinned against the authoritative deserializer in tests. Nested
 // rich Values preserve their source order; ignored typed fields never need materialization.
 const SESSION_FIELDS: &[&str] = &[
@@ -206,8 +201,8 @@ fn discover_documents(roots: Vec<PathBuf>) -> crate::Discovered {
 
 // ── Discovery ─────────────────────────────────────────────────────────────────
 
-/// Is this file an OpenSession document? By name (`*.opensession.json`), or by a head sniff of a
-/// plain `*.json` for the version key.
+/// Is this file an OpenSession document? By name (`*.opensession.json`), or for a plain `*.json`
+/// by [`names_version_key`].
 fn is_document_file(p: &Path) -> bool {
     let Some(name) = p.file_name().and_then(|n| n.to_str()) else {
         return false;
@@ -218,10 +213,36 @@ fn is_document_file(p: &Path) -> bool {
     if !name.ends_with(".json") {
         return false;
     }
-    matches!(
-        crate::lazy::read_head_checked(p, SNIFF_BYTES),
-        Ok(crate::lazy::PersistedHead::Text(head)) if head.contains(VERSION_KEY) || head.contains(VERSION_KEY_V02)
-    )
+    std::fs::File::open(p).is_ok_and(|file| names_version_key(std::io::BufReader::new(file)))
+}
+
+/// Does this JSON text's top-level object have the version key (or the 0.2 spelling)? A streaming
+/// pass over the top-level keys, each value skipped unread, with no byte cap: it stops at the key
+/// (cv writes it first), and rejects at the first structure an OpenSession document cannot have
+/// (a top level that is not an object, or broken JSON before the key). Nested keys do not count.
+fn names_version_key(reader: impl std::io::Read) -> bool {
+    use serde::de::{Deserializer, Error, IgnoredAny, MapAccess, Visitor};
+    struct TopLevel<'a>(&'a std::cell::Cell<bool>);
+    impl<'de> Visitor<'de> for TopLevel<'_> {
+        type Value = ();
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("an OpenSession document object")
+        }
+        fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<(), A::Error> {
+            while let Some(key) = map.next_key::<std::borrow::Cow<'de, str>>()? {
+                if key == VERSION_KEY || key == VERSION_KEY_V02 {
+                    // Found: stop here rather than read the rest of the document.
+                    self.0.set(true);
+                    return Err(A::Error::custom("version key found"));
+                }
+                map.next_value::<IgnoredAny>()?;
+            }
+            Ok(())
+        }
+    }
+    let found = std::cell::Cell::new(false);
+    let _ = serde_json::Deserializer::from_reader(reader).deserialize_any(TopLevel(&found));
+    found.get()
 }
 
 /// A lightweight [`SessionRef`] for one document: metadata only, counting conversational turns

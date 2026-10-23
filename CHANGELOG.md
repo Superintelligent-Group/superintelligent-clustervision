@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- A plain `.json` OpenSession document is discovered wherever its top-level version key sits, not only within the first 64 KiB.
 - `cv events --json` (`/api/events`, MCP) holds whole commands and error texts, newlines kept; the table marks cuts with `…`, and `--wide` prints them whole.
 - `cv search`, `/api/search`, MCP search and `-q text:` read every session the index has not seen; `--live-bytes` (`live_bytes`) now only bounds it when given.
 - `cv search --scan` (`scan=1`, `cv pack` without an index) matches each session's whole exchange, streamed, instead of its first 256 KiB.
