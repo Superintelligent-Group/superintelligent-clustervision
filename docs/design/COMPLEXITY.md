@@ -77,6 +77,10 @@ Flags, complete by default (the output states a bound the caller set):
 - `show` windows and `--max-bytes`; MCP `show` adds none; `observe_stream` `max_messages`
   (`more_pending`) and `char_cap` (`char_cap`, `truncated` in the output).
 
+- `cv pack --excerpt-bytes` (default 1600; was `MSG_RESOLVE_BYTES`, `EXCERPT_SOFT/HARD_CHARS`)
+  and the curation caps `MAX_COMMANDS`, `COMMAND_CHARS`, `MAX_FILES_PER_SOURCE`, `MAX_ROLLUP`: a
+  bundle bounded by design, whose `Bounds:` header line names each bound and what it cut.
+
 Derived from an outside limit, and said so:
 - Semantic head: the model's input, 512 tokens × the vocabulary's median token length
   (`semantic.rs` `input_chars`); `cv index --semantic` prints it.
@@ -110,7 +114,7 @@ Cost-only (results identical; fallback at file:line):
   only whether a connection is kept. `sqlite/snapshots.rs` `RECORD_LIMIT` refuses a corrupt record.
 
 Open (not yet decided against the rule; each bounds what the user sees):
-- `pack.rs` `MSG_RESOLVE_BYTES`, `EXCERPT_*` (a bundle bounded by design); `cv search --limit` 20.
+- `cv search --limit` 20.
 - `export/native.rs` `CACHE_BYTES` (below, structural).
 
 Removed mode switches:

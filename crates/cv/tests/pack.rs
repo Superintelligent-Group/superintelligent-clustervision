@@ -126,6 +126,26 @@ fn pack_md_no_index_fallback_and_content() {
 }
 
 #[test]
+fn pack_header_states_its_bounds_and_what_they_cut() {
+    let w = World::new("bounds");
+    pack_corpus(&w);
+    let (out, _) = w.cv_ok(&["pack", "wombat caching layer"]);
+    assert!(
+        out.contains("Bounds: each excerpt message to 1600 bytes (`--excerpt-bytes`; 0 cut, marked …)"),
+        "{out}"
+    );
+    let (out, _) = w.cv_ok(&["pack", "wombat caching layer", "--excerpt-bytes", "20"]);
+    assert!(out.contains("to 20 bytes (`--excerpt-bytes`;"), "{out}");
+    assert!(
+        !out.contains("`--excerpt-bytes`; 0 cut"),
+        "a 20-byte budget cuts:\n{out}"
+    );
+    assert!(out.contains("…"), "{out}");
+    let (ok, code, _, err) = w.cv(&["pack", "wombat", "--context-bytes", "100"]);
+    assert!(!ok && code == 2 && err.contains("CV_PACK_LLM"), "{code} {err}");
+}
+
+#[test]
 fn pack_uses_index_when_present_and_respects_limit() {
     let w = World::new("idx");
     pack_corpus(&w);

@@ -22,8 +22,9 @@ cv pack "migrate the daemon" --limit 3                  # draw from at most 3 pa
    no embeddings → full-text only (`cv index --semantic` adds semantic recall).
 2. **Distill.** Each recalled session contributes a *span*, not its whole
    transcript: a ~3-message excerpt window around the best match (streamed
-   under lazy spans — huge sessions are never materialized; code blocks are
-   trimmed but kept intact), plus the event catalog's record of what that
+   under lazy spans — huge sessions are never materialized; each message is
+   shown up to `--excerpt-bytes` (default 1600), a longer one cut there with an
+   open code fence closed and `…` appended), plus the event catalog's record of what that
    session actually **did** — which files it edited, which commands it ran.
    The digest is **extractive by default**: every line comes from a real
    transcript or the catalog, so nothing is hallucinated, and no network is
@@ -39,6 +40,10 @@ cv pack "migrate the daemon" --limit 3                  # draw from at most 3 pa
      turn framing the task with the bundle, an assistant acknowledgment, then
      emitted through the same machinery as [`cv port --harness`](conversion.md) — it
      prints the written path and the harness's resume incantation.
+
+A pack is a bounded bundle by design, and its header says so: a `Bounds:` line
+names each bound (excerpt bytes; 6 distinct commands per source, each to 90
+characters; 8 files per source; 12 rollup files) and how many items each cut.
 
 ## Optional LLM distillation
 
@@ -64,4 +69,5 @@ transcript's bytes and the limit with its source.
 | `--harness <h>` | target harness, for (and only for) `--format session` |
 | `--limit N` | max past sessions to draw from (default 8) |
 | `--out <path>` | write the bundle to a file instead of stdout |
+| `--excerpt-bytes N` | bytes of one message an excerpt shows (default 1600) |
 | `--context-bytes N` | the `CV_PACK_LLM` digest's transcript limit (default: the model's window) |

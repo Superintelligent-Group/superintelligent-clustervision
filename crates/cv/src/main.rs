@@ -918,6 +918,11 @@ enum Cmd {
         /// is at least a byte). The bundle states each digest's input and limit.
         #[arg(long, value_name = "N")]
         context_bytes: Option<usize>,
+        /// Bytes of one message an excerpt shows; a longer one is cut there, an open code fence
+        /// closed, and marked `…`. The bundle's header states this and every other bound, and
+        /// what each cut.
+        #[arg(long, value_name = "N", default_value_t = pack::EXCERPT_BYTES)]
+        excerpt_bytes: usize,
     },
 
     /// Fleet task substrate: dispatch, review, and git-observed landing.
@@ -1402,6 +1407,7 @@ fn run() -> Result<()> {
             thinking,
             json,
             context_bytes,
+            excerpt_bytes,
         } => pack::cmd_pack(pack::PackArgs {
             task: &task,
             format: &format,
@@ -1412,6 +1418,7 @@ fn run() -> Result<()> {
             thinking: util::parse_thinking(&thinking)?,
             json,
             context_bytes,
+            excerpt_bytes,
         }),
         Cmd::Stats { query, json, tokens } => browse::cmd_stats(query, json, tokens),
         Cmd::Prune {
