@@ -312,6 +312,7 @@ fn run_command_cancelled(
 /// ever print clap's usage) and `hook`, which reads Claude Code's hook JSON on stdin that an MCP
 /// call cannot supply (it did nothing; `cv hooks install claude` wires it). A `--follow` flag is
 /// dropped too: a tool call has no Ctrl-C, so following is offered only bounded, through `for`.
+/// So is `--wide`: it shapes the table, and a tool call always reads the whole `--json`.
 fn select_tool_commands(all: Vec<CommandSpec>) -> Vec<CommandSpec> {
     let names: Vec<String> = all.iter().map(|c| c.name.clone()).collect();
     all.into_iter()
@@ -321,7 +322,8 @@ fn select_tool_commands(all: Vec<CommandSpec>) -> Vec<CommandSpec> {
             !(has_children && c.args.iter().all(|a| a.global))
         })
         .map(|mut c| {
-            c.args.retain(|a| !(a.name == "follow" && a.kind == ArgKind::Flag));
+            c.args
+                .retain(|a| !(matches!(a.name.as_str(), "follow" | "wide") && a.kind == ArgKind::Flag));
             c
         })
         .collect()

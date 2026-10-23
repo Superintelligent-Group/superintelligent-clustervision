@@ -91,7 +91,7 @@ impl ToolHistogram {
         tool: Option<&str>,
         extractor: &mut events::EventExtractor,
     ) -> anyhow::Result<()> {
-        extractor.extract(m, idx, cwd, tool, scratch)?;
+        extractor.extract(m, idx, cwd, tool, None, scratch)?;
         for event in scratch.iter() {
             self.note(event);
         }

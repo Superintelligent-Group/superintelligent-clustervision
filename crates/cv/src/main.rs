@@ -299,9 +299,14 @@ enum Cmd {
         /// is visible, not just the orchestrator's own tool calls.
         #[arg(long)]
         subagents: bool,
-        /// Emit the events as one JSON array (snake_case keys) instead of the table.
+        /// Emit the events as one JSON array (snake_case keys) instead of the table. Every
+        /// target and detail is whole: the full command, the full error text.
         #[arg(long)]
         json: bool,
+        /// Print each table cell whole (newlines as spaces). Without it the target column is
+        /// shortened to 90 characters and the detail line to 100, a cut marked with `…`.
+        #[arg(long, conflicts_with = "json")]
+        wide: bool,
     },
     /// Sessions that touched a file — every session with a file_edit/file_read event on its path.
     ///
@@ -1367,7 +1372,8 @@ fn run() -> Result<()> {
             kind,
             subagents,
             json,
-        } => events::cmd_events(&id, harness, kind, subagents, json),
+            wide,
+        } => events::cmd_events(&id, harness, kind, subagents, json, wide),
         Cmd::Touched {
             path,
             edits_only,

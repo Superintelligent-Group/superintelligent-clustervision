@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- `cv events --json` (`/api/events`, MCP) holds whole commands and error texts, newlines kept; the table marks cuts with `…`, and `--wide` prints them whole.
 - `cv search`, `/api/search`, MCP search and `-q text:` read every session the index has not seen; `--live-bytes` (`live_bytes`) now only bounds it when given.
 - `cv search --scan` (`scan=1`, `cv pack` without an index) matches each session's whole exchange, streamed, instead of its first 256 KiB.
 - `cv index --semantic` reads each session as far as the model embeds (512 tokens × median token length) and prints it; the 64 KiB head is gone.

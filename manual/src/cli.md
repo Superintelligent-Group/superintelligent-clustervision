@@ -55,7 +55,8 @@ An **ambiguous** prefix lists the candidates (`harness:full-id`) and exits `2`.
 | `--harness <h>` | filter to, or target, one harness — never spelled `--to` |
 | `--cwd <dir>` | a working directory: a filter when reading, the new home when reshaping |
 | `--out <dir\|file>` | write somewhere other than the real store |
-| `--json` | machine output |
+| `--json` | machine output, never shortened |
+| `--wide` | print table cells whole instead of ending a cut one in `…` |
 | `--frozen` | leave cv stores untouched (also `CV_FROZEN=1`); stream stale events, retain unknown counts, reject store/session writers |
 | `--limit <n>` | how many rows/records |
 | `--all` | include what is hidden by default |
@@ -317,11 +318,14 @@ What a session did: files edited or read, commands, tool errors.
 cv events da9174f4                  # everything, in message order
 cv events da9174f4 --kind error     # file_edit | file_read | command | tool | error
 cv events da9174f4 --subagents      # the whole forest, attributed per agent
+cv events da9174f4 --wide            # every target and detail whole in the table
 cv events da9174f4 --json
 ```
 
 [`cv index`](#cv-index) ingests events into `catalog.db`; a stale session is ingested on read
-(streamed, not stored, under `--frozen`). Repeats within a message are kept. `events`, `touched`
+(streamed, not stored, under `--frozen`). Repeats within a message are kept. A `command` target
+is the whole command and an `error` detail the whole error text; the table shortens them to 90
+and 100 characters with `…` unless `--wide`, `--json` never does. `events`, `touched`
 and `blame` fail on a catalog error rather than answer empty.
 
 ### `cv touched`

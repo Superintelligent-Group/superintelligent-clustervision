@@ -953,11 +953,12 @@ fn query_facts_match_collected_corpus() {
                         format!("model:{quoted} AND NOT model:absent-query-model"),
                     ]);
                 }
+                let resolver = full.resolver();
                 let events: Vec<_> = full
                     .messages
                     .iter()
                     .enumerate()
-                    .map(|(i, m)| cv_core::events::extract(m, i, full.cwd.as_deref()))
+                    .map(|(i, m)| cv_core::events::extract(m, i, full.cwd.as_deref(), &resolver))
                     .collect::<anyhow::Result<Vec<_>>>()
                     .unwrap()
                     .into_iter()

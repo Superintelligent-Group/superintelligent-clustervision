@@ -129,6 +129,12 @@ impl SpoolingSink {
         EventSink::resume(cp).map(Self::with_inner)
     }
 
+    /// [`EventSink::with_source`].
+    pub fn with_source(mut self, source: PathBuf) -> Self {
+        self.inner = self.inner.with_source(source);
+        self
+    }
+
     fn with_inner(inner: EventSink) -> Self {
         Self {
             inner,

@@ -1387,7 +1387,8 @@ fn job_pass(
     let mut events = match from {
         None => cv_core::events::SpoolingSink::new(job.r.cwd.clone()),
         Some(cp) => cv_core::events::SpoolingSink::resume(cp).context("checkpoint without events")?,
-    };
+    }
+    .with_source(job.r.path.clone());
     if !job.events {
         events = events.without_events();
     }
@@ -2474,7 +2475,7 @@ pub(crate) fn index_refs(dir: &Path, refs: &[cv_core::SessionRef], catalog: bool
         };
         let source = probe.snapshot(r);
         let (mtime, size) = sig(source.primary);
-        let mut es = catalog.then(|| cv_core::events::SpoolingSink::new(r.cwd.clone()));
+        let mut es = catalog.then(|| cv_core::events::SpoolingSink::new(r.cwd.clone()).with_source(r.path.clone()));
         let (_, reads) = index_session_clean(
             &mut writer,
             &f,

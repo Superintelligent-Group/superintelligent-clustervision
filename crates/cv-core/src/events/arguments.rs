@@ -228,11 +228,11 @@ impl Trigger {
     }
 }
 
-pub(super) fn command_rows(view: JsonView<'_>, cap: usize) -> Result<Option<(String, Vec<String>)>> {
-    let mut prefix = crate::projection::Head::bounded(cap);
+pub(super) fn command_rows(view: JsonView<'_>) -> Result<Option<(String, Vec<String>)>> {
+    let mut command = String::new();
     let mut trigger = Trigger::default();
     let exists = command_chunks(view, |chunk| {
-        prefix.push(chunk);
+        command.push_str(chunk);
         trigger.push(chunk);
         Ok(())
     })?;
@@ -258,7 +258,7 @@ pub(super) fn command_rows(view: JsonView<'_>, cap: usize) -> Result<Option<(Str
     } else {
         Vec::new()
     };
-    Ok(Some((prefix.finish(), files)))
+    Ok(Some((command, files)))
 }
 
 pub(super) fn patch_rows(view: JsonView<'_>) -> Result<Vec<String>> {

@@ -497,7 +497,7 @@ fn best_window_and_ingest(
         return best_window(adapter, r, task);
     }
     let source = cv_core::source::Probe::default().snapshot(r);
-    let mut events = cv_core::events::SpoolingSink::new(r.cwd.clone());
+    let mut events = cv_core::events::SpoolingSink::new(r.cwd.clone()).with_source(r.path.clone());
     let result = best_window_observing(adapter, r, task, Some(&mut events))?;
     let source = source.with_reads(events.inner().dependencies());
     // The ingest rides the read the pack needed anyway; failing it costs only a later re-ingest.
@@ -1048,7 +1048,7 @@ mod tests {
         let expected = best_window(&adapter, &r, "chosen")?;
         // The old independent ingestion traversal, through the same real adapter.
         let source = cv_core::source::Probe::default().snapshot(&r);
-        let mut events = cv_core::events::SpoolingSink::new(r.cwd.clone());
+        let mut events = cv_core::events::SpoolingSink::new(r.cwd.clone()).with_source(r.path.clone());
         adapter.try_stream(&r, &Demand::LEAN.with_spans(), &mut events)?;
         let source = source.with_reads(events.inner().dependencies());
         cv_core::events::record_spooled_with_source(&r, 0, events.into_spool()?, &source, &Default::default())?;

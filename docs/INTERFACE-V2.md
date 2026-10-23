@@ -123,7 +123,8 @@ GONE: it errors with a pointer at its replacement and exits 2. The old → new t
 and `splice <id>:A..B` use the same `A..B` grammar.
 
 **Everywhere else:** `--harness <h>` (filter or target, never "--to"), `--cwd <dir>`, `--out <dir>`
-(write somewhere other than the real store), `--json` (machine output where supported), `--limit N`, `--fresh` (bypass the catalog), `--all` (include what is
+(write somewhere other than the real store), `--json` (machine output where supported; never shortened), `--wide` (a table prints each cell
+whole instead of ending a cut one in `…`), `--limit N`, `--fresh` (bypass the catalog), `--all` (include what is
 hidden by default: finished lanes, archived sessions, terminal tasks).
 
 **Restored skills:** `prune`, `rewind`, and Claude-target `port` accept `--skills keep|drop|drop-stale`,

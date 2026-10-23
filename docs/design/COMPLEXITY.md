@@ -107,8 +107,6 @@ Cost-only (results identical; fallback at file:line):
   only whether a connection is kept. `sqlite/snapshots.rs` `RECORD_LIMIT` refuses a corrupt record.
 
 Open (not yet decided against the rule; each bounds what the user sees):
-- `events.rs` `TARGET_MAX` 300 / `DETAIL_MAX` 200: event rows cut command targets and details
-  (marked `…`; `cv cat` has the whole call).
 - `opensession.rs` `SNIFF_BYTES` 64 KiB: a plain `*.json` naming its version past that is not
   discovered (`*.opensession.json` always is).
 - `llm.rs` `TRANSCRIPT_BUDGET` 60K chars (distill's model input, head + tail with a marker);
@@ -132,6 +130,8 @@ Removed mode switches:
 - The shared inventory budget.
 
 Removed result limits (0.18, ember's rule):
+- `events.rs` `TARGET_MAX` 300 / `DETAIL_MAX` 200: an event holds the whole command and error
+  text (a lazy one read from source); only the table shortens a cell, with `…`, unless `--wide`.
 - Search: the 256 MiB default `LIVE_BYTES` (the live index is now on disk, its heap one arena),
   `LIVE_HAY_BYTES` 256 KiB per `--scan`ned session, `PERSISTED_INDEX_CAP` 1 MiB per indexed
   persisted output, `SNIPPET_SCAN_CAP` 256 KiB: all now stream through bounded windows.
