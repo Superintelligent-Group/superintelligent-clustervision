@@ -348,7 +348,7 @@ dependencies = [
 
 [[package]]
 name = "clustervision-app"
-version = "0.18.0-rc.2"
+version = "0.18.0-rc.3"
 dependencies = [
  "clustervision-core",
  "serde_json",
@@ -362,7 +362,7 @@ dependencies = [
 
 [[package]]
 name = "clustervision-core"
-version = "0.18.0-rc.2"
+version = "0.18.0-rc.3"
 dependencies = [
  "anyhow",
  "chrono",

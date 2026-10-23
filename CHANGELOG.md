@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.18.0 — unreleased — the release an agent can trust
+## 0.18.0-rc.3 — 2026-10-23 — the release an agent can trust
 
 **Breaking: commands, MCP, HTTP and JSON.** A removed name exits 2 with a pointer to its replacement.
 - Cursor counts only bubbles a read keeps (capability markers dropped); a composer with external bubble cells counts at `cv index`.
