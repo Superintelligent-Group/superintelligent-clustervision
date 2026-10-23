@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.18.0-rc.5 — 2026-10-23 — the release an agent can trust
+## 0.18.0 — 2026-10-23 — the release an agent can trust
 
 **Breaking: commands, MCP, HTTP and JSON.** A removed name exits 2 with a pointer to its replacement.
 **Breaking: commands, MCP, HTTP and JSON.**
