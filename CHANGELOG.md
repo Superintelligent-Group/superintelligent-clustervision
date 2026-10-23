@@ -171,6 +171,7 @@
 - `cv serve` closes a connection whose body exceeds its Content-Length.
 
 **Tooling and CI.**
+- The viewing-and-sharing manual links Compare branches to the renamed Splice composer section.
 - `cv schema --json` lists `routes` (every `cv serve` method and path) and the `subagent_row` and `task_row` keys.
 - `cv index --json` reports `changed`, `removed` and `errors` beside `indexed`.
 - Release gates: 0.17.0 compatibility, 0.16.1 upgrade over every corpus, real Codex 0.162.1 hooks, and macOS nightly and on rc tags.
