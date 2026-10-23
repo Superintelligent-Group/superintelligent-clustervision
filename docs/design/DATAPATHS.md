@@ -139,7 +139,7 @@ parser's own turn rule ([`Message::is_turn`]: a typed prompt or a reply), read f
 a user record carrying only tool results, injected context or a sub-agent's return is no turn. An
 adapter for which counting means decoding message bodies, opening a second store or reading files
 the listing does not need (Codex, Grok, Kimi, Kimi Code, Qwen, Zed, Hermes, Goose, Continue,
-OpenCode, whose turn kinds rest on parts) reports `None`, "not counted", until a full read or `cv
+OpenCode, whose turn kinds rest on parts, a Cursor composer with external bubble cells) reports `None`, "not counted", until a full read or `cv
 index` certifies the number; a complete (round-trip) read, which carries rewound and superseded
 rows, never certifies. The catalog keeps a certified count across metadata refreshes that leave
 the source unchanged and drops it when the source changes. `--json` emits `null`, the table a

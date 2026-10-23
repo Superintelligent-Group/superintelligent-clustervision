@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+**Listing and counts.**
+- Cursor counts only bubbles a read keeps (capability markers dropped); a composer with external bubble cells counts at `cv index`.
+
+**After upgrading, once.**
+- `source::VERSION` is 8: listings rediscover once, so rc.2's cached Cursor counts are recounted.
+
 ## 0.18.0-rc.2 — 2026-10-23 — one write costs one session
 
 **Breaking: commands, MCP, HTTP and JSON.**

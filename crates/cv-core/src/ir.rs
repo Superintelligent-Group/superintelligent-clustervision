@@ -1155,8 +1155,9 @@ pub struct SessionRef {
     /// messages, not from a proxy like file count.
     ///
     /// `None` means **not counted yet**: a listing that read only the session's metadata (Zed,
-    /// Hermes, Goose, Kimi, Kimi Code, Codex, Grok and OpenCode defer counting, because for them
-    /// counting means decoding every message, or an OpenCode message's parts) until a full read
+    /// Hermes, Goose, Kimi, Kimi Code, Codex, Grok, OpenCode and a Cursor composer whose bubbles
+    /// live in their own cells defer counting, because for them counting means decoding every
+    /// message, or an OpenCode message's parts) until a full read
     /// or `cv index` certifies the number; a [`crate::stream::Demand::COMPLETE`] read, which also
     /// carries rewound and superseded rows, never does. An adapter whose discovery reads every
     /// turn record anyway (Claude, Cursor, Cline, Continue, Devin, Gemini, Qwen, LM Studio,

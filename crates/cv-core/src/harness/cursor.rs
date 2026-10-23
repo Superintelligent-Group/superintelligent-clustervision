@@ -446,18 +446,27 @@ fn discover_global(conn: &Connection, db: &Path, cwd_map: &HashMap<String, PathB
                 Ok(None) => return Ok(ComposerListing(None)),
                 Err(_) => return Err(()),
             };
+            // The count is the turns a read makes: the bubble codec itself decides, so a bubble it
+            // drops (a capability marker with no text, tool call or thinking) is no turn. Bubbles
+            // kept in their own cells are not opened here: that composer's count waits for a full
+            // read or `cv index`.
             let header = cells.read(cell, |root| {
                 let composer = record::composer(root)?;
-                let mut count = 0;
-                for row in composer.rows.into_iter().flatten() {
-                    row?;
-                    count += 1;
+                let (mut rows, mut turns) = (0, 0);
+                for (ordinal, row) in composer.rows.into_iter().flatten().enumerate() {
+                    let row = row?;
+                    rows += 1;
+                    if !composer.external && record::bubble(row, &cells, true, ordinal)?.is_some() {
+                        turns += 1;
+                    }
                 }
-                Ok((composer.metadata, count))
+                Ok((composer.metadata, rows, (!composer.external).then_some(turns)))
             });
-            let Ok(Some((d, count))) = header else { return Err(()) };
+            let Ok(Some((d, rows, count))) = header else {
+                return Err(());
+            };
             // Skip threads that have no messages at all (Cursor leaves empty composer shells around).
-            if count == 0 {
+            if rows == 0 {
                 return Ok(ComposerListing(None));
             }
             let shell = SessionRef::new(composer_id, Harness::Cursor, db);
@@ -479,7 +488,7 @@ fn discover_global(conn: &Connection, db: &Path, cwd_map: &HashMap<String, PathB
             title: listed.title,
             created_at: listed.created_at,
             updated_at: listed.updated_at,
-            message_count: Some(listed.count),
+            message_count: listed.count,
             ..SessionRef::new(composer_id.to_string(), Harness::Cursor, db.to_path_buf())
         });
     }
@@ -495,7 +504,8 @@ struct Composed {
     title: Option<String>,
     created_at: Option<chrono::DateTime<chrono::Utc>>,
     updated_at: Option<chrono::DateTime<chrono::Utc>>,
-    count: usize,
+    /// `None` for a composer whose bubbles live in their own cells.
+    count: Option<usize>,
 }
 
 impl super::store::sqlite::listing::Listing for ComposerListing {
@@ -962,7 +972,10 @@ mod tests {
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].id, "comp-1");
         assert_eq!(out[0].title.as_deref(), Some("My Chat"));
-        assert_eq!(out[0].message_count, Some(2));
+        assert_eq!(
+            out[0].message_count, None,
+            "bubbles in their own cells are counted by a full read"
+        );
         assert!(out[0].created_at.is_some());
 
         let s = parse_global(&conn, &conn.sref(cid)).unwrap();
@@ -1178,6 +1191,31 @@ mod tests {
         assert_eq!(s.messages.len(), 2);
         assert_eq!(s.messages[0].text().as_deref(), Some("hi"));
         assert_eq!(s.messages[1].text().as_deref(), Some("hello"));
+    }
+
+    /// The inline shape on ember's store (a 50-bubble composer read as 26 turns): between replies
+    /// Cursor keeps capability bubbles (`capabilityType` 15, sometimes `codeBlocks` and a
+    /// checkpoint) with no text, tool call or thinking. The codec drops them; so does the count.
+    #[test]
+    fn inline_capability_bubbles_are_not_counted() {
+        let conn = mk_global();
+        let cid = "comp-capability";
+        put(
+            &conn,
+            &format!("composerData:{cid}"),
+            r#"{"composerId":"comp-capability","_v":1,"conversation":[
+                {"bubbleId":"u","type":1,"text":"fix it"},
+                {"bubbleId":"r1","type":2,"text":"looking","serverBubbleId":"s1"},
+                {"bubbleId":"c1","type":2,"capabilityType":15,"capabilitiesRan":{},"capabilityStatuses":{}},
+                {"bubbleId":"r2","type":2,"text":"edited"},
+                {"bubbleId":"c2","type":2,"capabilityType":15,"codeBlocks":[{"uri":"a.rs"}],"checkpoint":{}},
+                {"bubbleId":"r3","type":2,"text":"done"}]}"#,
+        );
+        let mut out = Vec::new();
+        discover_global(&conn, &conn.path, &HashMap::new(), &mut out);
+        let s = parse_global(&conn, &conn.sref(cid)).unwrap();
+        assert_eq!(s.messages.iter().filter(|m| m.is_turn()).count(), 4);
+        assert_eq!(out[0].message_count, Some(4));
     }
 
     #[test]
