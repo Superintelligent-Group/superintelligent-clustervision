@@ -48,6 +48,8 @@ pub(crate) struct PackArgs<'a> {
     pub force: bool,
     pub thinking: cv_core::emit::ThinkingMode,
     pub json: bool,
+    /// `--context-bytes`: the `CV_PACK_LLM` digest's transcript limit (default: the model's window).
+    pub context_bytes: Option<usize>,
 }
 
 pub(crate) fn cmd_pack(args: PackArgs<'_>) -> Result<()> {
@@ -60,6 +62,7 @@ pub(crate) fn cmd_pack(args: PackArgs<'_>) -> Result<()> {
         force,
         thinking,
         json,
+        context_bytes,
     } = args;
     if let (Some(path), "md" | "prompt") = (&out, format) {
         crate::util::user_file_claim(path, force)?;
@@ -89,6 +92,9 @@ pub(crate) fn cmd_pack(args: PackArgs<'_>) -> Result<()> {
     // Optional abstractive pass. The clap surface for pack is frozen, so the switch is an env var:
     // CV_PACK_LLM=1 (provider default model) or CV_PACK_LLM=<model-id>.
     let llm_model = llm_from_env();
+    if llm_model.is_none() && context_bytes.is_some() {
+        return crate::util::usage("--context-bytes bounds the CV_PACK_LLM digest; set CV_PACK_LLM to use it");
+    }
     if llm_model.is_some() {
         match crate::llm::available_provider() {
             Some(p) => eprintln!("✦ CV_PACK_LLM set — distilling each span via {p}…"),
@@ -103,7 +109,12 @@ pub(crate) fn cmd_pack(args: PackArgs<'_>) -> Result<()> {
     // 2. DISTILL — one structured digest per recalled span.
     let mut sources: Vec<PackSource> = Vec::with_capacity(hits.len());
     for hit in hits {
-        match build_source(&hit, task, llm_model.as_ref().map(|model| model.as_deref())) {
+        match build_source(
+            &hit,
+            task,
+            llm_model.as_ref().map(|model| model.as_deref()),
+            context_bytes,
+        ) {
             Ok(s) => sources.push(s),
             Err(e) => eprintln!("cv pack: skipping {} ({}): {e:#}", short_id(&hit.id), hit.harness),
         }
@@ -392,10 +403,15 @@ struct PackSource {
     /// Distinct commands run, in first-seen order (capped).
     commands: Vec<String>,
     /// Abstractive digest when `CV_PACK_LLM` routed this span through `llm::digest`.
-    llm_digest: Option<String>,
+    llm_digest: Option<crate::llm::Digest>,
 }
 
-fn build_source(hit: &cv_search::Hit, task: &str, llm_model: Option<Option<&str>>) -> Result<PackSource> {
+fn build_source(
+    hit: &cv_search::Hit,
+    task: &str,
+    llm_model: Option<Option<&str>>,
+    context_bytes: Option<usize>,
+) -> Result<PackSource> {
     let want = Harness::parse(&hit.harness);
     let (r, adapter) =
         cv_core::find(&hit.id, want)?.with_context(|| format!("session {} no longer on disk", short_id(&hit.id)))?;
@@ -422,9 +438,14 @@ fn build_source(hit: &cv_search::Hit, task: &str, llm_model: Option<Option<&str>
         let opts = crate::llm::DigestOptions {
             model: model.map(str::to_owned),
             project: false,
+            context_bytes,
         };
         match crate::llm::digest(&mini, &opts) {
-            Ok(d) => Some(d.trim().to_string()),
+            Ok(mut d) => {
+                eprintln!("cv pack: digest of {}: {}", short_id(&hit.id), digest_input(&d));
+                d.text = d.text.trim().to_string();
+                Some(d)
+            }
             Err(e) => {
                 eprintln!(
                     "cv pack: LLM digest failed for {} ({e:#}); keeping the extractive digest",
@@ -731,6 +752,14 @@ fn files_line(s: &PackSource) -> Option<String> {
     (!parts.is_empty()).then(|| parts.join(", "))
 }
 
+/// What a digest was made from: `sent of whole transcript bytes; limit N bytes, from <source>`.
+fn digest_input(d: &crate::llm::Digest) -> String {
+    format!(
+        "{} of {} transcript bytes sent; limit {}",
+        d.sent, d.transcript, d.limit
+    )
+}
+
 /// The `md` format: a CLAUDE.md-style bundle you can paste into project memory.
 fn md_bundle(task: &str, sources: &[PackSource], rollup: &[(String, usize, i64, i64)]) -> String {
     let mut out = String::new();
@@ -753,7 +782,8 @@ fn md_bundle(task: &str, sources: &[PackSource], rollup: &[(String, usize, i64, 
             hit_cwd(&s.hit)
         );
         if let Some(d) = &s.llm_digest {
-            let _ = writeln!(out, "{d}\n");
+            let _ = writeln!(out, "{}\n", d.text);
+            let _ = writeln!(out, "_Digest input: {}._\n", digest_input(d));
         }
         if !s.excerpt.is_empty() {
             let _ = writeln!(out, "Key excerpt:\n");
@@ -813,7 +843,7 @@ fn prompt_bundle(task: &str, sources: &[PackSource], rollup: &[(String, usize, i
             hit_cwd(&s.hit)
         );
         if let Some(d) = &s.llm_digest {
-            for line in d.lines() {
+            for line in d.text.lines() {
                 let _ = writeln!(out, "   {line}");
             }
         }

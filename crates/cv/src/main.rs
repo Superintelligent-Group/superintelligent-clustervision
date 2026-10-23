@@ -913,6 +913,11 @@ enum Cmd {
         /// Return the bundle or written artifact as a JSON result.
         #[arg(long)]
         json: bool,
+        /// Bytes of each span's transcript the `CV_PACK_LLM` digest may send. Default: the model's
+        /// context window as its provider reports it, less the digest's output and prompt (a token
+        /// is at least a byte). The bundle states each digest's input and limit.
+        #[arg(long, value_name = "N")]
+        context_bytes: Option<usize>,
     },
 
     /// Fleet task substrate: dispatch, review, and git-observed landing.
@@ -1396,7 +1401,18 @@ fn run() -> Result<()> {
             force,
             thinking,
             json,
-        } => pack::cmd_pack(pack::PackArgs { task: &task, format: &format, harness, limit, out, force, thinking: util::parse_thinking(&thinking)?, json }),
+            context_bytes,
+        } => pack::cmd_pack(pack::PackArgs {
+            task: &task,
+            format: &format,
+            harness,
+            limit,
+            out,
+            force,
+            thinking: util::parse_thinking(&thinking)?,
+            json,
+            context_bytes,
+        }),
         Cmd::Stats { query, json, tokens } => browse::cmd_stats(query, json, tokens),
         Cmd::Prune {
             id,

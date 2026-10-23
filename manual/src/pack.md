@@ -48,6 +48,14 @@ recalled span through the configured LLM provider (`OPENROUTER_API_KEY`,
 the LLM digest folded into `pack` in 0.11.0) for an abstractive per-span digest on top of
 the extractive one. Unset, `cv pack` is fully offline.
 
+Each digest sends the span's rendered transcript whole when it fits the model, else its head
+and tail around a `[… transcript truncated …]` marker. The limit is the model's context window
+as its provider reports it (Anthropic `max_input_tokens`, OpenRouter `context_length`, LM Studio
+`max_context_length`) less the digest's 4,096 output tokens and the prompt, counted in bytes (a
+token is at least a byte, so it always fits); `--context-bytes N` sets it instead, and a server
+that reports no window needs it. The bundle prints, under each digest, the bytes sent of the
+transcript's bytes and the limit with its source.
+
 ## Flags
 
 | flag | meaning |
@@ -56,3 +64,4 @@ the extractive one. Unset, `cv pack` is fully offline.
 | `--harness <h>` | target harness, for (and only for) `--format session` |
 | `--limit N` | max past sessions to draw from (default 8) |
 | `--out <path>` | write the bundle to a file instead of stdout |
+| `--context-bytes N` | the `CV_PACK_LLM` digest's transcript limit (default: the model's window) |

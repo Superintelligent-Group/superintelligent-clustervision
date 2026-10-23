@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- `CV_PACK_LLM` digests send up to the model's provider-reported context window (was 60K chars), or `--context-bytes N`; the bundle states bytes sent and the limit.
 - A plain `.json` OpenSession document is discovered wherever its top-level version key sits, not only within the first 64 KiB.
 - `cv events --json` (`/api/events`, MCP) holds whole commands and error texts, newlines kept; the table marks cuts with `…`, and `--wide` prints them whole.
 - `cv search`, `/api/search`, MCP search and `-q text:` read every session the index has not seen; `--live-bytes` (`live_bytes`) now only bounds it when given.

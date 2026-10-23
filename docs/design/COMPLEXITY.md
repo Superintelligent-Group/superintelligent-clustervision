@@ -80,6 +80,9 @@ Flags, complete by default (the output states a bound the caller set):
 Derived from an outside limit, and said so:
 - Semantic head: the model's input, 512 tokens × the vocabulary's median token length
   (`semantic.rs` `input_chars`); `cv index --semantic` prints it.
+- Pack's `CV_PACK_LLM` digest (`llm.rs` `TranscriptLimit`): the model's context window as the
+  provider reports it, less `DIGEST_MAX_TOKENS` and the prompt, in bytes (a token is at least a
+  byte); `--context-bytes` overrides. The bundle prints bytes sent of the transcript and the limit.
 - Hooks: `hooks.rs` `HOOK_READ_BYTES` 8 MiB, from the 100 ms hook latency and ~4.5 ms/MB. The
   compact hook's text names the tail it read; a start-pack row names its commit search span.
 
@@ -107,8 +110,7 @@ Cost-only (results identical; fallback at file:line):
   only whether a connection is kept. `sqlite/snapshots.rs` `RECORD_LIMIT` refuses a corrupt record.
 
 Open (not yet decided against the rule; each bounds what the user sees):
-- `llm.rs` `TRANSCRIPT_BUDGET` 60K chars (distill's model input, head + tail with a marker);
-  `pack.rs` `MSG_RESOLVE_BYTES`, `EXCERPT_*` (a bundle bounded by design); `cv search --limit` 20.
+- `pack.rs` `MSG_RESOLVE_BYTES`, `EXCERPT_*` (a bundle bounded by design); `cv search --limit` 20.
 - `export/native.rs` `CACHE_BYTES` (below, structural).
 
 Removed mode switches:
