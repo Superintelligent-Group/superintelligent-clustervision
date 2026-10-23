@@ -24,30 +24,29 @@ pub(crate) fn build(query: Option<String>) -> Result<Option<SessionQuery>> {
 }
 
 /// Resolve every matching ID per distinct `text:` needle: the index plus the live read of what it
-/// has not seen ([`cv_search::LIVE_BYTES`], none under `--frozen`), as `cv search` answers. A
-/// session left unread keeps what the index last saw of it (a note on stderr says how many).
-/// Without an index the live read must cover every session, or there is no answer: a usage
-/// error (exit 2) pointing at `cv index`, never a partial membership (which `NOT text:` would
-/// turn into "everything unread").
+/// has not seen (all of it, none under `--frozen`), as `cv search` answers. A session left
+/// unread (unreadable, or `--frozen`) keeps what the index last saw of it (a note on stderr says
+/// how many). Without an index the live read must cover every session, or there is no answer: a
+/// usage error (exit 2) pointing at `cv index`, never a partial membership (which `NOT text:`
+/// would turn into "everything unread").
 pub(crate) fn text_sets(query: &SessionQuery) -> Result<TextSets> {
-    text_sets_within(query, cv_search::LIVE_BYTES)
+    text_sets_within(query, cv_search::LiveRead::of(None))
 }
 
-fn text_sets_within(query: &SessionQuery, live_bytes: u64) -> Result<TextSets> {
+fn text_sets_within(query: &SessionQuery, live: cv_search::LiveRead) -> Result<TextSets> {
     let needles = query.needles(FieldId::Text);
     if needles.is_empty() {
         return Ok(TextSets::empty());
     }
-    let budget = (!cv_core::env::frozen()).then_some(live_bytes);
-    if budget.is_none() && !cv_search::default_tantivy_dir().exists() {
+    if live == cv_search::LiveRead::Frozen && !cv_search::default_tantivy_dir().exists() {
         return usage("`text:` needs a full-text index; build it with `cv index`");
     }
     let borrowed: Vec<_> = needles.iter().map(String::as_str).collect();
-    let (matches, suffix) = cv_search::text_search_ids_suffixed(None, &borrowed, budget, &cv_core::sessions())
+    let (matches, suffix) = cv_search::text_search_ids_suffixed(None, &borrowed, live, &cv_core::sessions())
         .context("opening full-text query index")?;
     if suffix.no_index && suffix.unread() > 0 {
         return usage(format!(
-            "`text:` needs a full-text index: {} of {} session(s) do not fit the live read; build it with `cv index`",
+            "`text:` needs a full-text index: {} of {} session(s) were not read live; build it with `cv index`",
             suffix.unread(),
             suffix.stale
         ));
@@ -83,7 +82,7 @@ mod tests {
         let sets = text_sets(&query).unwrap();
         assert!(sets.contains("needle", "lone"), "{}", path.display());
         // A live read that cannot cover them all has no answer.
-        let absent = text_sets_within(&query, 0).unwrap_err();
+        let absent = text_sets_within(&query, cv_search::LiveRead::Within(0)).unwrap_err();
         assert!(absent.downcast_ref::<crate::util::UsageError>().is_some(), "{absent:#}");
         assert!(format!("{absent:#}").contains("cv index"), "{absent:#}");
         std::fs::create_dir_all(cv_search::default_tantivy_dir()).unwrap();

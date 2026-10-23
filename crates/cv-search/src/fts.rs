@@ -44,7 +44,7 @@ mod observe;
 use observe::{body_hash, SweepWork};
 mod live;
 mod sweep;
-pub use live::{Suffix, LIVE_BYTES};
+pub use live::{LiveRead, Suffix};
 use sweep::*;
 
 use crate::ingest::{Admission, AdmittedDocument, Writer};
@@ -2563,16 +2563,16 @@ pub fn text_search_ids_batch(dir: &Path, queries: &[&str]) -> Result<Vec<Result<
 }
 
 /// [`text_search_ids_batch`] over the index plus the live suffix of `refs` it has not seen,
-/// within `budget` source bytes (`None`: the index alone). Membership is exact for every session
+/// as `live` allows (all of it by default). Membership is exact for every session
 /// the index describes as it is now or the suffix read; the returned [`Suffix`] names the rest.
 /// No index at `dir` is an empty index.
 pub fn text_search_ids_suffixed(
     dir: &Path,
     queries: &[&str],
-    budget: Option<u64>,
+    live: LiveRead,
     refs: &[cv_core::SessionRef],
 ) -> Result<(Vec<Result<HashSet<String>>>, Suffix)> {
-    let indexed = if dir.join("meta.json").exists() || budget.is_none() {
+    let indexed = if dir.join("meta.json").exists() || live == LiveRead::Frozen {
         Some(query_index(dir)?)
     } else {
         None
@@ -2581,7 +2581,7 @@ pub fn text_search_ids_suffixed(
         dir,
         indexed.as_ref().map(|(index, f, _)| live::Indexed { index, f }),
         refs,
-        budget,
+        live,
     )?;
     let empty = HashMap::new();
     let shadows = live.as_ref().map_or(&empty, |l| &l.shadows);
@@ -2747,18 +2747,18 @@ pub(crate) fn search_with_snippets(
     Ok((hits, note))
 }
 
-/// Search the index plus the live suffix of `refs` it has not seen ([`live`]), within `budget`
-/// source bytes (`None`: the index alone, the suffix only counted). No index at `dir` is an
+/// Search the index plus the live suffix of `refs` it has not seen ([`live`]), as `live` allows
+/// ([`LiveRead::Frozen`]: the index alone, the suffix only counted). No index at `dir` is an
 /// empty index: every session is unindexed. An index that is there but unusable is an error.
 pub(crate) fn search_suffixed(
     dir: &Path,
     query: &str,
     limit: usize,
     filter: crate::SearchFilter<'_>,
-    budget: Option<u64>,
+    live: LiveRead,
     refs: &[cv_core::SessionRef],
 ) -> Result<(Vec<Hit>, Option<String>, Suffix)> {
-    let indexed = if dir.join("meta.json").exists() || budget.is_none() {
+    let indexed = if dir.join("meta.json").exists() || live == LiveRead::Frozen {
         Some(query_index(dir)?)
     } else {
         None
@@ -2767,7 +2767,7 @@ pub(crate) fn search_suffixed(
         dir,
         indexed.as_ref().map(|(index, f, _)| live::Indexed { index, f }),
         refs,
-        budget,
+        live,
     )?;
     let empty = HashMap::new();
     let shadows = live.as_ref().map_or(&empty, |l| &l.shadows);
@@ -3206,7 +3206,7 @@ mod tests {
                 },
                 2,
                 crate::Source::Index,
-                crate::LIVE_BYTES,
+                None,
             )
             .unwrap();
         assert_eq!(found.hits.iter().map(|h| h.id.as_str()).collect::<Vec<_>>(), ["b", "c"]);
@@ -3227,9 +3227,9 @@ mod tests {
         assert_eq!(source_consumer(&dir).unwrap(), identities[0]);
     }
 
-    /// The live suffix a search reads beside the index holds a private in-memory index: its heap
-    /// is bounded by the budget's text, not by what the unindexed sessions hold. The sweep
-    /// fixture, unindexed, searched with a budget that admits two of its four giant sessions.
+    /// The live suffix a search reads beside the index holds a private index in a temporary
+    /// directory: its heap is the writer's arena, not what the unindexed sessions hold. The sweep
+    /// fixture, unindexed, searched with the default read, which takes all four giant sessions.
     #[cfg(feature = "probe-heap")]
     #[test]
     #[ignore = "explicit synthetic CV_SWEEP_INPUT_PROBE and CV_SWEEP_INPUT_BYTES, one isolated process"]
@@ -3248,15 +3248,15 @@ mod tests {
             "Inspect",
             10,
             crate::SearchFilter::default(),
-            Some(2 * len),
+            LiveRead::All,
             &refs,
         )
         .unwrap();
         let wall = started.elapsed().as_secs_f64();
         let heap = cv_testkit::heap::end(baseline);
-        assert_eq!((hits.len(), suffix.read, suffix.cut), (2, 2, 2));
-        assert_eq!((suffix.bytes, suffix.cut_bytes), (2 * len, 2 * len));
-        // Two 100 MB sessions indexed in memory: their tokens, not their text, plus one writer.
+        assert_eq!((hits.len(), suffix.read, suffix.cut), (4, 4, 0));
+        assert_eq!((suffix.bytes, suffix.cut_bytes), (4 * len, 0));
+        // Four 100 MB sessions: the writer's arena and the admitted documents, flushed to disk.
         assert!(
             heap.peak_above_baseline_bytes < 384 * 1024 * 1024,
             "{}",
@@ -5391,7 +5391,7 @@ mod tests {
             "zqalphalate",
             10,
             crate::SearchFilter::default(),
-            Some(LIVE_BYTES),
+            LiveRead::All,
             &refs,
         )
         .unwrap();
@@ -8385,10 +8385,10 @@ mod tests {
     fn suffix_search(
         dir: &Path,
         query: &str,
-        budget: Option<u64>,
+        live: LiveRead,
         refs: &[cv_core::SessionRef],
     ) -> (Vec<(String, f32)>, Suffix) {
-        let (hits, _, suffix) = search_suffixed(dir, query, 10, crate::SearchFilter::default(), budget, refs).unwrap();
+        let (hits, _, suffix) = search_suffixed(dir, query, 10, crate::SearchFilter::default(), live, refs).unwrap();
         (hits.into_iter().map(|h| (h.id, h.score)).collect(), suffix)
     }
 
@@ -8420,13 +8420,13 @@ mod tests {
             .expect("a mark");
 
         // Fresh: nothing is read live and the footer is quiet.
-        let (_, suffix) = suffix_search(&dir, "alpha", Some(LIVE_BYTES), &refs);
+        let (_, suffix) = suffix_search(&dir, "alpha", LiveRead::All, &refs);
         assert_eq!((suffix.stale, suffix.read), (0, 0));
         assert_eq!((suffix.read_line(), suffix.unread_line()), (None, None));
 
         append_claude(&p, "grow", 3, "zanzibar");
         let len = std::fs::metadata(&p).unwrap().len();
-        let (hits, suffix) = suffix_search(&dir, "zanzibar", Some(LIVE_BYTES), &refs);
+        let (hits, suffix) = suffix_search(&dir, "zanzibar", LiveRead::All, &refs);
         assert_eq!(hits.iter().map(|h| h.0.as_str()).collect::<Vec<_>>(), ["grow"]);
         assert_eq!((suffix.stale, suffix.read, suffix.resumed, suffix.cut), (1, 1, 1, 0));
         assert_eq!(
@@ -8434,14 +8434,19 @@ mod tests {
             len - mark.offset(),
             "a stale session costs its unread suffix"
         );
-        assert!(suffix.read_line().unwrap().contains("1 session(s)"), "{suffix:?}");
+        let line = suffix.read_line().unwrap();
+        assert!(line.contains("1 session(s)") && !line.contains("budget"), "{line}");
         assert_eq!(suffix.unread_line(), None);
+        // A --live-bytes read names its budget.
+        let (_, suffix) = suffix_search(&dir, "zanzibar", LiveRead::Within(1 << 20), &refs);
+        let line = suffix.read_line().unwrap();
+        assert!(line.contains("of the 1.0 MiB --live-bytes budget"), "{line}");
         // The prefix the index holds still answers for the same session: one hit, not two.
-        let (hits, _) = suffix_search(&dir, "alpha", Some(LIVE_BYTES), &refs);
+        let (hits, _) = suffix_search(&dir, "alpha", LiveRead::All, &refs);
         assert_eq!(hits.iter().filter(|h| h.0 == "grow").count(), 1, "{hits:?}");
 
         // --frozen: the index alone, and the footer says how far behind.
-        let (hits, suffix) = suffix_search(&dir, "zanzibar", None, &refs);
+        let (hits, suffix) = suffix_search(&dir, "zanzibar", LiveRead::Frozen, &refs);
         assert!(hits.is_empty(), "{hits:?}");
         assert_eq!((suffix.stale, suffix.read), (1, 0));
         let note = suffix.unread_line().unwrap();
@@ -8452,7 +8457,7 @@ mod tests {
         // Nothing was written: the sweep still finds the session stale and resumes it.
         let swept = sweep(&dir, refs.clone(), false, false).unwrap();
         assert_eq!((swept.changed, swept.resumed), (1, 1));
-        let (_, suffix) = suffix_search(&dir, "zanzibar", Some(LIVE_BYTES), &refs);
+        let (_, suffix) = suffix_search(&dir, "zanzibar", LiveRead::All, &refs);
         assert_eq!(suffix.stale, 0);
     }
 
@@ -8471,7 +8476,7 @@ mod tests {
             std::fs::metadata(&big).unwrap().len(),
         );
         // No marks (index_refs takes none): both are read whole. The budget fits only the small.
-        let (hits, suffix) = suffix_search(&dir, "quokka", Some(small_len + 1), &refs);
+        let (hits, suffix) = suffix_search(&dir, "quokka", LiveRead::Within(small_len + 1), &refs);
         assert_eq!(hits.iter().map(|h| h.0.as_str()).collect::<Vec<_>>(), ["small"]);
         assert_eq!((suffix.stale, suffix.read, suffix.cut), (2, 1, 1));
         assert_eq!((suffix.bytes, suffix.cut_bytes), (small_len, big_len));
@@ -8481,10 +8486,10 @@ mod tests {
             "{note}"
         );
         // The cut session keeps what the index last saw of it.
-        let (hits, _) = suffix_search(&dir, "seed", Some(small_len + 1), &refs);
+        let (hits, _) = suffix_search(&dir, "seed", LiveRead::Within(small_len + 1), &refs);
         assert_eq!(hits.len(), 2, "{hits:?}");
         // A zero budget reads nothing live but still says what it left out.
-        let (hits, suffix) = suffix_search(&dir, "quokka", Some(0), &refs);
+        let (hits, suffix) = suffix_search(&dir, "quokka", LiveRead::Within(0), &refs);
         assert!(hits.is_empty());
         assert_eq!((suffix.read, suffix.cut), (0, 2));
     }
@@ -8505,14 +8510,14 @@ mod tests {
         index_refs(&full, &refs, false).unwrap();
         index_refs(&part, &refs[..1], false).unwrap();
         for query in ["lynx", "otter", "heron", "lynx OR heron"] {
-            let (indexed, _) = suffix_search(&full, query, None, &refs);
-            let (merged, suffix) = suffix_search(&part, query, Some(LIVE_BYTES), &refs);
+            let (indexed, _) = suffix_search(&full, query, LiveRead::Frozen, &refs);
+            let (merged, suffix) = suffix_search(&part, query, LiveRead::All, &refs);
             assert_eq!(suffix.read, 2);
             assert_eq!(merged, indexed, "{query}");
         }
         // No index at all: every session is unindexed and read live, newest first.
         let none = tmpdir();
-        let (hits, suffix) = suffix_search(&none.join("absent"), "heron", Some(LIVE_BYTES), &refs);
+        let (hits, suffix) = suffix_search(&none.join("absent"), "heron", LiveRead::All, &refs);
         assert_eq!(hits.len(), 2);
         assert!(suffix.no_index && suffix.read == 3, "{suffix:?}");
         assert!(suffix.read_line().unwrap().starts_with("no index yet"), "{suffix:?}");
@@ -8529,7 +8534,7 @@ mod tests {
         let p = write_claude(&sdir, "s1", "alpha corpus seed");
         let r1 = sref("s1", "one", p); // updated_at = 2s
         index_refs(&dir, std::slice::from_ref(&r1), false).unwrap();
-        let stale = |refs: &[cv_core::SessionRef]| Some(suffix_search(&dir, "alpha", None, refs).1.stale);
+        let stale = |refs: &[cv_core::SessionRef]| Some(suffix_search(&dir, "alpha", LiveRead::Frozen, refs).1.stale);
 
         // An older duplicate at a different path loses preference → not drift.
         let mut old = sref("s1", "one", write_claude(&sdir, "s1dup", "different, older copy"));

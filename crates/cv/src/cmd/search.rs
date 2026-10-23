@@ -15,7 +15,7 @@ pub(crate) fn cmd_search(
     semantic: bool,
     scan: bool,
     kind: Option<String>,
-    live_bytes: u64,
+    live_bytes: Option<u64>,
     json: bool, // emit the hits as one JSON array (session rows + score/snippet/provenance) instead of the table
 ) -> Result<()> {
     let want = parse_harness(&harness)?;
@@ -30,7 +30,7 @@ pub(crate) fn cmd_search(
         Source::Semantic
     } else {
         if scan {
-            eprintln!("(--scan: scanning transcripts live, head-capped; `cv index` makes search instant)");
+            eprintln!("(--scan: scanning every transcript live; `cv index` makes search instant)");
             Source::Live
         } else {
             Source::Index
@@ -43,17 +43,19 @@ pub(crate) fn cmd_search(
     };
     // The index answers every full-text search: an empty result means "no match", and an index
     // that is missing or unusable is an error naming the cause and the fix, never a silent scan
-    // of every transcript (minutes on a large corpus, and only each session's head).
+    // of every transcript (minutes on a large corpus).
     let found = match cv_search::Searcher::default().search(query, filter, limit, source, live_bytes) {
         Ok(found) => found,
-        Err(e) => return match source {
-            Source::Semantic => Err(e.context("semantic search failed (run `cv index --semantic` first?)")),
-            Source::Index if cv_search::is_invalid_text_query(&e) => crate::util::usage(format!("{e:#}")),
-            Source::Index => Err(e.context(
-                "full-text search needs a usable index (or pass --scan for a slow live scan of each session's head)",
-            )),
-            Source::Live => Err(e),
-        },
+        Err(e) => {
+            return match source {
+                Source::Semantic => Err(e.context("semantic search failed (run `cv index --semantic` first?)")),
+                Source::Index if cv_search::is_invalid_text_query(&e) => crate::util::usage(format!("{e:#}")),
+                Source::Index => Err(e.context(
+                    "full-text search needs a usable index (or pass --scan for a slow live scan of every session)",
+                )),
+                Source::Live => Err(e),
+            }
+        }
     };
     render(found, limit, query, json)
 }

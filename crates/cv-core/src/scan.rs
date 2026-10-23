@@ -2,60 +2,265 @@
 //!
 //! Only an explicit request takes it: `cv search --scan` and `cv serve`'s `/api/search?scan=1`
 //! (`cv pack` before any `cv index`). A missing or unusable index is an error naming the fix,
-//! never this. It is slower than the index by orders of magnitude (it streams every session) and
-//! only sees each session's capped head, so callers say so: the CLI prints a note on stderr, the
-//! daemon sets `X-Cv-Search-Source: live`.
+//! never this. It is slower than the index by orders of magnitude (it streams every session), so
+//! callers say so: the CLI prints a note on stderr, the daemon sets `X-Cv-Search-Source: live`.
 //!
-//! Streaming discipline: each session streams into [`CapSink`], which keeps at most
-//! [`LIVE_HAY_BYTES`] of searchable text and drops every message as it passes. Peak memory per
-//! session is O(cap), never O(session) — an unbounded haystack here once meant multi-GB RSS on a
-//! real corpus.
+//! Streaming discipline: each session streams into [`ScanSink`], whose [`Matcher`] matches the
+//! whole searchable text as it passes and keeps only a window around it: the bytes a match can
+//! straddle, and the excerpt of the first match. Peak memory per session is O(window), never
+//! O(session), and nothing the session says is left unsearched.
 
-use crate::ir::{truncate, Block, Harness, Message, SessionRef};
+use crate::ir::{truncate, Harness, Message, SessionRef};
 use crate::lazy::{Resolver, Text};
-use crate::projection::Head;
+use crate::projection::Searchable;
 use crate::stream::{Demand, Flow, MessageSink};
 use anyhow::{Context, Result};
 use std::path::Path;
 
-/// Searchable-haystack cap per session for the no-index live scan.
-pub const LIVE_HAY_BYTES: usize = 256 * 1024;
+/// Bytes an excerpt keeps before its match.
+const LEAD: usize = 40;
+/// Bytes an excerpt keeps after its match.
+const TRAIL: usize = 120;
+/// Text is matched in pieces of about this size.
+const PIECE: usize = 4096;
 
-/// Builds a capped searchable head (`hay`, at most [`LIVE_HAY_BYTES`]) as messages stream past
-/// (each dropped immediately), keeping the first [`Message::prompt_title`] for the label; stops the
-/// parse once the cap is hit and the label is known. Stream it under
-/// [`Demand::with_spans`] so large content arrives as spans resolved only up to the remaining
-/// budget — peak per session is O(cap), never O(session).
+/// Where the first anchoring needle matched: [`LEAD`] bytes before the match (fewer at the start
+/// of the text), the match at `at..at + len`, and up to [`TRAIL`] bytes after it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Excerpt {
+    pub text: String,
+    pub at: usize,
+    pub len: usize,
+}
+
+impl Excerpt {
+    fn wanted(&self) -> usize {
+        self.at + self.len + TRAIL
+    }
+}
+
+/// Case-insensitive substring matching over a stream of text in O(window) memory: which needles
+/// occur anywhere in it, and an [`Excerpt`] around the earliest occurrence of the first
+/// `anchors` needles. Matching lowercases the whole window, so it agrees with
+/// `text.to_lowercase().find(needle)` on the whole text.
+pub struct Matcher {
+    needles: Vec<String>,
+    anchors: usize,
+    found: Vec<bool>,
+    /// The last bytes matched: enough for a needle that straddles two pieces, and the lead-in of
+    /// a match not yet anchored.
+    tail: String,
+    keep: usize,
+    /// Undecoded input (a JSON write can end inside a character), matched once a piece is full.
+    stage: Vec<u8>,
+    /// The first [`TRAIL`] bytes: the excerpt when no anchoring needle occurs.
+    head: String,
+    excerpt: Option<Excerpt>,
+}
+
+impl Matcher {
+    /// Match `needles` (lowercased by the caller); the first `anchors` of them place the excerpt.
+    pub fn new(needles: Vec<String>, anchors: usize) -> Self {
+        // An original character is at most four times its lowercase bytes ('K' is 3 bytes for 1).
+        let guard = 4 * needles.iter().map(String::len).max().unwrap_or(0) + 4;
+        Self {
+            found: vec![false; needles.len()],
+            anchors: anchors.min(needles.len()),
+            needles,
+            tail: String::new(),
+            keep: LEAD + guard,
+            stage: Vec::new(),
+            head: String::new(),
+            excerpt: None,
+        }
+    }
+
+    /// Every needle has occurred and the excerpt is complete: the rest of the text changes nothing.
+    pub fn done(&self) -> bool {
+        self.found.iter().all(|f| *f)
+            && (self.anchors == 0 || self.excerpt.as_ref().is_some_and(|e| e.text.len() >= e.wanted()))
+            && self.head.len() >= TRAIL
+    }
+
+    /// Whether needle `i` occurred.
+    pub fn found(&self, i: usize) -> bool {
+        self.found[i]
+    }
+
+    fn feed(&mut self, bytes: &[u8]) {
+        if self.done() {
+            return;
+        }
+        for part in bytes.chunks(PIECE) {
+            self.stage.extend_from_slice(part);
+            if self.stage.len() >= PIECE {
+                self.flush(false);
+            }
+        }
+    }
+
+    /// Match what is staged: its complete characters, or everything at the end of the text.
+    fn flush(&mut self, end: bool) {
+        let valid = match std::str::from_utf8(&self.stage) {
+            Ok(_) => self.stage.len(),
+            Err(e) if e.error_len().is_none() && !end => e.valid_up_to(),
+            Err(_) => {
+                let text = String::from_utf8_lossy(&self.stage).into_owned();
+                self.stage.clear();
+                return self.piece(&text, end);
+            }
+        };
+        let rest = self.stage.split_off(valid);
+        let staged = std::mem::replace(&mut self.stage, rest);
+        // `valid` ends on a character boundary by construction.
+        let text = String::from_utf8(staged).unwrap_or_default();
+        self.piece(&text, end);
+    }
+
+    fn piece(&mut self, piece: &str, end: bool) {
+        if self.head.len() < TRAIL {
+            let take = ceil_char(piece, TRAIL - self.head.len());
+            self.head.push_str(&piece[..take]);
+        }
+        if let Some(e) = &mut self.excerpt {
+            if e.text.len() < e.wanted() {
+                let take = ceil_char(piece, e.wanted() - e.text.len());
+                e.text.push_str(&piece[..take]);
+            }
+        }
+        let mut window = std::mem::take(&mut self.tail);
+        window.push_str(piece);
+        if self.excerpt.is_none() || self.found.iter().any(|f| !f) {
+            let low = window.to_lowercase();
+            let mut first: Option<std::ops::Range<usize>> = None;
+            for (i, needle) in self.needles.iter().enumerate() {
+                if self.found[i] && (self.excerpt.is_some() || i >= self.anchors) {
+                    continue;
+                }
+                let Some(pos) = low.find(needle.as_str()) else { continue };
+                self.found[i] = true;
+                if self.excerpt.is_none() && i < self.anchors {
+                    let range = lowercase_source_range(&window, pos..pos + needle.len());
+                    if first.as_ref().is_none_or(|f| range.start < f.start) {
+                        first = Some(range);
+                    }
+                }
+            }
+            // A match near the window's end waits for the next piece: a needle not yet complete
+            // there could start earlier. The window keeps it, with its lead-in.
+            if let Some(range) = first.filter(|r| end || r.start + self.keep - LEAD < window.len()) {
+                let from = floor_char(&window, range.start.saturating_sub(LEAD));
+                let mut excerpt = Excerpt {
+                    text: String::new(),
+                    at: range.start - from,
+                    len: range.len(),
+                };
+                let to = ceil_char(&window, from + excerpt.wanted());
+                excerpt.text = window[from..to].to_string();
+                self.excerpt = Some(excerpt);
+            }
+        }
+        let from = ceil_char(&window, window.len().saturating_sub(self.keep));
+        window.drain(..from);
+        self.tail = window;
+    }
+
+    /// End of the text: match what is left, and the excerpt (the text's start when no anchoring
+    /// needle occurred).
+    pub fn finish(&mut self) -> Excerpt {
+        self.flush(true);
+        self.excerpt.clone().unwrap_or_else(|| Excerpt {
+            text: self.head.clone(),
+            at: 0,
+            len: 0,
+        })
+    }
+
+    /// Whether the first anchoring needle placed the excerpt.
+    pub fn anchored(&self) -> bool {
+        self.excerpt.is_some()
+    }
+
+    /// Bytes held, at most: the window, a staged piece and the excerpt.
+    pub fn held(&self) -> usize {
+        self.tail.capacity()
+            + self.stage.capacity()
+            + self.head.capacity()
+            + self.excerpt.as_ref().map_or(0, |e| e.text.capacity())
+    }
+}
+
+impl Searchable for Matcher {
+    fn full(&self) -> bool {
+        self.done()
+    }
+    fn str(&mut self, s: &str) {
+        self.feed(s.as_bytes());
+    }
+    fn text(
+        &mut self,
+        text: &Text,
+        resolver: &Resolver,
+        check: &mut dyn FnMut() -> anyhow::Result<()>,
+    ) -> anyhow::Result<()> {
+        crate::stream::stopped(text.try_for_each_chunk(resolver, PIECE, |part| {
+            check()?;
+            self.feed(part.as_bytes());
+            if self.done() {
+                Err(crate::stream::Stop.into())
+            } else {
+                Ok(())
+            }
+        }))
+        .map(|_| ())
+    }
+    fn json(&mut self, json: &crate::json::Json, check: &mut dyn FnMut() -> anyhow::Result<()>) -> anyhow::Result<()> {
+        struct Fed<'a, 'b> {
+            matcher: &'a mut Matcher,
+            check: &'a mut (dyn FnMut() -> anyhow::Result<()> + 'b),
+        }
+        impl std::io::Write for Fed<'_, '_> {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                (self.check)().map_err(std::io::Error::other)?;
+                self.matcher.feed(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        json.write_canonical(&mut Fed { matcher: self, check })
+    }
+}
+
+/// Streams one session's searchable exchange through a [`Matcher`] (each message dropped as it
+/// passes), keeping the first [`Message::prompt_title`] for the label; stops the parse once the
+/// matcher is done and the label is known. Stream it under [`Demand::with_spans`] so large
+/// content arrives as spans read in pieces.
 ///
 /// The no-index live path for `cv pack`, `cv search` and `cv serve`'s `/api/search` alike.
-pub struct CapSink {
-    pub hay: Head,
+pub struct ScanSink {
+    pub matcher: Matcher,
     pub first_prompt: Option<String>,
     resolver: Resolver,
     error: Option<anyhow::Error>,
     failed: bool,
 }
 
-impl CapSink {
+impl ScanSink {
     /// A fresh sink for one session at `path` (the resolver reads lazy spans back from it).
-    pub fn new(path: &Path) -> Self {
-        CapSink {
-            hay: Head::new(LIVE_HAY_BYTES),
+    pub fn new(path: &Path, matcher: Matcher) -> Self {
+        ScanSink {
+            matcher,
             first_prompt: None,
             resolver: Resolver::new(Some(path.to_path_buf())),
             error: None,
             failed: false,
         }
     }
-
-    fn push_text(&mut self, text: &Text) -> Result<()> {
-        self.hay.try_push_text(text, &self.resolver)?;
-        self.hay.push("\n");
-        Ok(())
-    }
 }
 
-impl MessageSink for CapSink {
+impl MessageSink for ScanSink {
     fn take_error(&mut self) -> Option<anyhow::Error> {
         self.error
             .take()
@@ -80,33 +285,13 @@ impl MessageSink for CapSink {
         if !m.kind.is_exchange() {
             return Flow::Continue;
         }
-        for b in &m.content {
-            let result = match b {
-                Block::Text { text } | Block::Thinking { text, .. } => self.push_text(text),
-                Block::ToolUse { name, input, .. } => {
-                    self.hay.push(name);
-                    self.hay.push(" ");
-                    self.hay.push_json(input).map(|()| {
-                        self.hay.push("\n");
-                    })
-                }
-                Block::ToolResult { content, .. } => self.push_text(content),
-                Block::File { path, source, .. } => {
-                    if let Some(p) = path.as_deref().or(source.as_deref()) {
-                        self.hay.push(p);
-                        self.hay.push("\n");
-                    }
-                    Ok(())
-                }
-                Block::Image { .. } => Ok(()),
-            };
-            if let Err(error) = result {
-                self.error = Some(error);
-                self.failed = true;
-                return Flow::Stop;
-            }
+        if let Err(error) = crate::projection::searchable(&m.content, &self.resolver, &mut self.matcher, &mut || Ok(()))
+        {
+            self.error = Some(error);
+            self.failed = true;
+            return Flow::Stop;
         }
-        if self.hay.full() && self.first_prompt.is_some() {
+        if self.matcher.done() && self.first_prompt.is_some() {
             Flow::Stop
         } else {
             Flow::Continue
@@ -131,10 +316,8 @@ pub struct LiveSearch {
     pub unreadable: Vec<crate::Skipped>,
 }
 
-/// Case-insensitive substring search across every session's capped head, stopping at `limit` hits.
-///
-/// Trade-off, stated plainly: a match beyond a session's capped head is missed here; finding those
-/// is the index's job (`cv index`).
+/// Case-insensitive substring search across every session's whole searchable exchange,
+/// stopping at `limit` hits.
 ///
 /// Caller metadata selection is applied before payload reads and the hit budget.
 pub fn live_search_filtered(
@@ -165,7 +348,7 @@ pub fn live_search_filtered(
             }
             // One session that cannot be read is skipped and named, never the end of the scan; one
             // that vanished since discovery is simply gone.
-            let mut sink = CapSink::new(&r.path);
+            let mut sink = ScanSink::new(&r.path, Matcher::new(vec![needle.clone()], 1));
             let meta = match adapter
                 .try_stream(&r, &Demand::LEAN.with_spans(), &mut sink)
                 .with_context(|| format!("scanning {}:{}", r.harness, r.id))
@@ -176,16 +359,13 @@ pub fn live_search_filtered(
                     continue;
                 }
             };
-            // Lowercase only the bounded head (the match check), windowing the snippet from the
-            // original-case haystack.
-            let low = sink.hay.as_str().to_lowercase();
-            let Some(pos) = low.find(&needle) else { continue };
+            let excerpt = sink.matcher.finish();
+            if !sink.matcher.anchored() {
+                continue;
+            }
             out.hits.push(LiveHit {
                 title: crate::label_from(meta.title.as_deref(), sink.first_prompt.as_deref()),
-                snippet: {
-                    let range = lowercase_source_range(sink.hay.as_str(), pos..pos + needle.len());
-                    snippet(sink.hay.as_str(), range.start, range.len())
-                },
+                snippet: snippet(&excerpt.text, excerpt.at, excerpt.len),
                 session: r,
             });
             if out.hits.len() >= limit {
@@ -258,7 +438,7 @@ pub fn ceil_char(s: &str, mut i: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::Role;
+    use crate::ir::{Block, Role};
 
     /// A session the scan cannot read is skipped and named; the rest are still searched.
     #[cfg(unix)]
@@ -331,46 +511,94 @@ mod tests {
         assert!(!snippet(&source, pos, 6).contains("target"));
     }
 
+    /// The matcher agrees with lowercasing the whole text and finding each needle in it, however
+    /// the text arrives in pieces, and its excerpt is the whole text's window.
     #[test]
-    fn live_head_caps_arguments_paths_and_labels_together() {
-        let mut sink = CapSink::new(Path::new("unused"));
-        let input = serde_json::json!({"content": "🌙\n".repeat(LIVE_HAY_BYTES)});
+    fn matcher_agrees_with_the_whole_text_in_any_pieces() {
+        let texts = [
+            format!("{}NEEDLE{}", "a".repeat(5000), "b".repeat(300)),
+            format!("{}target {}", "İ".repeat(3000), "end ".repeat(100)),
+            "ΟΣ next ος tail".to_string(),
+            "short".to_string(),
+            format!("{}needle", "x".repeat(9000)),
+            format!("{}Needle and NEEDLE", "🌙".repeat(1500)),
+        ];
+        let needle_sets: [&[&str]; 4] = [&["needle"], &["target", "end"], &["ος"], &["absent", "short"]];
+        for text in &texts {
+            for needles in needle_sets {
+                let low = text.to_lowercase();
+                let first = needles
+                    .iter()
+                    .filter_map(|n| low.find(n).map(|p| lowercase_source_range(text, p..p + n.len())))
+                    .min_by_key(|r| r.start);
+                for piece in [1usize, 3, 7, 64, 4096, usize::MAX] {
+                    let mut m = Matcher::new(needles.iter().map(|n| n.to_string()).collect(), needles.len());
+                    let bytes = text.as_bytes();
+                    for part in bytes.chunks(piece.min(bytes.len()).max(1)) {
+                        m.feed(part);
+                    }
+                    let excerpt = m.finish();
+                    for (i, n) in needles.iter().enumerate() {
+                        assert_eq!(m.found(i), low.contains(n), "{n:?} in {piece}-byte pieces");
+                    }
+                    match &first {
+                        Some(r) => {
+                            assert!(m.anchored());
+                            assert_eq!(
+                                snippet(&excerpt.text, excerpt.at, excerpt.len),
+                                snippet(text, r.start, r.len()),
+                                "{needles:?} in {piece}-byte pieces"
+                            );
+                        }
+                        None => assert!(!m.anchored()),
+                    }
+                }
+            }
+        }
+    }
+
+    /// A match past any head is found, and what the scan holds is a window, not the session.
+    #[test]
+    fn scan_reads_the_whole_exchange_in_a_window() {
+        let mut sink = ScanSink::new(Path::new("unused"), Matcher::new(vec!["zqlast".into()], 1));
+        let input = serde_json::json!({"content": "🌙\n".repeat(1 << 20)});
         let mut message = Message::new(Role::User);
         message.content = vec![
             Block::Text { text: "prompt".into() },
             Block::ToolUse {
                 id: "t".into(),
                 name: "Edit".into(),
-                input: input.clone().into(),
+                input: input.into(),
                 namespace: None,
             },
             Block::File {
                 mime: None,
-                path: Some("later".repeat(LIVE_HAY_BYTES)),
+                path: Some(format!("{}ZQLAST tail", "later".repeat(1 << 20))),
                 source: None,
             },
         ];
-        assert_eq!(sink.message(message), Flow::Stop);
-        let complete = format!("prompt\nEdit {input}\nlater");
-        assert_eq!(sink.hay.as_str(), &complete[..floor_char(&complete, LIVE_HAY_BYTES)]);
+        assert_eq!(sink.message(message), Flow::Continue);
+        let excerpt = sink.matcher.finish();
+        assert!(sink.matcher.found(0));
+        assert_eq!(&excerpt.text[excerpt.at..excerpt.at + excerpt.len], "ZQLAST");
         assert_eq!(sink.first_prompt.as_deref(), Some("prompt"));
-        assert!(sink.hay.capacity() <= LIVE_HAY_BYTES);
+        assert!(sink.matcher.held() < 64 * 1024, "{}", sink.matcher.held());
     }
 
     #[test]
-    fn retained_source_text_keeps_bounded_body_label_policy_and_guard_errors() {
+    fn retained_source_text_is_matched_whole_and_guard_errors() {
         let dir = cv_testkit::temp_dir("live-head-retained-source");
         let path = dir.join("source.json");
         let conditional = dir.join("sidecar");
         for late_whitespace in [false, true] {
             let decoded = format!(
-                "{}{}",
+                "{}{}zqend",
                 if late_whitespace {
                     " ".repeat(crate::ir::TITLE_HEAD as usize)
                 } else {
                     "source label\n".into()
                 },
-                "é🙂".repeat(LIVE_HAY_BYTES)
+                "é🙂".repeat(1 << 18)
             );
             std::fs::write(&path, serde_json::to_vec(&decoded).unwrap()).unwrap();
             let mut reads = crate::source::ReadSet::default();
@@ -381,19 +609,15 @@ mod tests {
             assert!(matches!(text, Text::Source(_)));
             let mut message = Message::new(Role::User);
             message.content.push(Block::Text { text: text.clone() });
-            let mut sink = CapSink::new(&path);
-            assert_eq!(
-                sink.message(message),
-                if late_whitespace { Flow::Continue } else { Flow::Stop }
-            );
+            let mut sink = ScanSink::new(&path, Matcher::new(vec!["zqend".into()], 1));
+            assert_eq!(sink.message(message), Flow::Continue);
             assert!(sink.take_error().is_none());
-            assert_eq!(sink.hay.as_str().len(), floor_char(&decoded, LIVE_HAY_BYTES));
-            assert!(sink.hay.as_str() == &decoded[..floor_char(&decoded, LIVE_HAY_BYTES)]);
-            assert!(sink.hay.capacity() <= LIVE_HAY_BYTES);
+            sink.matcher.finish();
+            assert!(sink.matcher.found(0));
+            assert!(sink.matcher.held() < 64 * 1024, "{}", sink.matcher.held());
             assert_eq!(sink.first_prompt.is_none(), late_whitespace);
             std::fs::write(&conditional, format!("dependency {late_whitespace}")).unwrap();
-            let mut stale = CapSink::new(&path);
-            stale.hay = Head::new(3);
+            let mut stale = ScanSink::new(&path, Matcher::new(vec!["zqend".into()], 1));
             let mut message = Message::new(Role::Assistant);
             message.content.push(Block::Text { text });
             assert!(stale.try_message(message).is_err());
@@ -407,7 +631,7 @@ mod tests {
         let dir = cv_testkit::temp_dir("live-head-text-error");
         let path = dir.join("absent");
         for role in [Role::User, Role::Assistant] {
-            let mut sink = CapSink::new(&path);
+            let mut sink = ScanSink::new(&path, Matcher::new(vec!["x".into()], 1));
             let mut message = Message::new(role);
             message.content.push(Block::Text {
                 text: Text::Span(crate::Span {
@@ -420,7 +644,7 @@ mod tests {
             assert!(sink.try_message(message).is_err());
             assert_eq!(sink.message(Message::new(Role::User)), Flow::Stop);
             assert!(sink.take_error().is_some());
-            assert!(sink.hay.is_empty());
+            assert!(!sink.matcher.anchored());
         }
         std::fs::remove_dir_all(dir).unwrap();
     }
@@ -432,7 +656,7 @@ mod tests {
         std::fs::write(&path, "{}").unwrap();
         let input = crate::json::Json::source(&path, 0, 2).unwrap();
         std::fs::remove_file(&path).unwrap();
-        let mut sink = CapSink::new(&path);
+        let mut sink = ScanSink::new(&path, Matcher::new(vec!["x".into()], 1));
         let mut message = Message::new(Role::Assistant);
         message.content.push(Block::ToolUse {
             id: "t".into(),

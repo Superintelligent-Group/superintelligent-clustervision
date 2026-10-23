@@ -347,8 +347,8 @@ fn search_fallback_messaging_and_index_path() {
     let w = World::new("search");
     standard_corpus(&w);
 
-    // No index yet: every session is unindexed, so the live read answers within its budget and
-    // the footer says so; never an unasked scan.
+    // No index yet: every session is unindexed, so the live read (all of it by default) answers
+    // and the footer says so; never an unasked scan.
     let (out, err) = w.cv_ok(&["search", "zebrafish"]);
     assert!(out.contains("alphases") && out.contains("no index yet"), "{out}");
     assert!(!err.contains("scanning"), "{err}");
@@ -359,7 +359,7 @@ fn search_fallback_messaging_and_index_path() {
     assert!(out.is_empty(), "{out}");
     // `--scan` asks for the live scan, which announces itself and still finds the content.
     let (out, err) = w.cv_ok(&["search", "zebrafish", "--scan"]);
-    assert!(err.contains("scanning transcripts live"), "{err}");
+    assert!(err.contains("scanning every transcript live"), "{err}");
     assert!(out.contains("alphases"), "{out}");
     assert!(out.to_lowercase().contains("zebrafish"), "snippet expected:\n{out}");
 
@@ -389,7 +389,7 @@ fn search_json_emits_machine_readable_hits() {
     // array with the FULL session id (the table truncates to "alphases"), the snippet the
     // table would print, and an explicit null score (a live scan has none).
     let (out, err) = w.cv_ok(&["search", "zebrafish", "--json", "--scan"]);
-    assert!(err.contains("scanning transcripts live"), "{err}");
+    assert!(err.contains("scanning every transcript live"), "{err}");
     let rows: Vec<serde_json::Value> = serde_json::from_str(out.trim()).expect("stdout must be pure JSON");
     assert_eq!(rows.len(), 1, "{out}");
     assert_eq!(rows[0]["id"], "alphasess", "full id, not the 8-char prefix:\n{out}");
@@ -487,10 +487,11 @@ fn search_discloses_index_staleness() {
         .unwrap();
     }
 
-    // The grown suffix is read live: the hit list finds the new text and says what it read…
+    // The grown suffix is read live: the hit list finds the new text and says what it read; with
+    // no --live-bytes nothing bounds the read, so the footer names no budget…
     let (out, _) = w.cv_ok(&["search", "tail"]);
     assert!(out.contains("alphases") && out.contains("read 1 session(s)"), "{out}");
-    assert!(!out.contains("behind"), "{out}");
+    assert!(!out.contains("behind") && !out.contains("budget"), "{out}");
     // …--json keeps the array pure and puts the footer on stderr…
     let (out, err) = w.cv_ok(&["search", "tail", "--json"]);
     let rows: Vec<serde_json::Value> = serde_json::from_str(out.trim()).expect("stdout must be pure JSON");

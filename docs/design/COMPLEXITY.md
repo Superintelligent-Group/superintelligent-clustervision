@@ -40,7 +40,7 @@ or rewritten. Paths are relative to `crates/`.
 | `lanes_of` / `cv lanes` | O(the parent's rows + Σ s_k) | same | same | `lanes.rs` `lanes_of` |
 | `cv index`, unchanged | — | O(n + dependencies) stats | O(n) plan + one session read | `fts.rs` `PlanState`; `sweep.rs` |
 | `cv index` sweep queue | O(Z log Z) for Z groups | — | — | `sweep.rs` `Queue` |
-| `cv search` | O(postings) + `limit` snippets | same | + suffix read within `--live-bytes` | `cv-search` `search_suffixed` |
+| `cv search` | O(postings) + `limit` snippets | same | + suffix read (all; `--live-bytes` bounds it) | `cv-search` `search_suffixed` |
 | `stats --tokens` | O(S) | O(n) cache loads + a bounded sweep | one source reparsed | `stats/usage_cache.rs` |
 | Sessions API page / head | O(start) / O(s) | O(page) from its continuation / a hit | O(start) / O(s) | `api/read.rs` |
 | `cv scry` / watch poll | O(n) stats per tick | O(n) | O(appended) from the anchor | `watch.rs`, `watch/read.rs` |

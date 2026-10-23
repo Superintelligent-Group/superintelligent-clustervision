@@ -268,11 +268,11 @@ enum Cmd {
         #[arg(long, value_name = "exchange|context|all", conflicts_with_all = ["semantic", "scan"])]
         kind: Option<String>,
         /// The index answers plus a live read of the sessions it has not seen as they are now
-        /// (grown, rewritten, new since `cv index`), from where the index stopped: at most this
-        /// many bytes of source, newest sessions first. The footer says what was read and what
-        /// the budget left out; 0 (or global --frozen) answers from the index alone.
-        #[arg(long, value_name = "BYTES", default_value_t = cv_search::LIVE_BYTES, conflicts_with_all = ["semantic", "scan"])]
-        live_bytes: u64,
+        /// (grown, rewritten, new since `cv index`), from where the index stopped: all of them by
+        /// default; with this, at most BYTES of source, newest sessions first, and the footer
+        /// names what the budget left out. 0 (or global --frozen) answers from the index alone.
+        #[arg(long, value_name = "BYTES", conflicts_with_all = ["semantic", "scan"])]
+        live_bytes: Option<u64>,
         /// Emit the hits as one JSON array instead of the table — the same hits in the same
         /// order (--harness/--limit/--semantic respected): a session row (`id, harness, path, cwd,
         /// title, created_at, updated_at, message_count, size_bytes`) plus `score`, `snippet`, and

@@ -1063,7 +1063,7 @@ fn raw_json(raw: &str) -> Value {
 }
 
 /// `/api/search` over a world with NO full-text index: every session is unindexed, so the live
-/// read answers within `live_bytes` and the note says so; `scan=1` asks for the head-capped scan
+/// read answers (all of it unless `live_bytes` bounds it) and the note says so; `scan=1` asks for the live scan
 /// instead, which answers in the same row shape and SAYS it is a scan.
 #[test]
 fn serve_search() {
@@ -1113,7 +1113,7 @@ fn serve_search() {
     assert_eq!(header_of(&raw, "X-Cv-Search-Source").as_deref(), Some("live"), "{raw}");
     let note = header_of(&raw, "X-Cv-Search-Note").unwrap_or_default();
     assert!(
-        note.contains("scanned transcripts live"),
+        note.contains("scanned every transcript live"),
         "the scan must be stated: {raw}"
     );
 

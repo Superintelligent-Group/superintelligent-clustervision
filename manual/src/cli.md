@@ -301,9 +301,9 @@ claude    da9174f4  2026-05-28  the flux inference refactor
           … so the new flux inference path replaces the old type-walker …
 ```
 
-The index (BM25) plus a live read of what it has not seen, newest first, within `--live-bytes`
-(256 MiB; the footer says what was left out; none under `--frozen`). An unopenable index fails
-naming [`cv index`](#cv-index); `--scan` is a slow head-capped live scan that names what it could
+The index (BM25) plus a live read of everything it has not seen (`--live-bytes N` bounds it,
+newest first, and the footer says what was left out; none under `--frozen`). An unopenable index
+fails naming [`cv index`](#cv-index); `--scan` is a slow live scan of every session that names what it could
 not read. It matches the exchange; `--kind context` matches injected context, `--kind all` both.
 `--semantic` needs `cv index --semantic` and errors without it. `--json`: a session row plus
 `score` (`null` on a live scan), full `snippet`, and `agent_id`/`parent_id`/`workflow` (set for

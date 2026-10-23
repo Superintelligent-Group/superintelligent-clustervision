@@ -10,7 +10,7 @@
 //! (or `CV_PACK_LLM=<model-id>`) to additionally route each span through `llm::digest` for an
 //! abstractive digest; without it, `cv pack` does zero network and loads zero models.
 //!
-//! Streaming discipline: recall works off the index (or a head-capped live scan), excerpts are
+//! Streaming discipline: recall works off the index (or a live scan), excerpts are
 //! pulled with a windowed streaming sink under [`Demand::with_spans`], and events come from
 //! catalog queries — whole sessions are never materialized.
 
@@ -19,7 +19,7 @@ use anyhow::{bail, Context, Result};
 use chrono::Utc;
 use cv_core::ir::{Block, Harness, Message, Role, Session};
 use cv_core::lazy::Resolver;
-use cv_core::scan::{ceil_char, floor_char, CapSink};
+use cv_core::scan::{ceil_char, floor_char, Matcher, ScanSink};
 use cv_core::stream::{Demand, Flow, MessageSink};
 use cv_core::EmitOptions;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -153,7 +153,7 @@ fn llm_from_env() -> Option<Option<String>> {
 
 /// Find the `limit` most relevant sessions: full-text (tantivy) and semantic (embeddings) when
 /// their stores exist, fused by reciprocal rank and deduped by session. Honest fallbacks: no
-/// index → head-capped live scan with a stderr note; no embeddings → full-text only.
+/// index → live scan with a stderr note; no embeddings → full-text only.
 /// Fusion weights: lexical hits on the task's own terms are higher-precision than static-embedding
 /// cosine, so the full-text list counts double; semantic stays the recall-broadening channel
 /// (a session ranked in BOTH lists still gets both contributions).
@@ -292,8 +292,8 @@ fn fuse(ranked: Vec<(f32, Vec<cv_search::Hit>)>, limit: usize) -> Vec<cv_search:
     picked
 }
 
-/// No-index fallback: discover and stream every session, scoring a head-capped searchable
-/// haystack against the task's words. Peak memory is O(the cap), never O(session).
+/// No-index fallback: discover and stream every session, scoring its whole searchable exchange
+/// against the task's words. Peak memory is the matcher's window, never O(session).
 fn live_scan(task: &str, fetch: usize) -> Result<Vec<cv_search::Hit>> {
     let adapters = cv_core::harness::all();
     live_scan_adapters(task, fetch, adapters.iter().map(|adapter| adapter.as_ref()))
@@ -321,12 +321,15 @@ fn live_scan_adapters<'a>(
             continue;
         }
         for r in adapter.discover()? {
-            let mut sink = CapSink::new(&r.path);
+            // The words place the excerpt; the whole task scores on top.
+            let needles = words.iter().map(|w| w.to_string()).chain([needle.clone()]).collect();
+            let mut sink = ScanSink::new(&r.path, Matcher::new(needles, words.len()));
             let meta = adapter
                 .try_stream(&r, &Demand::LEAN.with_spans(), &mut sink)
                 .with_context(|| format!("scanning {}:{} for pack", r.harness, r.id))?;
-            let low = sink.hay.as_str().to_lowercase();
-            let score = lexical_score(&low, &needle, words.iter().copied());
+            let excerpt = sink.matcher.finish();
+            let score = (0..words.len()).filter(|&i| sink.matcher.found(i)).count() as i64
+                + if sink.matcher.found(words.len()) { 5 } else { 0 };
             if score == 0 {
                 continue;
             }
@@ -336,12 +339,11 @@ fn live_scan_adapters<'a>(
             if scored.len() == fetch && scored.last_key_value().is_some_and(|(worst, _)| rank >= *worst) {
                 continue;
             }
-            // Lowercasing can expand UTF-8 characters; map the match back to source bytes.
-            let folded_pos = words.iter().filter_map(|w| low.find(*w)).min().unwrap_or(0);
-            let pos = cv_core::scan::lowercase_source_range(sink.hay.as_str(), folded_pos..folded_pos).start;
-            let lo = floor_char(sink.hay.as_str(), pos.saturating_sub(40));
-            let hi = ceil_char(sink.hay.as_str(), (pos + 120).min(sink.hay.len()));
-            let snippet = sink.hay.as_str()[lo..hi].replace('\n', " ").trim().to_string();
+            // The excerpt holds the earliest word's match (else the text's start), in source bytes.
+            let (text, pos) = (excerpt.text.as_str(), excerpt.at);
+            let lo = floor_char(text, pos.saturating_sub(40));
+            let hi = ceil_char(text, (pos + 120).min(text.len()));
+            let snippet = text[lo..hi].replace('\n', " ").trim().to_string();
             let title = cv_core::label_from(meta.title.as_deref(), sink.first_prompt.as_deref());
             scored.insert(
                 rank,

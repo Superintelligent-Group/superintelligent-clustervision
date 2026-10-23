@@ -86,21 +86,29 @@ Bare terms search the title, the exchange and cwd, and all must match. tantivy s
 `cv search` answers from the index **plus the unindexed suffix**: every session grown,
 rewritten or new since `cv index` is read live, newest first, and ranked by the same BM25 with
 shared corpus statistics. A grown session is read from the index's resume mark (taken every
-4 MiB of text); others are read whole. `--live-bytes` (default 256 MiB) bounds the read; a
-session past it keeps what the index last saw. The footer reports both:
+4 MiB of text); others are read whole. By default every such session is read; `--live-bytes N`
+bounds the read to N bytes of source, and a session past it keeps what the index last saw. The
+footer reports both:
+
+```text
+(live: read 3 session(s) the index has not seen live (2.1 MiB, 2 from where the index stopped))
+```
+
+With `--live-bytes 268435456`:
 
 ```text
 (live: read 3 session(s) the index has not seen live (2.1 MiB of the 256.0 MiB --live-bytes budget, 2 from where the index stopped))
 (note: the index is ~2h behind for 1 session(s) not read live: 1 over the --live-bytes budget (412.0 MiB) — run `cv index`)
 ```
 
-With no index, every session is unindexed: the newest are read within the budget and the footer
-counts the rest. `--frozen` or `--live-bytes 0` answers from the index alone; with no index,
-`--frozen` exits naming `cv index`. An unusable index is always an error. The live read writes
-nothing, so a read-only home is still searchable. A `-q text:` predicate resolves the same way,
-but exits 2 when the live read cannot cover every unindexed session.
+With no index, every session is unindexed and read live (the cost of `cv index`, every time).
+`--frozen` or `--live-bytes 0` answers from the index alone; with no index, `--frozen` exits
+naming `cv index`. An unusable index is always an error. The live read builds its private index
+in a temporary directory and removes it, so a read-only home is still searchable. A `-q text:`
+predicate resolves the same way (all of it); it exits 2 only when a session without an index
+could not be read.
 
-`--scan` matches case-insensitive substrings over the first 256 KiB of each session's exchange,
+`--scan` matches case-insensitive substrings over each session's whole exchange, streamed,
 in discovery order, without operators or ranking, and says so on stderr. Invalid query syntax is
 an error, never a fallback to scanning. `--kind` cannot be combined with `--scan`.
 
@@ -149,7 +157,7 @@ cv index --semantic
 | -------------------------------- | --------------------------------------------------- | -------------------- |
 | `cv index`                       | Build/refresh the full-text index                   | —                    |
 | `cv index --semantic`            | Also build semantic embeddings                      | —                    |
-| `cv search <query>`              | Full-text search (BM25), index plus unindexed suffix | `--limit` (20), `--live-bytes` (256 MiB) |
+| `cv search <query>`              | Full-text search (BM25), index plus unindexed suffix | `--limit` (20), `--live-bytes` (all) |
 | `cv search <query> --semantic`   | Semantic search (no keyword fallback)               | `--limit` (20)       |
 | `cv pack <task>`                 | Fused ranking → relevant spans, as a context bundle | `--limit` (8)        |
 

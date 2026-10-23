@@ -1,13 +1,15 @@
 //! The unindexed suffix: what a full-text search reads live beside the index.
 //!
 //! The index is a cache and the transcripts are the truth. A search therefore answers from the
-//! index plus a bounded live read of every session the index has not seen as it is now: the
+//! index plus a live read of every session the index has not seen as it is now: the
 //! same freshness judgment `cv index` plans with ([`Freshness`]) names them, and each is read
 //! through the same chunking the index writes ([`index_session`]) into a private in-memory
-//! index, from the session's resume mark when it grew (its unread suffix) and whole otherwise:
+//! index on disk, from the session's resume mark when it grew (its unread suffix) and whole otherwise:
 //! `cv index` takes marks at chunk boundaries (every 4 MiB of indexed text, or 32 MiB of source)
 //! and where each read ended, so only what was appended since is read.
-//! Nothing is written: no index, catalog, mark or count; `--frozen` reads nothing live.
+//! The private index lives in a temporary directory removed with it, so its heap is the writer's
+//! arena whatever the read covers. Nothing else is written: no index, catalog, mark or count;
+//! `--frozen` reads nothing live.
 //!
 //! **Ranking.** One scorer: both indexes are ranked by tantivy's BM25 with corpus statistics
 //! summed over the two ([`Union`]), so a live chunk and an indexed chunk with the same text and
@@ -17,7 +19,8 @@
 //! counted in its statistics. A session's score is its best chunk on either side, so merging the
 //! two top-`limit` lists is exact.
 //!
-//! **Budget.** The live read is charged in source bytes: a file-backed session costs what lies
+//! **Budget.** By default every stale session is read ([`LiveRead::All`]). `--live-bytes` bounds
+//! the read ([`LiveRead::Within`]), charged in source bytes: a file-backed session costs what lies
 //! past its mark (its length when read whole), known before reading, and is skipped when it does
 //! not fit what remains. A session in a shared store (a SQLite database holding many sessions)
 //! has no per-session byte length, so it is charged the text it indexes as it goes and is
@@ -26,15 +29,36 @@
 use super::*;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
-/// The default live-read budget: 256 MiB, a day's delta on the host this was measured on
-/// (2026-10-22: 77 transcripts touched in 24 h, 264 MB in all, whole files counted).
-pub const LIVE_BYTES: u64 = 256 << 20;
+/// How much of what the index has not seen a search reads live.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum LiveRead {
+    /// Every stale session: the complete answer, and the default.
+    #[default]
+    All,
+    /// At most this many bytes of source, newest sessions first (`--live-bytes`); the footer
+    /// names what it left out.
+    Within(u64),
+    /// Nothing (`--frozen`): the index alone answers.
+    Frozen,
+}
+
+impl LiveRead {
+    /// The read a search makes: none under `--frozen`, else within `live_bytes` when given,
+    /// else all of it.
+    pub fn of(live_bytes: Option<u64>) -> Self {
+        if cv_core::env::frozen() {
+            Self::Frozen
+        } else {
+            live_bytes.map_or(Self::All, Self::Within)
+        }
+    }
+}
 
 /// What the live read beside the index covered: the facts the search footer states.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Suffix {
-    /// The budget; `None` when nothing was read live (`--frozen`).
-    pub budget: Option<u64>,
+    /// What the search was allowed to read live.
+    pub live: LiveRead,
     /// No index exists yet: every session was unindexed.
     pub no_index: bool,
     /// Sessions whose indexed docs are not current (changed since `cv index`, or never indexed).
@@ -70,11 +94,14 @@ impl Suffix {
             } else {
                 String::new()
             };
+            let of = match self.live {
+                LiveRead::Within(budget) => format!(" of the {} --live-bytes budget", bytes(budget)),
+                LiveRead::All | LiveRead::Frozen => String::new(),
+            };
             format!(
-                "{what} {} session(s) the index has not seen live ({} of the {} --live-bytes budget{resumed})",
+                "{what} {} session(s) the index has not seen live ({}{of}{resumed})",
                 self.read,
                 bytes(self.bytes),
-                bytes(self.budget.unwrap_or(0))
             )
         })
     }
@@ -85,7 +112,7 @@ impl Suffix {
         if unread == 0 {
             return None;
         }
-        if self.budget.is_none() {
+        if self.live == LiveRead::Frozen {
             return Some(format!(
                 "--frozen: the index alone answered; it is ~{} behind for {unread} session(s) — run `cv index`",
                 fmt_age_ns(self.behind_ns)
@@ -162,6 +189,8 @@ impl std::error::Error for OverBudget {}
 
 /// What the index does not describe as it is now, read into a private in-memory index.
 pub(super) struct Live {
+    /// Owns the temporary directory the searcher reads; dropped with it.
+    _index: Index,
     pub(super) f: Fields,
     pub(super) searcher: tantivy::Searcher,
     /// Sessions the live index describes (its meta doc is current), with the first message it
@@ -176,22 +205,24 @@ pub(super) struct Indexed<'a> {
 }
 
 /// Plan the stale sessions of `refs` against the index (absent: every session is unindexed),
-/// and, with a budget, read them live. `refs` are top-level sessions; a folded sub-agent the
+/// and, unless frozen, read them live. `refs` are top-level sessions; a folded sub-agent the
 /// index holds is answered by the index as `cv index --subagents` last saw it.
 pub(super) fn read(
     dir: &Path,
     indexed: Option<Indexed<'_>>,
     refs: &[cv_core::SessionRef],
-    budget: Option<u64>,
+    live: LiveRead,
 ) -> Result<(Option<Live>, Suffix)> {
     let mut suffix = Suffix {
-        budget,
+        live,
         no_index: indexed.is_none(),
         ..Default::default()
     };
     let mut pending = plan(dir, indexed, refs, &mut suffix)?;
-    let Some(budget) = budget else {
-        return Ok((None, suffix));
+    let budget = match live {
+        LiveRead::Frozen => return Ok((None, suffix)),
+        LiveRead::All => u64::MAX,
+        LiveRead::Within(budget) => budget,
     };
     // Newest first: what changed last is what a search most likely means.
     pending.sort_by_key(|p| std::cmp::Reverse((p.job.mtime, p.job.r.updated_at)));
@@ -213,7 +244,7 @@ pub(super) fn read(
     if admitted.is_empty() {
         return Ok((None, suffix));
     }
-    let ram = Index::create_in_ram(build_schema());
+    let ram = Index::create_from_tempdir(build_schema()).context("creating the live suffix's index")?;
     let f = fields_of(&ram.schema())?;
     let mut writer = open_writer(&ram, 50_000_000)?;
     // Metered reads draw on what the known costs left; known costs were reserved above.
@@ -262,7 +293,15 @@ pub(super) fn read(
         return Ok((None, suffix));
     }
     let searcher = ram.reader().context("opening the live suffix")?.searcher();
-    Ok((Some(Live { f, searcher, shadows }), suffix))
+    Ok((
+        Some(Live {
+            _index: ram,
+            f,
+            searcher,
+            shadows,
+        }),
+        suffix,
+    ))
 }
 
 /// The stale sessions of `refs`, each with where its read starts and what it costs; counts them

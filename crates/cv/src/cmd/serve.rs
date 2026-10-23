@@ -524,7 +524,7 @@ fn stats(params: &Query) -> (u16, Value) {
 /// through the other door.
 ///
 /// **The index answers, or says why not.** A missing or unusable index is a 503 naming the cause
-/// and the fix, as `cv search` errors; `scan=1` asks for the head-capped live scan instead
+/// and the fix, as `cv search` errors; `scan=1` asks for the live scan instead
 /// ([`cv_core::scan::live_search_filtered`]). Which path answered rides on `X-Cv-Search-Source` (`index` |
 /// `semantic` | `live`), with a human sentence in `X-Cv-Search-Note` whenever the answer may be
 /// partial (a stale index, a live scan, a truncation). Both headers are CORS-exposed. The body
@@ -586,7 +586,7 @@ fn search(params: &Query, searcher: &cv_search::Searcher) -> Reply {
         scope,
     };
     let live_bytes = match params.unsigned("live_bytes") {
-        Ok(bytes) => bytes.map_or(cv_search::LIVE_BYTES, |b| b as u64),
+        Ok(bytes) => bytes.map(|b| b as u64),
         Err(error) => return bad(400, &error),
     };
     let found = match searcher.search(&q, filter, limit, source, live_bytes) {
@@ -606,7 +606,7 @@ fn search(params: &Query, searcher: &cv_search::Searcher) -> Reply {
         Err(e) => {
             return bad(
                 503,
-                &format!("{e:#} (or add scan=1 for a slow live scan of each session's head)"),
+                &format!("{e:#} (or add scan=1 for a slow live scan of every session)"),
             )
         }
     };
@@ -615,7 +615,7 @@ fn search(params: &Query, searcher: &cv_search::Searcher) -> Reply {
 
     // The note, in this door's words: the scan, its truncation, then whatever the search itself
     // could not promise, joined with `; `.
-    let mut note = scan.then(|| "scan=1: scanned transcripts live, head-capped".to_string());
+    let mut note = scan.then(|| "scan=1: scanned every transcript live".to_string());
     if found.truncated {
         note = Some(format!(
             "{} (stopped at {limit} hits; raise limit for more)",

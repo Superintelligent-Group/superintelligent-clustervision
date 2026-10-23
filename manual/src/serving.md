@@ -146,8 +146,8 @@ curl 'http://127.0.0.1:7777/api/sessions?harness=claude&limit=1'
 The rows `cv search --json` emits (session row plus `score`, `snippet` and the sub-agent
 provenance trio). Params: `q` (required, non-empty), `limit`, `harness`, `cwd`, `kind`
 (`exchange`, `context`, `all`), `live_bytes`, `semantic=1`, `scan=1`. Without an index it answers
-from a live read within `live_bytes` (default 256 MiB); an unusable index is a `503` naming the
-fix. `scan=1` runs `cv search --scan`'s head-capped live scan. `kind` with `semantic=1` or
+from a live read of every session (`live_bytes` bounds it); an unusable index is a `503` naming
+the fix. `scan=1` runs `cv search --scan`'s live scan. `kind` with `semantic=1` or
 `scan=1` is a `400`. `X-Cv-Search-Source` is `index`, `semantic` or `live`; `X-Cv-Search-Note`
 says when the answer may be partial.
 

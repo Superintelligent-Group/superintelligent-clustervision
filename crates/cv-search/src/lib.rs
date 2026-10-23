@@ -107,7 +107,7 @@ pub fn row(hit: &Hit, context: &cv_core::rows::SearchRowContext) -> serde_json::
 }
 
 /// Which path answers a search: the index (authoritative; an empty result is "no match"), the
-/// semantic vectors, or a head-capped live scan of every transcript.
+/// semantic vectors, or a live scan of every transcript.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Source {
     Index,
@@ -128,11 +128,11 @@ impl Source {
 /// Why an answer may be partial. Every door states these in its own words; none is an error.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Note {
-    /// Sessions changed since `cv index` that this search did not read live (over the budget,
+    /// Sessions changed since `cv index` that this search did not read live (over `--live-bytes`,
     /// unreadable, or `--frozen`): the index answered for them as it last saw them.
     Stale(String),
     /// What the search read live beside the index ([`fts::Suffix`]): the sessions, their bytes,
-    /// the budget.
+    /// and the `--live-bytes` budget when one was set.
     Live(String),
     /// Nothing matched, and the index holds no sub-agent transcripts (`cv index --subagents`).
     NoSubagents,
@@ -170,15 +170,15 @@ impl From<SemanticSearch> for Searcher {
 impl Searcher {
     /// Errors are the path's own (an unusable index, an invalid query, a missing model); the
     /// caller adds the door's pointer. Filters apply before ranking. A full-text search answers
-    /// from the index plus a live read of what it has not seen, up to `live_bytes` of source
-    /// ([`LIVE_BYTES`] by default; `--frozen` reads nothing live).
+    /// from the index plus a live read of what it has not seen: all of it by default, at most
+    /// `live_bytes` of source when given, nothing under `--frozen` ([`LiveRead::of`]).
     pub fn search(
         &self,
         query: &str,
         filter: SearchFilter<'_>,
         limit: usize,
         source: Source,
-        live_bytes: u64,
+        live_bytes: Option<u64>,
     ) -> Result<Found> {
         self.search_in(&default_tantivy_dir(), query, filter, limit, source, live_bytes)
     }
@@ -192,7 +192,7 @@ impl Searcher {
         filter: SearchFilter<'_>,
         limit: usize,
         source: Source,
-        live_bytes: u64,
+        live_bytes: Option<u64>,
     ) -> Result<Found> {
         let mut found = Found {
             hits: Vec::new(),
@@ -232,8 +232,8 @@ impl Searcher {
             Source::Index => {
                 let _sources = cv_core::source::read_scope();
                 let refs = cv_core::sessions_for(harness);
-                let budget = (!cv_core::env::frozen()).then_some(live_bytes);
-                let (hits, note, suffix) = fts::search_suffixed(dir, query, limit, filter, budget, &refs)?;
+                let live = LiveRead::of(live_bytes);
+                let (hits, note, suffix) = fts::search_suffixed(dir, query, limit, filter, live, &refs)?;
                 found.hits = hits;
                 if let Some(why) = note {
                     found.notes.push(Note::SnippetsUnavailable(why));
@@ -320,15 +320,15 @@ pub fn text_search_ids_batch(
 }
 
 /// [`text_search_ids_batch`] plus the live suffix the index has not seen (see
-/// [`fts::text_search_ids_suffixed`]); `budget: None` is the index alone.
+/// [`fts::text_search_ids_suffixed`]), as `live` allows.
 pub fn text_search_ids_suffixed(
     dir: impl Into<Option<PathBuf>>,
     queries: &[&str],
-    budget: Option<u64>,
+    live: LiveRead,
     refs: &[cv_core::SessionRef],
 ) -> Result<(Vec<Result<std::collections::HashSet<String>>>, fts::Suffix)> {
     let _sources = cv_core::source::read_scope();
-    fts::text_search_ids_suffixed(&dir.into().unwrap_or_else(default_tantivy_dir), queries, budget, refs)
+    fts::text_search_ids_suffixed(&dir.into().unwrap_or_else(default_tantivy_dir), queries, live, refs)
 }
 
 /// Rank sessions with stored previews; no source transcripts are read.
@@ -384,7 +384,7 @@ pub fn embed_sessions(path: impl Into<Option<PathBuf>>, refs: &[cv_core::Session
     semantic::embed_sessions(&path.into().unwrap_or_else(default_embeddings_path), refs)
 }
 
-pub use fts::{Indexed, Suffix, Unreadable, LIVE_BYTES};
+pub use fts::{Indexed, LiveRead, Suffix, Unreadable};
 /// Explicit lazy semantic state for a long-lived service. One-shot search remains stateless.
 #[cfg(feature = "semantic")]
 pub use semantic::SemanticSearch;
