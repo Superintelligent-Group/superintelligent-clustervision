@@ -141,6 +141,8 @@ are looked up and mean-pooled, with no transformer pass or ONNX runtime. Every s
 embedded up front; queries do a brute-force in-memory cosine scan.
 
 A session's vector embeds the head of its exchange: never the context, never turns a fork copied.
+The head is what the model reads, 512 tokens cut first to 512 × the vocabulary's median token
+length in characters (3,072 for potion-base-8M); `cv index --semantic` prints it.
 `--kind` is full-text only.
 
 The model downloads from the HuggingFace Hub on first use into `~/.cache/huggingface`. For

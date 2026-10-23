@@ -4,6 +4,7 @@
 
 - `cv search`, `/api/search`, MCP search and `-q text:` read every session the index has not seen; `--live-bytes` (`live_bytes`) now only bounds it when given.
 - `cv search --scan` (`scan=1`, `cv pack` without an index) matches each session's whole exchange, streamed, instead of its first 256 KiB.
+- `cv index --semantic` reads each session as far as the model embeds (512 tokens × median token length) and prints it; the 64 KiB head is gone.
 
 ## 0.18.0-rc.3 — 2026-10-23 — the release an agent can trust
 

@@ -387,7 +387,7 @@ pub fn embed_sessions(path: impl Into<Option<PathBuf>>, refs: &[cv_core::Session
 pub use fts::{Indexed, LiveRead, Suffix, Unreadable};
 /// Explicit lazy semantic state for a long-lived service. One-shot search remains stateless.
 #[cfg(feature = "semantic")]
-pub use semantic::SemanticSearch;
+pub use semantic::{embedded_chars, SemanticSearch};
 
 /// Embed the query and rank stored session vectors by cosine similarity (default store).
 #[cfg(feature = "semantic")]

@@ -33,9 +33,9 @@ fn embed_sessions(path: &Path, refs: &[cv_core::SessionRef]) -> Result<usize> {
     embed_with(
         path,
         refs,
-        |r| {
+        |r, head| {
             record(Observed::ReadCorpusDoc);
-            crate::read_corpus_doc(r)
+            crate::read_corpus_doc(r, head)
         },
         |spec| {
             record(Observed::LoadModel);

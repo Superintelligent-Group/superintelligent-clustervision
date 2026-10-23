@@ -221,6 +221,9 @@ pub(crate) fn cmd_index(semantic: bool, rebuild: bool, subagents: bool, strict: 
                 "embedded {e} session(s) → {}",
                 cv_search::default_embeddings_path().display()
             );
+            if let Some(chars) = cv_search::embedded_chars()? {
+                println!("(each vector embeds a session's first {chars} characters: what the model reads)");
+            }
         }
         embedded = Some(e);
     }

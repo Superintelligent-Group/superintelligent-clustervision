@@ -332,6 +332,45 @@ fn artifact_root(paths: &[PathBuf; 3]) -> Result<PathBuf> {
     Ok(parent.to_path_buf())
 }
 
+/// The tokens a vector embeds: model2vec's `encode` limit. Before tokenizing it cuts the text to
+/// this many times the tokenizer's median token length in characters (`truncate_str`), so a
+/// session's vector depends on that many characters of its body and no more.
+const INPUT_TOKENS: usize = 512;
+
+/// The characters of a body the model reads ([`INPUT_TOKENS`] × the median byte length of the
+/// tokenizer's vocabulary, as model2vec computes it), from the model's `tokenizer.json`.
+fn input_chars(model: &Path) -> Result<usize> {
+    let path = model.join("tokenizer.json");
+    let bytes = std::fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
+    #[derive(serde::Deserialize)]
+    struct Tokenizer {
+        model: Model,
+    }
+    #[derive(serde::Deserialize)]
+    struct Model {
+        vocab: Vocab,
+    }
+    #[derive(serde::Deserialize)]
+    #[serde(untagged)]
+    enum Vocab {
+        Map(std::collections::HashMap<String, serde::de::IgnoredAny>),
+        Pieces(Vec<(String, serde::de::IgnoredAny)>),
+    }
+    let tokenizer: Tokenizer =
+        serde_json::from_slice(&bytes).with_context(|| format!("reading the vocabulary of {}", path.display()))?;
+    let mut lens: Vec<usize> = match tokenizer.model.vocab {
+        Vocab::Map(map) => map.keys().map(String::len).collect(),
+        Vocab::Pieces(pieces) => pieces.iter().map(|(piece, _)| piece.len()).collect(),
+    };
+    lens.sort_unstable();
+    Ok(INPUT_TOKENS * lens.get(lens.len() / 2).copied().unwrap_or(1))
+}
+
+/// The characters of each session's body the cached model embeds; `None` without a cached model.
+pub fn embedded_chars() -> Result<Option<usize>> {
+    resolve_model(false)?.map(|spec| input_chars(&spec.path)).transpose()
+}
+
 fn load_model(spec: &ModelSpec) -> Result<StaticModel> {
     anyhow::ensure!(
         spec.reads.fresh(&mut Probe::default()),
@@ -359,10 +398,12 @@ pub fn embed_sessions(path: &Path, refs: &[cv_core::SessionRef]) -> Result<usize
     embed_with(path, refs, crate::read_corpus_doc, load_model, save_store)
 }
 
+/// Read each changed session's body as far as the model reads it: [`input_chars`] characters,
+/// at most four bytes each, so the vector is the one the whole body would give.
 fn embed_with(
     path: &Path,
     refs: &[cv_core::SessionRef],
-    read: impl FnMut(&cv_core::SessionRef) -> Result<(crate::Doc, ReadSet)>,
+    mut read: impl FnMut(&cv_core::SessionRef, usize) -> Result<(crate::Doc, ReadSet)>,
     mut load: impl FnMut(&ModelSpec) -> Result<StaticModel>,
     save: impl FnMut(&Path, &Store) -> Result<()>,
 ) -> Result<usize> {
@@ -373,7 +414,7 @@ fn embed_with(
             refs,
             &model_id(),
             ReadSet::default(),
-            read,
+            |r| read(r, 0),
             |_| anyhow::bail!("empty semantic inventory unexpectedly demanded a model"),
             save,
         );
@@ -383,17 +424,27 @@ fn embed_with(
     let key = spec.as_ref().map_or_else(model_id, |s| s.key.clone());
     let reads = spec.as_ref().map_or_else(ReadSet::default, |s| s.reads.clone());
     let mut model = None;
+    let mut head = None;
     refresh(
         path,
         refs,
         &key,
         reads,
-        read,
+        |r| {
+            let bytes = match head {
+                Some(bytes) => bytes,
+                None => *head.insert(4 * input_chars(&spec.as_ref().context("embedding model is not cached")?.path)?),
+            };
+            read(r, bytes)
+        },
         |bodies| {
             if model.is_none() {
                 model = Some(load(spec.as_ref().context("embedding model is not cached")?)?);
             }
-            Ok(model.as_ref().unwrap().encode(bodies))
+            Ok(model
+                .as_ref()
+                .unwrap()
+                .encode_with_args(bodies, Some(INPUT_TOKENS), 1024))
         },
         save,
     )
@@ -1084,7 +1135,7 @@ mod tests {
                 ReadSet::default(),
                 |r| {
                     let text = text.expect("fresh carrier guard must avoid reading").clone();
-                    let mut sink = crate::semantic_corpus::DocSink::new(cv_core::Resolver::new(None));
+                    let mut sink = crate::semantic_corpus::DocSink::new(cv_core::Resolver::new(None), 64 * 1024);
                     let mut message = cv_core::Message::new(cv_core::Role::User);
                     message.content.push(cv_core::Block::Text { text });
                     sink.message(message);
@@ -1226,7 +1277,7 @@ mod tests {
             &refs,
             "fake",
             ReadSet::default(),
-            crate::read_corpus_doc,
+            |r| crate::read_corpus_doc(r, 64 * 1024),
             |bodies| {
                 count.set(count.get() + bodies.len());
                 assert_eq!(bodies[0].len(), 64 * 1024);
@@ -1296,7 +1347,7 @@ mod tests {
                 &refs,
                 "fake",
                 ReadSet::default(),
-                crate::read_corpus_doc,
+                |r| crate::read_corpus_doc(r, 64 * 1024),
                 |bodies| {
                     calls += 1;
                     assert_eq!(bodies.len(), 1);
@@ -1941,6 +1992,25 @@ mod tests {
             s.meta.push(m);
         }
         s
+    }
+
+    /// The head a vector reads is the model's: 512 tokens × the vocabulary's median byte length
+    /// (model2vec's `truncate_str`), read from either vocabulary layout of `tokenizer.json`.
+    #[test]
+    fn input_chars_is_the_models_input_limit() {
+        let dir = cv_testkit::temp_dir("semantic-input-chars");
+        for (vocab, median) in [
+            (
+                serde_json::json!({"a": 0, "bb": 1, "cccc": 2, "dddddd": 3, "eeeeeeeee": 4}),
+                4,
+            ),
+            (serde_json::json!([["a", 0.0], ["bbb", -1.0], ["cc", -2.0]]), 2),
+        ] {
+            let tokenizer = serde_json::json!({"model": {"type": "WordPiece", "vocab": vocab}});
+            std::fs::write(dir.join("tokenizer.json"), tokenizer.to_string()).unwrap();
+            assert_eq!(input_chars(&dir).unwrap(), INPUT_TOKENS * median);
+        }
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     fn resident_spec(artifact: &Path) -> ModelSpec {
