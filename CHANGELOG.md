@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+**Breaking: commands, MCP, HTTP and JSON.**
+- `cv search --json` (and MCP `search`) prints `{"hits": [...], "total": M}`, not an array; the table footer reads `N of M matches`.
+
+- `/api/search` adds `X-Cv-Search-Total`, every session that matched; its note says `N of M matches` when `limit` cut it.
 - `cv pack --excerpt-bytes N` (default 1600) bounds each excerpt message; the bundle's `Bounds:` line names every bound and what it cut.
 - `CV_PACK_LLM` digests send up to the model's provider-reported context window (was 60K chars), or `--context-bytes N`; the bundle states bytes sent and the limit.
 - A plain `.json` OpenSession document is discovered wherever its top-level version key sits, not only within the first 64 KiB.

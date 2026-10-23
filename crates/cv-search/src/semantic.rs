@@ -706,6 +706,12 @@ impl SemanticSearch {
         }
     }
     pub fn search(&self, query: &str, k: usize, filter: crate::SearchFilter<'_>) -> Result<Vec<Hit>> {
+        Ok(self.search_counted(query, k, filter)?.0)
+    }
+
+    /// [`search`](Self::search), and how many stored sessions the filter admits: every one of
+    /// them is ranked, so that is the number of matches the top `k` are drawn from.
+    pub fn search_counted(&self, query: &str, k: usize, filter: crate::SearchFilter<'_>) -> Result<(Vec<Hit>, usize)> {
         self.inner.search(
             query,
             k,
@@ -756,7 +762,7 @@ impl<M> ResidentState<M> {
         resolve: impl FnOnce() -> Result<Option<ModelSpec>>,
         load: impl FnOnce(&ModelSpec) -> Result<M>,
         encode: impl FnOnce(&M, &str) -> Vec<f32>,
-    ) -> Result<Vec<Hit>> {
+    ) -> Result<(Vec<Hit>, usize)> {
         let path = &self.path;
         let mut before = Probe::default();
         if self
@@ -792,7 +798,7 @@ impl<M> ResidentState<M> {
                 "embedding store changed during search: {}",
                 path.display()
             );
-            return Ok(Vec::new());
+            return Ok((Vec::new(), 0));
         }
         // Resolution checks paths/revisions and artifact metadata, never model bodies.
         let spec = resolve()?.context("embedding model is not cached — run cv index --semantic")?;
@@ -823,6 +829,7 @@ impl<M> ResidentState<M> {
             cached.store.dim
         );
         let hits = rank_filtered(&cached.store, &q, k, filter);
+        let admitted = cached.store.meta.iter().filter(|meta| admits(filter, meta)).count();
         let mut after = Probe::default();
         anyhow::ensure!(
             cached.reads.fresh(&mut after),
@@ -833,7 +840,7 @@ impl<M> ResidentState<M> {
             spec.reads.fresh(&mut after),
             "embedding model artifacts changed during search"
         );
-        Ok(hits)
+        Ok((hits, admitted))
     }
 }
 struct ResidentSearch<M> {
@@ -860,7 +867,7 @@ impl<M> ResidentSearch<M> {
         resolve: impl FnOnce() -> Result<Option<ModelSpec>>,
         load: impl FnOnce(&ModelSpec) -> Result<M>,
         encode: impl FnOnce(&M, &str) -> Vec<f32>,
-    ) -> Result<Vec<Hit>> {
+    ) -> Result<(Vec<Hit>, usize)> {
         let mut state = match self.state.lock() {
             Ok(state) => state,
             Err(poisoned) => {
@@ -945,14 +952,7 @@ fn ranked_rows<'a>(store: &'a Store, q: &[f32], k: usize, filter: crate::SearchF
     let query = CosineQuery::new(q);
     let mut winners = std::collections::BinaryHeap::new();
     for (index, meta) in store.meta.iter().enumerate() {
-        if !filter.harness.is_none_or(|h| meta.session.harness.as_str() == h)
-            || !filter.cwd.is_none_or(|needle| {
-                meta.session
-                    .cwd
-                    .as_ref()
-                    .is_some_and(|cwd| cwd.to_string_lossy().contains(needle))
-            })
-        {
+        if !admits(filter, meta) {
             continue;
         }
         let candidate = RankedRow {
@@ -972,6 +972,17 @@ fn ranked_rows<'a>(store: &'a Store, q: &[f32], k: usize, filter: crate::SearchF
     // Refreshing one source moves its vector row. Resolve ties by stable session identity,
     // so incremental and clean stores return the same ranking and top-k boundary.
     winners.into_sorted_vec()
+}
+
+/// Whether `filter` admits a stored session: its harness, and its cwd containing the needle.
+fn admits(filter: crate::SearchFilter<'_>, meta: &RecordMeta) -> bool {
+    filter.harness.is_none_or(|h| meta.session.harness.as_str() == h)
+        && filter.cwd.is_none_or(|needle| {
+            meta.session
+                .cwd
+                .as_ref()
+                .is_some_and(|cwd| cwd.to_string_lossy().contains(needle))
+        })
 }
 
 fn rank_filtered(store: &Store, q: &[f32], k: usize, filter: crate::SearchFilter<'_>) -> Vec<Hit> {
@@ -2077,7 +2088,11 @@ mod tests {
                 vec![1.0, 0.0]
             }
         };
-        let ask = |query, filter| search.search(query, 1, filter, || Ok(Some(resident_spec(&artifact))), load, encode);
+        let ask = |query, filter| {
+            search
+                .search(query, 1, filter, || Ok(Some(resident_spec(&artifact))), load, encode)
+                .map(|(hits, _)| hits)
+        };
         VECTOR_DECODES.with(|count| count.set(0));
         assert_eq!(ask("horizontal", crate::SearchFilter::default()).unwrap()[0].id, "a");
         assert_eq!(ask("vertical", crate::SearchFilter::default()).unwrap()[0].id, "b");
@@ -2244,7 +2259,8 @@ mod tests {
                             },
                             |_, _| vec![1.0, 0.0],
                         )
-                        .unwrap();
+                        .unwrap()
+                        .0;
                     assert_eq!(hits[0].id, "a");
                     decodes.fetch_add(VECTOR_DECODES.with(|count| count.get()), Ordering::Relaxed);
                 });
@@ -2275,7 +2291,8 @@ mod tests {
                 },
                 |_, _| vec![0.0, 1.0],
             )
-            .unwrap();
+            .unwrap()
+            .0;
         assert_eq!(hits[0].id, "b");
         assert_eq!(loads.load(Ordering::Relaxed), 2);
         assert_eq!(drops.load(Ordering::Relaxed), 1);

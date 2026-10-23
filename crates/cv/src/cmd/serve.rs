@@ -616,11 +616,12 @@ fn search(params: &Query, searcher: &cv_search::Searcher) -> Reply {
     // The note, in this door's words: the scan, its truncation, then whatever the search itself
     // could not promise, joined with `; `.
     let mut note = scan.then(|| "scan=1: scanned every transcript live".to_string());
-    if found.truncated {
-        note = Some(format!(
-            "{} (stopped at {limit} hits; raise limit for more)",
-            note.unwrap_or_default()
-        ));
+    if found.hits.len() < found.total {
+        let cut = format!("{} of {} matches; raise limit for more", found.hits.len(), found.total);
+        note = Some(match note {
+            Some(n) => format!("{n}; {cut}"),
+            None => cut,
+        });
     }
     for n in &found.notes {
         let s = match n {
@@ -638,7 +639,10 @@ fn search(params: &Query, searcher: &cv_search::Searcher) -> Reply {
         });
     }
 
-    let mut headers = vec![("X-Cv-Search-Source", found.source.as_str().to_string())];
+    let mut headers = vec![
+        ("X-Cv-Search-Source", found.source.as_str().to_string()),
+        ("X-Cv-Search-Total", found.total.to_string()),
+    ];
     if let Some(n) = note {
         headers.push(("X-Cv-Search-Note", header_safe(&n)));
     }

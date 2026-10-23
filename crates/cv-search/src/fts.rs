@@ -2757,7 +2757,7 @@ pub(crate) fn search_suffixed(
     filter: crate::SearchFilter<'_>,
     live: LiveRead,
     refs: &[cv_core::SessionRef],
-) -> Result<(Vec<Hit>, Option<String>, Suffix)> {
+) -> Result<Searched> {
     let indexed = if dir.join("meta.json").exists() || live == LiveRead::Frozen {
         Some(query_index(dir)?)
     } else {
@@ -2799,18 +2799,52 @@ pub(crate) fn search_suffixed(
     let indexed_decisions = indexed
         .as_ref()
         .map(|(_, f, searcher)| std::sync::Arc::new(MetadataDecisions::new(searcher, f, filter)));
+    // A side that ranked fewer than `limit` sessions ranked every session it matches; one that
+    // filled `limit` may match more, and is counted by a second, unscored pass over its ids.
+    let mut counts: Vec<(HashSet<String>, Option<crate::session_collector::SessionFilter>)> = Vec::new();
+    let mut exhaustive = true;
     if let (Some((index, f, searcher)), Some(decisions)) = (&indexed, &indexed_decisions) {
         let parsed = live::without_shadowed(f, parse_text_query(index, f, query, filter.scope)?, shadows);
-        for candidate in rank(f, searcher, &*parsed, limit, accept(decisions), &stats)? {
+        let candidates = rank(f, searcher, &*parsed, limit, accept(decisions), &stats)?;
+        if candidates.len() >= limit {
+            exhaustive = false;
+            let ids = searcher
+                .search(&*parsed, &crate::session_collector::SessionIds(f.id))
+                .context("counting matching sessions")?;
+            counts.push((ids, accept(decisions)));
+        }
+        for candidate in candidates {
             keep(candidate, false);
         }
     }
     if let (Some(l), Some(decisions)) = (&live, &live_decisions) {
         let parsed = parse_text_query(l.searcher.index(), &l.f, query, filter.scope)?;
-        for candidate in rank(&l.f, &l.searcher, &*parsed, limit, accept(decisions), &stats)? {
+        let candidates = rank(&l.f, &l.searcher, &*parsed, limit, accept(decisions), &stats)?;
+        if candidates.len() >= limit {
+            exhaustive = false;
+            let ids = l
+                .searcher
+                .search(&*parsed, &crate::session_collector::SessionIds(l.f.id))
+                .context("counting matching live sessions")?;
+            counts.push((ids, accept(decisions)));
+        }
+        for candidate in candidates {
             keep(candidate, true);
         }
     }
+    let total = if exhaustive {
+        ranked.len()
+    } else {
+        let mut matched: HashSet<String> = ranked.keys().cloned().collect();
+        for (ids, admit) in counts {
+            for id in ids {
+                if !matched.contains(&id) && admit.as_ref().map_or(Ok(true), |admit| admit(&id))? {
+                    matched.insert(id);
+                }
+            }
+        }
+        matched.len()
+    };
     let mut ranked: Vec<_> = ranked.into_values().collect();
     ranked.sort_by(|a, b| a.0.cmp(&b.0));
     ranked.truncate(limit);
@@ -2836,7 +2870,21 @@ pub(crate) fn search_suffixed(
         filter.scope,
         &mut hits,
     )?;
-    Ok((hits, note, suffix))
+    Ok(Searched {
+        hits,
+        total,
+        note,
+        suffix,
+    })
+}
+
+/// What [`search_suffixed`] found: the top hits, how many sessions matched in all, the snippet
+/// note, and the live suffix's account.
+pub(crate) struct Searched {
+    pub hits: Vec<Hit>,
+    pub total: usize,
+    pub note: Option<String>,
+    pub suffix: Suffix,
 }
 
 fn ranked_search(
@@ -3256,7 +3304,7 @@ mod tests {
         let dir = tmpdir();
         let baseline = cv_testkit::heap::begin();
         let started = std::time::Instant::now();
-        let (hits, _, suffix) = search_suffixed(
+        let Searched { hits, suffix, .. } = search_suffixed(
             &dir.join("absent"),
             "Inspect",
             10,
@@ -5403,7 +5451,7 @@ mod tests {
             )
         };
         assert_eq!((stale(&refs[0]), stale(&refs[1])), ((true, true), (false, false)));
-        let (hits, _, suffix) = search_suffixed(
+        let Searched { hits, suffix, .. } = search_suffixed(
             &dir,
             "zqalphalate",
             10,
@@ -8400,7 +8448,8 @@ mod tests {
         live: LiveRead,
         refs: &[cv_core::SessionRef],
     ) -> (Vec<(String, f32)>, Suffix) {
-        let (hits, _, suffix) = search_suffixed(dir, query, 10, crate::SearchFilter::default(), live, refs).unwrap();
+        let Searched { hits, suffix, .. } =
+            search_suffixed(dir, query, 10, crate::SearchFilter::default(), live, refs).unwrap();
         (hits.into_iter().map(|h| (h.id, h.score)).collect(), suffix)
     }
 

@@ -48,17 +48,19 @@ fn embed_sessions(path: &Path, refs: &[cv_core::SessionRef]) -> Result<usize> {
     )
 }
 fn semantic_search(path: &Path, query: &str, k: usize) -> Result<Vec<Hit>> {
-    ResidentSearch::new(path.to_path_buf()).search(
-        query,
-        k,
-        crate::SearchFilter::default(),
-        || resolve_model(false),
-        |spec| {
-            record(Observed::LoadModel);
-            load_model(spec)
-        },
-        |model, query| model.encode_single(query),
-    )
+    ResidentSearch::new(path.to_path_buf())
+        .search(
+            query,
+            k,
+            crate::SearchFilter::default(),
+            || resolve_model(false),
+            |spec| {
+                record(Observed::LoadModel);
+                load_model(spec)
+            },
+            |model, query| model.encode_single(query),
+        )
+        .map(|(hits, _)| hits)
 }
 
 fn copy_tree(source: &Path, destination: &Path) {

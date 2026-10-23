@@ -143,13 +143,13 @@ curl 'http://127.0.0.1:7777/api/sessions?harness=claude&limit=1'
 
 #### `GET /api/search`
 
-The rows `cv search --json` emits (session row plus `score`, `snippet` and the sub-agent
-provenance trio). Params: `q` (required, non-empty), `limit`, `harness`, `cwd`, `kind`
+The hits `cv search --json` emits, as an array (session row plus `score`, `snippet` and the
+sub-agent provenance trio); `X-Cv-Search-Total` is its `total`, every session that matched. Params: `q` (required, non-empty), `limit`, `harness`, `cwd`, `kind`
 (`exchange`, `context`, `all`), `live_bytes`, `semantic=1`, `scan=1`. Without an index it answers
 from a live read of every session (`live_bytes` bounds it); an unusable index is a `503` naming
 the fix. `scan=1` runs `cv search --scan`'s live scan. `kind` with `semantic=1` or
 `scan=1` is a `400`. `X-Cv-Search-Source` is `index`, `semantic` or `live`; `X-Cv-Search-Note`
-says when the answer may be partial.
+says when the answer may be partial, and `N of M matches` when `limit` cut it.
 
 #### `GET /api/stats`
 

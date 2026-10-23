@@ -72,6 +72,8 @@ whose default is the complete answer and whose effect, when set, the output stat
 cost-only bound that never changes a result, listed here with its fallback.
 
 Flags, complete by default (the output states a bound the caller set):
+- `cv search --limit` 20 (also `limit`): bounds the hits shown, never the count; the footer says
+  `N of M matches` and `--json` carries `total` (`X-Cv-Search-Total` over HTTP).
 - `--live-bytes` / `live_bytes` (search): unset reads every stale session; set, the footer names
   the budget and what it left out (`fts/live.rs` `LiveRead`).
 - `show` windows and `--max-bytes`; MCP `show` adds none; `observe_stream` `max_messages`
@@ -113,9 +115,8 @@ Cost-only (results identical; fallback at file:line):
   `BODY_LIMIT` 1 MiB (serve.rs:258) refuse a request with a stated 4xx; `DRAIN_LIMIT` decides
   only whether a connection is kept. `sqlite/snapshots.rs` `RECORD_LIMIT` refuses a corrupt record.
 
-Open (not yet decided against the rule; each bounds what the user sees):
-- `cv search --limit` 20.
-- `export/native.rs` `CACHE_BYTES` (below, structural).
+Open (not yet decided against the rule; each bounds what the user sees): none. The exports
+roster cache (`export/native.rs` `CACHE_BYTES`) is structural, above.
 
 Removed mode switches:
 - Watch `METADATA_BYTES` 16 KiB: a completed read's session metadata was kept only under it, so

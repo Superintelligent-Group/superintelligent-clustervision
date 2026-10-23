@@ -332,19 +332,20 @@ pub struct LiveHit {
     pub snippet: String,
 }
 
-/// The result of a live scan: the hits in discovery order, whether the scan stopped early
-/// because it filled `limit` (so a caller can say "there may be more"), and the sources and
-/// sessions it could not read (so a caller can say what it did not search).
+/// The result of a live scan: the first `limit` hits in discovery order, how many sessions
+/// matched in all (so a caller can say "N of M"), and the sources and sessions it could not read
+/// (so a caller can say what it did not search).
 pub struct LiveSearch {
     pub hits: Vec<LiveHit>,
-    pub truncated: bool,
+    pub total: usize,
     pub unreadable: Vec<crate::Skipped>,
 }
 
-/// Case-insensitive substring search across every session's whole searchable exchange,
-/// stopping at `limit` hits.
+/// Case-insensitive substring search across every session's whole searchable exchange: the first
+/// `limit` matches as hits, every match counted. Past `limit` a session is still scanned (to be
+/// counted) but no hit is built for it.
 ///
-/// Caller metadata selection is applied before payload reads and the hit budget.
+/// Caller metadata selection is applied before payload reads.
 pub fn live_search_filtered(
     query: &str,
     want: Option<Harness>,
@@ -355,12 +356,9 @@ pub fn live_search_filtered(
     let needle = query.to_lowercase();
     let mut out = LiveSearch {
         hits: Vec::new(),
-        truncated: false,
+        total: 0,
         unreadable: Vec::new(),
     };
-    if limit == 0 {
-        return Ok(out);
-    }
     for adapter in crate::harness::all() {
         if want.is_some_and(|h| adapter.harness() != h) || adapter.roots().is_empty() {
             continue;
@@ -388,14 +386,13 @@ pub fn live_search_filtered(
             if !sink.matcher.anchored() {
                 continue;
             }
-            out.hits.push(LiveHit {
-                title: crate::label_from(meta.title.as_deref(), sink.first_prompt.as_deref()),
-                snippet: snippet(&excerpt.text, excerpt.at, excerpt.len),
-                session: r,
-            });
-            if out.hits.len() >= limit {
-                out.truncated = true;
-                return Ok(out);
+            out.total += 1;
+            if out.hits.len() < limit {
+                out.hits.push(LiveHit {
+                    title: crate::label_from(meta.title.as_deref(), sink.first_prompt.as_deref()),
+                    snippet: snippet(&excerpt.text, excerpt.at, excerpt.len),
+                    session: r,
+                });
             }
         }
     }
@@ -489,19 +486,16 @@ mod tests {
     }
 
     #[test]
-    fn empty_live_window_skips_sources_and_snippets_saturate_extreme_positions() {
+    fn empty_live_window_counts_matches_and_snippets_saturate_extreme_positions() {
         let world = crate::test_world("live-empty-window");
         world.write_session(
             "match",
             &[serde_json::json!({"type":"user", "message":{"role":"user", "content":"match"}})],
         );
+        // A zero window shows nothing and still counts what matched.
         let results = live_search_filtered("match", Some(Harness::Claude), 0, |_| true).unwrap();
         assert!(results.hits.is_empty());
-        assert!(!results.truncated);
-        assert!(
-            !world.cv_home.join("catalog.db").exists(),
-            "zero window performed discovery/count work"
-        );
+        assert_eq!(results.total, 1);
         assert_eq!(snippet("short", usize::MAX, usize::MAX), "");
         assert_eq!(snippet("short", 0, usize::MAX), "short");
     }

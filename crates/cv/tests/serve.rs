@@ -1163,9 +1163,10 @@ fn serve_search() {
     assert!(
         header_of(&raw, "X-Cv-Search-Note")
             .unwrap_or_default()
-            .contains("stopped at 1 hits"),
+            .contains("1 of 2 matches"),
         "{raw}"
     );
+    assert_eq!(header_of(&raw, "X-Cv-Search-Total").as_deref(), Some("2"), "{raw}");
 
     // A miss is an empty array, never an error.
     let (status, v) = get_json(port, "/api/search?scan=1&q=pangolin");

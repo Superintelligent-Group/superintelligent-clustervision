@@ -250,6 +250,7 @@ enum Cmd {
         query: String,
         #[arg(long)]
         harness: Option<String>,
+        /// Hits to show. Every match is still counted: the footer says `N of M matches`.
         #[arg(long, default_value_t = 20)]
         limit: usize,
         /// Use semantic (embedding) search instead of full-text. Requires `cv index --semantic`
@@ -273,10 +274,11 @@ enum Cmd {
         /// names what the budget left out. 0 (or global --frozen) answers from the index alone.
         #[arg(long, value_name = "BYTES", conflicts_with_all = ["semantic", "scan"])]
         live_bytes: Option<u64>,
-        /// Emit the hits as one JSON array instead of the table — the same hits in the same
-        /// order (--harness/--limit/--semantic respected): a session row (`id, harness, path, cwd,
-        /// title, created_at, updated_at, message_count, size_bytes`) plus `score`, `snippet`, and
-        /// the sub-agent provenance `agent_id`/`parent_id`/`workflow`. Nothing else goes to stdout.
+        /// Emit `{"hits": [...], "total": M}` instead of the table — the same hits in the same
+        /// order (--harness/--limit/--semantic respected), each a session row (`id, harness, path,
+        /// cwd, title, created_at, updated_at, message_count, size_bytes`) plus `score`, `snippet`,
+        /// and the sub-agent provenance `agent_id`/`parent_id`/`workflow`; `total` counts every
+        /// session that matched. Nothing else goes to stdout.
         #[arg(long)]
         json: bool,
     },

@@ -143,12 +143,13 @@ pub enum Note {
 }
 
 /// What one search found: the hits in rank order (or discovery order, live), where they came
-/// from, the degradations, and whether a live scan stopped at the limit.
+/// from, the degradations, and how many sessions matched in all.
 pub struct Found {
     pub hits: Vec<Hit>,
     pub source: Source,
     pub notes: Vec<Note>,
-    pub truncated: bool,
+    /// How many sessions matched in all; `hits` are the first `limit` of them.
+    pub total: usize,
 }
 
 /// The one search operation every door renders: `cv search` and `GET /api/search` call this with
@@ -198,7 +199,7 @@ impl Searcher {
             hits: Vec::new(),
             source,
             notes: Vec::new(),
-            truncated: false,
+            total: 0,
         };
         let harness = filter.harness.and_then(cv_core::Harness::parse);
         if filter.harness.is_some() && harness.is_none() {
@@ -218,7 +219,7 @@ impl Searcher {
                     })
                 })?;
                 found.hits = live.hits.into_iter().map(Hit::from).collect();
-                found.truncated = live.truncated;
+                found.total = live.total;
                 if let Some(first) = live.unreadable.first() {
                     found.notes.push(Note::Unscanned(format!(
                         "{} source(s) could not be read and were not scanned (first: {}: {})",
@@ -233,8 +234,14 @@ impl Searcher {
                 let _sources = cv_core::source::read_scope();
                 let refs = cv_core::sessions_for(harness);
                 let live = LiveRead::of(live_bytes);
-                let (hits, note, suffix) = fts::search_suffixed(dir, query, limit, filter, live, &refs)?;
+                let fts::Searched {
+                    hits,
+                    total,
+                    note,
+                    suffix,
+                } = fts::search_suffixed(dir, query, limit, filter, live, &refs)?;
                 found.hits = hits;
+                found.total = total;
                 if let Some(why) = note {
                     found.notes.push(Note::SnippetsUnavailable(why));
                 }
@@ -246,7 +253,7 @@ impl Searcher {
                 }
             }
             #[cfg(feature = "semantic")]
-            Source::Semantic => found.hits = self.semantic.search(query, limit, filter)?,
+            Source::Semantic => (found.hits, found.total) = self.semantic.search_counted(query, limit, filter)?,
             #[cfg(not(feature = "semantic"))]
             Source::Semantic => anyhow::bail!("semantic search is not built into this cv"),
         }
