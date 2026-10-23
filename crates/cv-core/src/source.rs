@@ -229,12 +229,13 @@ impl std::hash::Hash for Entry {
 /// catalog (its schema stamp and discovery interpretation), the affordance view, the usage
 /// projection rows, the semantic store's header, the full-text index, and every resume mark with
 /// the codec checkpoint inside it. A change to what any of them means, or to a rebuildable
-/// table's shape, bumps it, and every consumer rereads each session once (0.18 is 8: rc.2 wrote
-/// 7, whose Cursor listings counted dropped bubbles; rc.1 wrote 6, whose discovery counted tool
+/// table's shape, bumps it, and every consumer rereads each session once (0.18 is 9: rc.3 wrote
+/// 8, whose full-text index held only the first MiB of a persisted tool output; rc.2 wrote 7,
+/// whose Cursor listings counted dropped bubbles; rc.1 wrote 6, whose discovery counted tool
 /// results as turns; 0.17 wrote 4). Two byte layouts are versioned apart because they are not
 /// rebuilt from transcripts: the task log (durable user data) and a watch cursor (a follower's
 /// position).
-pub const VERSION: u32 = 8;
+pub const VERSION: u32 = 9;
 
 /// Version identity for non-Record read state; keep the same interpretation authority.
 pub(crate) fn consumer_version(consumer: impl std::fmt::Display) -> String {

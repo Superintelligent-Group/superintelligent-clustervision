@@ -2025,16 +2025,19 @@ impl cv_core::projection::Searchable for ChunkSink<'_> {
         // A persisted-output stub points to text absent from the transcript itself.
         if let Some(path) = block.persisted_output_path() {
             self.dependencies.record(Path::new(path));
-            let head = cv_core::lazy::read_head_checked(Path::new(path), PERSISTED_INDEX_CAP)
-                .context("reading persisted search output")?;
-            if let cv_core::lazy::PersistedHead::Unreadable(reason) = &head {
-                anyhow::bail!("reading persisted search output {path}: {reason}");
-            }
-            if let Some(text) = head.indexed_text(path) {
-                for piece in text.as_bytes().chunks(CHUNK_BYTES) {
-                    self.push_chunk(&String::from_utf8_lossy(piece));
+            // The whole output, in chunk-sized pieces: what the model saw through the stub is
+            // searchable to its end.
+            let read = cv_core::lazy::read_pieces_checked(Path::new(path), CHUNK_BYTES, |piece| {
+                self.push_chunk(piece);
+                Ok(())
+            })
+            .context("reading persisted search output")?;
+            match read {
+                cv_core::lazy::PersistedHead::Unreadable(reason) => {
+                    anyhow::bail!("reading persisted search output {path}: {reason}")
                 }
-                self.push_chunk("\n");
+                cv_core::lazy::PersistedHead::Text(_) => self.push_chunk("\n"),
+                cv_core::lazy::PersistedHead::Absent => {}
             }
         }
         Ok(())
@@ -2106,10 +2109,6 @@ impl std::io::Write for JsonChunks<'_, '_> {
         Ok(())
     }
 }
-
-/// How much of a persisted tool output (a sidecar file) to index per stub. A multi-MB dump beyond
-/// this is still on disk (`cv show` prints the path); the index just carries its head.
-const PERSISTED_INDEX_CAP: usize = 1024 * 1024;
 
 impl cv_core::MessageSink for ChunkSink<'_> {
     fn take_error(&mut self) -> Option<anyhow::Error> {
@@ -2968,19 +2967,16 @@ fn hit_of(doc: &TantivyDocument, f: &Fields, id: String, score: f32) -> Hit {
     }
 }
 
-/// Most text we'll scan from a session to find a snippet window. Matches are almost always early;
-/// capping keeps snippeting a multi-GB hit bounded.
-const SNIPPET_SCAN_CAP: usize = 256 * 1024;
-
-/// Generate a snippet for a hit by re-reading **just that one session** (streamed, capped), finding
-/// the first query term, and windowing around it — instead of keeping a stored copy of every body.
+/// Generate a snippet for a hit by re-reading **just that one session** (streamed), finding the
+/// first query term, and windowing around it — instead of keeping a stored copy of every body.
 ///
-/// Streams under [`Demand::with_spans`] and resolves span content **capped at the remaining scan
-/// budget**, so a session fronted by a giant record (e.g. a 700 MB tool dump) costs at most
-/// [`SNIPPET_SCAN_CAP`] here — the old `bulk()` + materialize path owned the whole record before
-/// the cap check could run. Trade-off: a term that only occurs *beyond* the cap inside one giant
-/// field now falls back to the head/preview snippet (it already did for terms in later messages).
+/// Streams under [`Demand::with_spans`] into a [`cv_core::scan::Matcher`], which matches the whole
+/// projection in pieces and keeps only a window, so a session fronted by a giant record (a 700 MB
+/// tool dump) costs its read, not its size in memory; the read stops once every term is placed.
+/// The snippet is the first term (in query order) that occurs anywhere, else the head.
 fn live_snippet(path: &str, id: &str, harness: &str, query: &str, scope: crate::Scope) -> Result<String> {
+    use cv_core::projection::Searchable;
+    use cv_core::scan::Matcher;
     use cv_core::{Block, Demand, Flow, Message, MessageSink, SessionRef};
     let h = cv_core::Harness::parse(harness).with_context(|| format!("unknown harness {harness:?}"))?;
     let adapter = cv_core::harness::for_harness(h).with_context(|| format!("no adapter for {harness}"))?;
@@ -2994,12 +2990,66 @@ fn live_snippet(path: &str, id: &str, harness: &str, query: &str, scope: crate::
     };
 
     struct Acc {
-        head: cv_core::projection::Head,
+        matcher: Matcher,
         resolver: cv_core::Resolver,
         error: Option<anyhow::Error>,
         failed: bool,
         scope: crate::Scope,
         copied_before: Option<chrono::DateTime<chrono::Utc>>,
+    }
+    impl Acc {
+        fn block(&mut self, b: &Block) -> Result<()> {
+            let none = &mut || Ok(());
+            match b {
+                Block::Text { text } | Block::Thinking { text, .. } => {
+                    self.matcher.text(text, &self.resolver, none)?;
+                    self.matcher.push("\n");
+                }
+                Block::ToolUse { name, input, .. } => {
+                    self.matcher.push(name);
+                    self.matcher.push(" ");
+                    self.matcher.json(input, none)?;
+                    self.matcher.push("\n");
+                }
+                Block::ToolResult { content, .. } => {
+                    self.matcher.text(content, &self.resolver, none)?;
+                    self.matcher.push("\n");
+                    if let Some(p) = b.persisted_output_path() {
+                        let matcher = &mut self.matcher;
+                        let read = cv_core::stream::stopped(cv_core::lazy::read_pieces_checked(
+                            std::path::Path::new(p),
+                            64 * 1024,
+                            |piece| {
+                                matcher.push(piece);
+                                if matcher.done() {
+                                    Err(cv_core::stream::Stop.into())
+                                } else {
+                                    Ok(())
+                                }
+                            },
+                        ))?;
+                        match read {
+                            Some(cv_core::lazy::PersistedHead::Text(_)) => matcher.push("\n"),
+                            Some(head) => {
+                                if let Some(note) = head.indexed_text(p) {
+                                    matcher.push(&note);
+                                    matcher.push("\n");
+                                }
+                            }
+                            None => {}
+                        }
+                    }
+                }
+                Block::File { path, source, .. } => {
+                    if let Some(p) = path.as_deref().or(source.as_deref()) {
+                        self.matcher.push(p);
+                        self.matcher.push("\n");
+                    }
+                }
+                Block::Image { .. } => {}
+            }
+            Ok(())
+        }
     }
     impl MessageSink for Acc {
         fn take_error(&mut self) -> Option<anyhow::Error> {
@@ -3019,68 +3069,24 @@ fn live_snippet(path: &str, id: &str, harness: &str, query: &str, scope: crate::
                 return Flow::Continue;
             }
             for b in &m.content {
-                if self.head.full() {
+                if self.matcher.done() {
                     break;
                 }
-                match b {
-                    Block::Text { text } | Block::Thinking { text, .. } => {
-                        if let Err(error) = self.head.try_push_text(text, &self.resolver) {
-                            self.error = Some(error);
-                            return Flow::Stop;
-                        }
-                        self.head.push("\n");
-                    }
-                    Block::ToolUse { name, input, .. } => {
-                        self.head.push(name);
-                        self.head.push(" ");
-                        if let Err(error) = self.head.push_json(input) {
-                            self.error = Some(error);
-                            return Flow::Stop;
-                        }
-                        self.head.push("\n");
-                    }
-                    Block::ToolResult { content, .. } => {
-                        if let Err(error) = self.head.try_push_text(content, &self.resolver) {
-                            self.error = Some(error);
-                            return Flow::Stop;
-                        }
-                        self.head.push("\n");
-                        if let Some(p) = b.persisted_output_path() {
-                            let remaining = self.head.remaining();
-                            if remaining > 0 {
-                                match cv_core::lazy::read_head_checked(std::path::Path::new(p), remaining) {
-                                    Ok(head) => {
-                                        if let Some(t) = head.indexed_text(p) {
-                                            self.head.push(&t);
-                                            self.head.push("\n");
-                                        }
-                                    }
-                                    Err(error) => {
-                                        self.error = Some(error);
-                                        return Flow::Stop;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    Block::File { path, source, .. } => {
-                        if let Some(p) = path.as_deref().or(source.as_deref()) {
-                            self.head.push(p);
-                            self.head.push("\n");
-                        }
-                    }
-                    Block::Image { .. } => {}
+                if let Err(error) = self.block(b) {
+                    self.error = Some(error);
+                    return Flow::Stop;
                 }
             }
-            if self.head.full() {
+            if self.matcher.done() {
                 Flow::Stop
             } else {
                 Flow::Continue
             }
         }
     }
+    let terms = query_terms(query);
     let mut acc = Acc {
-        head: cv_core::projection::Head::new(SNIPPET_SCAN_CAP),
+        matcher: Matcher::new(terms.clone(), terms.len()),
         resolver: cv_core::Resolver::new(Some(PathBuf::from(path))),
         error: None,
         failed: false,
@@ -3094,10 +3100,16 @@ fn live_snippet(path: &str, id: &str, harness: &str, query: &str, scope: crate::
         &mut acc,
         cv_core::stream::Pass::RECORD,
     )?;
-    Ok(make_snippet(acc.head.as_str(), query))
+    let head = acc.matcher.finish();
+    Ok(match (0..terms.len()).find_map(|i| acc.matcher.excerpt_of(i)) {
+        Some(e) => window(&e.text, e.at, e.len),
+        None => self::head(&head.text, 200),
+    })
 }
 
-/// Window the body around the first matching query term; fall back to a head if nothing matches.
+/// Window the body around the first matching query term; fall back to a head if nothing matches:
+/// what [`live_snippet`] computes from its stream, over a whole body.
+#[cfg(test)]
 fn make_snippet(body: &str, query: &str) -> String {
     let lc = body.to_lowercase();
     for term in query_terms(query) {
@@ -4564,9 +4576,13 @@ mod tests {
         let tr = sdir.join("p1").join("tool-results");
         std::fs::create_dir_all(&tr).unwrap();
         let file = tr.join("abc123.txt");
+        // Past a MiB of output (the index once kept only that much of it), and across a piece.
         std::fs::write(
             &file,
-            "line one\nthe zanzibar constant appears only on disk\nline three\n",
+            format!(
+                "line one\n{}\nthe zanzibar constant appears only on disk\nline three\n",
+                "filler ".repeat(3 << 20 >> 3)
+            ),
         )
         .unwrap();
         let stub = format!(
@@ -5713,26 +5729,21 @@ mod tests {
         assert_eq!(hits[0].title.as_deref(), Some("alpha question about tantivy"));
     }
 
-    /// `live_snippet` must stay O(cap) on a session fronted by one giant field: a term within the
-    /// scan cap windows normally, a term hiding *beyond* the cap inside the same giant field falls
-    /// back to the head instead of materializing the whole record to find it.
+    /// `live_snippet` finds a term anywhere, even past a giant field, in a bounded window: the
+    /// snippet is what a whole-body search would give.
     #[test]
-    fn live_snippet_caps_giant_fields() {
+    fn live_snippet_finds_a_term_past_a_giant_field() {
         let sdir = tmpdir();
         let mut body = String::from("zqearly marker then padding ");
-        body.push_str(&"pad ".repeat(2 * SNIPPET_SCAN_CAP / 4)); // 2× the cap of filler
+        body.push_str(&"pad ".repeat(512 * 1024));
         body.push_str(" zqlate");
-        assert!(body.len() > SNIPPET_SCAN_CAP);
         let p = write_claude(&sdir, "giant", &body);
-
-        let snip = live_snippet(&p, "", "claude", "zqearly", crate::Scope::Exchange).expect("snippet");
-        assert!(snip.contains("zqearly"), "in-cap term should window: {snip:?}");
-
-        let snip = live_snippet(&p, "", "claude", "zqlate", crate::Scope::Exchange).expect("snippet");
-        assert!(
-            !snip.contains("zqlate") && snip.starts_with("zqearly"),
-            "beyond-cap term must fall back to the head, got: {snip:?}"
-        );
+        for term in ["zqearly", "zqlate", "absentterm"] {
+            let snip = live_snippet(&p, "", "claude", term, crate::Scope::Exchange).expect("snippet");
+            assert_eq!(snip, make_snippet(&format!("{body}\n"), term), "{term}");
+        }
+        let snip = live_snippet(&p, "", "claude", "zqlate", crate::Scope::Exchange).unwrap();
+        assert!(snip.contains("zqlate"), "{snip:?}");
     }
 
     #[test]

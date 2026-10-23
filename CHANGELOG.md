@@ -5,6 +5,7 @@
 - `cv search`, `/api/search`, MCP search and `-q text:` read every session the index has not seen; `--live-bytes` (`live_bytes`) now only bounds it when given.
 - `cv search --scan` (`scan=1`, `cv pack` without an index) matches each session's whole exchange, streamed, instead of its first 256 KiB.
 - `cv index --semantic` reads each session as far as the model embeds (512 tokens × median token length) and prints it; the 64 KiB head is gone.
+- The full-text index holds a persisted tool output whole, not its first MiB, and snippets find a term anywhere; `source::VERSION` 9 rereads once.
 - Hooks read at most 8 MiB of transcript and say what they left unread: `compact` names the tail it read, `start` a row's commit search span.
 - `cv show` on a pipe prints the whole transcript (no 200 KB head+tail guard); MCP `show` adds no default `last`/`max_bytes` window.
 - MCP `observe_stream` returns everything appended by default; `char_cap`, when given, is stated with a `truncated` count.

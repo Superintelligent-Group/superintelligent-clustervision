@@ -21,11 +21,14 @@ use std::path::Path;
 const LEAD: usize = 40;
 /// Bytes an excerpt keeps after its match.
 const TRAIL: usize = 120;
+/// Bytes of the text's start kept for an excerpt when no anchoring needle occurs (200 characters
+/// and one more, of at most four bytes each, and more).
+const HEAD: usize = 1024;
 /// Text is matched in pieces of about this size.
 const PIECE: usize = 4096;
 
-/// Where the first anchoring needle matched: [`LEAD`] bytes before the match (fewer at the start
-/// of the text), the match at `at..at + len`, and up to [`TRAIL`] bytes after it.
+/// Where an anchoring needle first matched: [`LEAD`] bytes before the match (fewer at the start of
+/// the text), the match at `at..at + len`, and up to [`TRAIL`] bytes after it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Excerpt {
     pub text: String,
@@ -40,51 +43,98 @@ impl Excerpt {
 }
 
 /// Case-insensitive substring matching over a stream of text in O(window) memory: which needles
-/// occur anywhere in it, and an [`Excerpt`] around the earliest occurrence of the first
+/// occur anywhere in it, and an [`Excerpt`] around the first occurrence of each of the first
 /// `anchors` needles. Matching lowercases the whole window, so it agrees with
-/// `text.to_lowercase().find(needle)` on the whole text.
+/// `text.to_lowercase().find(needle)` on the whole text: an occurrence is first found in the
+/// window that completes it, which still holds its lead-in.
 pub struct Matcher {
     needles: Vec<String>,
-    anchors: usize,
     found: Vec<bool>,
-    /// The last bytes matched: enough for a needle that straddles two pieces, and the lead-in of
-    /// a match not yet anchored.
+    /// Per anchoring needle: where its first occurrence starts in the text, and its excerpt.
+    excerpts: Vec<Option<(u64, Excerpt)>>,
+    /// The last bytes matched: enough for a needle that straddles two pieces, with its lead-in.
     tail: String,
+    /// Where `tail` starts in the text.
+    tail_at: u64,
     keep: usize,
     /// Undecoded input (a JSON write can end inside a character), matched once a piece is full.
     stage: Vec<u8>,
-    /// The first [`TRAIL`] bytes: the excerpt when no anchoring needle occurs.
+    /// The first [`HEAD`] bytes: the excerpt when no anchoring needle occurs.
     head: String,
-    excerpt: Option<Excerpt>,
 }
 
 impl Matcher {
-    /// Match `needles` (lowercased by the caller); the first `anchors` of them place the excerpt.
+    /// Match `needles` (lowercased by the caller); the first `anchors` of them keep an excerpt.
     pub fn new(needles: Vec<String>, anchors: usize) -> Self {
         // An original character is at most four times its lowercase bytes ('K' is 3 bytes for 1).
         let guard = 4 * needles.iter().map(String::len).max().unwrap_or(0) + 4;
         Self {
             found: vec![false; needles.len()],
-            anchors: anchors.min(needles.len()),
+            excerpts: vec![None; anchors.min(needles.len())],
             needles,
             tail: String::new(),
+            tail_at: 0,
             keep: LEAD + guard,
             stage: Vec::new(),
             head: String::new(),
-            excerpt: None,
         }
     }
 
-    /// Every needle has occurred and the excerpt is complete: the rest of the text changes nothing.
+    /// Every needle has occurred and every excerpt is complete: the rest changes nothing.
     pub fn done(&self) -> bool {
         self.found.iter().all(|f| *f)
-            && (self.anchors == 0 || self.excerpt.as_ref().is_some_and(|e| e.text.len() >= e.wanted()))
-            && self.head.len() >= TRAIL
+            && self
+                .excerpts
+                .iter()
+                .all(|e| e.as_ref().is_some_and(|(_, e)| e.text.len() >= e.wanted()))
+            && self.head.len() >= HEAD
     }
 
     /// Whether needle `i` occurred.
     pub fn found(&self, i: usize) -> bool {
         self.found[i]
+    }
+
+    /// The excerpt of anchoring needle `i`'s first occurrence.
+    pub fn excerpt_of(&self, i: usize) -> Option<&Excerpt> {
+        self.excerpts.get(i)?.as_ref().map(|(_, e)| e)
+    }
+
+    /// The excerpt of the earliest anchoring occurrence, else the text's first [`HEAD`] bytes.
+    pub fn excerpt(&self) -> Excerpt {
+        self.excerpts
+            .iter()
+            .flatten()
+            .min_by_key(|(at, _)| *at)
+            .map(|(_, e)| e.clone())
+            .unwrap_or_else(|| Excerpt {
+                text: self.head.clone(),
+                at: 0,
+                len: 0,
+            })
+    }
+
+    /// Whether an anchoring needle occurred.
+    pub fn anchored(&self) -> bool {
+        self.excerpts.iter().any(Option::is_some)
+    }
+
+    /// Bytes held, at most: the window, a staged piece, the head and the excerpts.
+    pub fn held(&self) -> usize {
+        self.tail.capacity()
+            + self.stage.capacity()
+            + self.head.capacity()
+            + self
+                .excerpts
+                .iter()
+                .flatten()
+                .map(|(_, e)| e.text.capacity())
+                .sum::<usize>()
+    }
+
+    /// Match `text`, a further piece of the stream.
+    pub fn push(&mut self, text: &str) {
+        self.feed(text.as_bytes());
     }
 
     fn feed(&mut self, bytes: &[u8]) {
@@ -107,22 +157,22 @@ impl Matcher {
             Err(_) => {
                 let text = String::from_utf8_lossy(&self.stage).into_owned();
                 self.stage.clear();
-                return self.piece(&text, end);
+                return self.piece(&text);
             }
         };
         let rest = self.stage.split_off(valid);
         let staged = std::mem::replace(&mut self.stage, rest);
         // `valid` ends on a character boundary by construction.
         let text = String::from_utf8(staged).unwrap_or_default();
-        self.piece(&text, end);
+        self.piece(&text);
     }
 
-    fn piece(&mut self, piece: &str, end: bool) {
-        if self.head.len() < TRAIL {
-            let take = ceil_char(piece, TRAIL - self.head.len());
+    fn piece(&mut self, piece: &str) {
+        if self.head.len() < HEAD {
+            let take = ceil_char(piece, HEAD - self.head.len());
             self.head.push_str(&piece[..take]);
         }
-        if let Some(e) = &mut self.excerpt {
+        for (_, e) in self.excerpts.iter_mut().flatten() {
             if e.text.len() < e.wanted() {
                 let take = ceil_char(piece, e.wanted() - e.text.len());
                 e.text.push_str(&piece[..take]);
@@ -130,63 +180,38 @@ impl Matcher {
         }
         let mut window = std::mem::take(&mut self.tail);
         window.push_str(piece);
-        if self.excerpt.is_none() || self.found.iter().any(|f| !f) {
+        if self.found.iter().any(|f| !f) {
             let low = window.to_lowercase();
-            let mut first: Option<std::ops::Range<usize>> = None;
             for (i, needle) in self.needles.iter().enumerate() {
-                if self.found[i] && (self.excerpt.is_some() || i >= self.anchors) {
+                if self.found[i] {
                     continue;
                 }
                 let Some(pos) = low.find(needle.as_str()) else { continue };
                 self.found[i] = true;
-                if self.excerpt.is_none() && i < self.anchors {
+                if let Some(slot) = self.excerpts.get_mut(i) {
                     let range = lowercase_source_range(&window, pos..pos + needle.len());
-                    if first.as_ref().is_none_or(|f| range.start < f.start) {
-                        first = Some(range);
-                    }
+                    let from = floor_char(&window, range.start.saturating_sub(LEAD));
+                    let mut excerpt = Excerpt {
+                        text: String::new(),
+                        at: range.start - from,
+                        len: range.len(),
+                    };
+                    let to = ceil_char(&window, from + excerpt.wanted());
+                    excerpt.text = window[from..to].to_string();
+                    *slot = Some((self.tail_at + range.start as u64, excerpt));
                 }
-            }
-            // A match near the window's end waits for the next piece: a needle not yet complete
-            // there could start earlier. The window keeps it, with its lead-in.
-            if let Some(range) = first.filter(|r| end || r.start + self.keep - LEAD < window.len()) {
-                let from = floor_char(&window, range.start.saturating_sub(LEAD));
-                let mut excerpt = Excerpt {
-                    text: String::new(),
-                    at: range.start - from,
-                    len: range.len(),
-                };
-                let to = ceil_char(&window, from + excerpt.wanted());
-                excerpt.text = window[from..to].to_string();
-                self.excerpt = Some(excerpt);
             }
         }
         let from = ceil_char(&window, window.len().saturating_sub(self.keep));
         window.drain(..from);
+        self.tail_at += from as u64;
         self.tail = window;
     }
 
-    /// End of the text: match what is left, and the excerpt (the text's start when no anchoring
-    /// needle occurred).
+    /// End of the text: match what is staged; then read [`Self::excerpt`] or [`Self::excerpt_of`].
     pub fn finish(&mut self) -> Excerpt {
         self.flush(true);
-        self.excerpt.clone().unwrap_or_else(|| Excerpt {
-            text: self.head.clone(),
-            at: 0,
-            len: 0,
-        })
-    }
-
-    /// Whether the first anchoring needle placed the excerpt.
-    pub fn anchored(&self) -> bool {
-        self.excerpt.is_some()
-    }
-
-    /// Bytes held, at most: the window, a staged piece and the excerpt.
-    pub fn held(&self) -> usize {
-        self.tail.capacity()
-            + self.stage.capacity()
-            + self.head.capacity()
-            + self.excerpt.as_ref().map_or(0, |e| e.text.capacity())
+        self.excerpt()
     }
 }
 
