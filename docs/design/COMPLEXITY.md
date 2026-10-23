@@ -67,30 +67,53 @@ or rewritten. Paths are relative to `crates/`.
 
 ## Surviving thresholds
 
-Budgets (they bound work and say so):
-- `--live-bytes` (search suffix): sessions over the budget are named in the stale note.
-- `LIVE_HAY_BYTES` 256 KiB (`--scan`): stderr says results are head-capped.
-- `PIPE_GUARD_*` (show), MCP `SHOW_DEFAULT_*`, `observe_stream` caps: stated in output.
-- `api/read.rs` `ENTRIES` 1024: one continuation per session read, least recently used out.
-  Past it an evicted session's page costs O(start) and its head O(s); stderr says so once.
-- `source/scope.rs` `RETAINED_BYTES` 16 MiB: per namespace. When a namespace passes it,
-  stderr says so once.
-- `hooks.rs` `COMPACT_FULL_SCAN_MAX` / `COMPACT_TAIL_BYTES` / `COMMIT_TAIL_BYTES`: the hook text
-  names the command to run in full.
-- `EMBED_HEAD_BYTES` 64 KiB: by definition, the vector is computed from the session's head.
-- `usage_cache_floor` 64 KiB: sources under it are re-streamed. That is bounded at 64 KiB per
-  session and is a deliberate CPU trade.
+ember's rule (0.18): no hidden constant decides what the user gets. A limit is either a flag
+whose default is the complete answer and whose effect, when set, the output states; or a
+cost-only bound that never changes a result, listed here with its fallback.
 
-Safety caps (they bound memory, and the fallback is bounded too):
-- `IN_FLIGHT_BYTES` / `DECODED_WINDOW` 2 GiB: an oversized job runs alone.
-  Compressed jobs are charged their decoded size.
-- `DOCUMENT_BYTES`, `COMMIT_EVERY` (drain at 8×): a document is admitted alone.
-- `spill/` `MEMORY_BYTES`, `store/bytes.rs` `MEMORY_LIMIT`, `Selection::RETAINED_BYTES`:
-  memory spills to disk, with the same complexity.
-- `MAP_WINDOW` 8 MiB, `MAPPED_RECORD` 64 KiB, `document/range.rs` `ENDPOINTS`: they cost at
-  most one extra read per traversal.
-- HTTP `MAX_LINE` / `MAX_HEAD` / `BODY_LIMIT`: a request over the limit is rejected.
-- `catalog/reader.rs` Probe reset at 256 refs: one extra stat per 256 refs.
+Flags, complete by default (the output states a bound the caller set):
+- `--live-bytes` / `live_bytes` (search): unset reads every stale session; set, the footer names
+  the budget and what it left out (`fts/live.rs` `LiveRead`).
+- `show` windows and `--max-bytes`; MCP `show` adds none; `observe_stream` `max_messages`
+  (`more_pending`) and `char_cap` (`char_cap`, `truncated` in the output).
+
+Derived from an outside limit, and said so:
+- Semantic head: the model's input, 512 tokens × the vocabulary's median token length
+  (`semantic.rs` `input_chars`); `cv index --semantic` prints it.
+- Hooks: `hooks.rs` `HOOK_READ_BYTES` 8 MiB, from the 100 ms hook latency and ~4.5 ms/MB. The
+  compact hook's text names the tail it read; a start-pack row names its commit search span.
+
+Cost-only (results identical; fallback at file:line):
+- `api/read.rs` `ENTRIES` 1024 continuations, LRU: an evicted read restarts from the session's
+  start (read.rs:194); stderr says so once.
+- `source/scope.rs` `RETAINED_BYTES` 16 MiB per namespace (`ENTRY_BYTES` per entry): past it a
+  value is used but not retained, reloaded on next use (scope.rs:99, :150); stderr says so once.
+  OpenClaw charges `Selection::RETAINED_BYTES` 1 MiB, an admission estimate (openclaw.rs:882).
+- `fts/sweep.rs` `IN_FLIGHT_BYTES` / `DECODED_WINDOW` 2 GiB: an oversized job runs alone
+  (sweep.rs:57). `query/facts.rs` `SOURCE_BYTES` 2 GiB likewise (facts.rs:787).
+- `ingest.rs` `DOCUMENT_BYTES` 64 MiB: a larger document is admitted alone (ingest.rs:52).
+  `COMMIT_EVERY` 256 docs: at 8× the workers drain for a commit (sweep.rs:409).
+- `spill/exact.rs`, `spill/ordered.rs` `MEMORY_BYTES`, `store/bytes.rs` `MEMORY_LIMIT`: memory
+  spills to disk with the same complexity (exact.rs:130, ordered.rs:119, bytes.rs:112).
+- `store/jsonl.rs` `MAP_WINDOW` 8 MiB, `MAPPED_RECORD` 64 KiB (jsonl.rs:543, :650),
+  `document/range.rs` `ENDPOINTS` 1024 (range.rs:66): at most one extra read per traversal.
+- `catalog/reader.rs` probe reset every 256 refs (reader.rs:170): one extra stat per 256.
+- `usage_cache.rs` `COMMIT_BYTES` 16 MiB / 64 sources: a transaction size (usage_cache.rs:505).
+- Chunking and representation, not bounds: `fts.rs` `CHUNK_BYTES`, `CHECKPOINT_*`;
+  `lazy.rs` `INLINE_MAX`; `json_frames.rs` `KEY_BYTES` (cv's own field names);
+  `dataset.rs` `SPAN_CHUNK`, `deferred.rs` `PREFIX_LIMIT`; `scan.rs` window constants.
+- Input guards, never output: HTTP `MAX_LINE` / `MAX_HEAD` (http.rs:275, :313) and the write
+  `BODY_LIMIT` 1 MiB (serve.rs:258) refuse a request with a stated 4xx; `DRAIN_LIMIT` decides
+  only whether a connection is kept. `sqlite/snapshots.rs` `RECORD_LIMIT` refuses a corrupt record.
+
+Open (not yet decided against the rule; each bounds what the user sees):
+- `events.rs` `TARGET_MAX` 300 / `DETAIL_MAX` 200: event rows cut command targets and details
+  (marked `…`; `cv cat` has the whole call).
+- `opensession.rs` `SNIFF_BYTES` 64 KiB: a plain `*.json` naming its version past that is not
+  discovered (`*.opensession.json` always is).
+- `llm.rs` `TRANSCRIPT_BUDGET` 60K chars (distill's model input, head + tail with a marker);
+  `pack.rs` `MSG_RESOLVE_BYTES`, `EXCERPT_*` (a bundle bounded by design); `cv search --limit` 20.
+- `export/native.rs` `CACHE_BYTES` (below, structural).
 
 Removed mode switches:
 - Watch `METADATA_BYTES` 16 KiB: a completed read's session metadata was kept only under it, so
@@ -107,3 +130,11 @@ Removed mode switches:
 - Archive: the 1 MiB resume-state limit.
 - The `.zst` whole-guard charge.
 - The shared inventory budget.
+
+Removed result limits (0.18, ember's rule):
+- Search: the 256 MiB default `LIVE_BYTES` (the live index is now on disk, its heap one arena),
+  `LIVE_HAY_BYTES` 256 KiB per `--scan`ned session, `PERSISTED_INDEX_CAP` 1 MiB per indexed
+  persisted output, `SNIPPET_SCAN_CAP` 256 KiB: all now stream through bounded windows.
+- `EMBED_HEAD_BYTES` 64 KiB; the hooks' three read constants and `START_PACK_MAX`; `show`'s
+  `PIPE_GUARD_*`; MCP `SHOW_DEFAULT_*` and `observe_stream`'s 50 / 16,000 defaults.
+- `usage_cache_floor` 64 KiB: a CPU trade by size; a small source caches as one small record.
