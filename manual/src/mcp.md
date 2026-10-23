@@ -189,18 +189,20 @@ go to stderr); with a terminal on stdin it exits 2 with usage. None scans the fl
 | event · matcher | command | prints |
 |---|---|---|
 | `SessionStart` · `compact` | `cv hook compact` | `additionalContext`: `context compacted (auto, 180,412 tokens) at message N — compaction #k`, then `cv show <id> --pre-compaction k`, `cv show <id> --kind prompt,answer --pre-compaction k` and `cv rewind <id> --at N-1` |
-| `SessionStart` · `startup\|resume` | `cv hook start` | `additionalContext`: up to six of this directory's earlier sessions (id, age, messages, title, the last commit sha its transcript's tail shows) and the count of decisions owed; capped at 4,000 characters |
+| `SessionStart` · `startup\|resume` | `cv hook start` | `additionalContext`: up to six of this directory's earlier sessions (id, age, messages, title, the last commit sha its transcript's tail shows) and the count of decisions owed |
 | `SubagentStart`, `SubagentStop` (`async`) | `cv hook lane` | nothing; appends `{ts, event, session_id, agent_id, agent_type, transcript_path, agent_transcript_path, cwd, last_text}` to `$CLUSTERVISION_HOME/lanes.jsonl` |
 | `UserPromptSubmit` | `cv hook decisions` | `additionalContext` only when `cv task inbox` has decisions owed to `$CV_ENDPOINT` (else `cv`): the count and the commands that answer them |
 | `PreToolUse` · `Edit\|Write` | `cv hook edit` | `permissionDecision: "ask"` with the session id and minutes since, when another session edited this exact path and its transcript changed in the last 30 minutes; nothing (allow) otherwise |
 
-- **compact** gives the exact index and ordinal up to 8 MiB; above, it reads the last 4 MiB
-  for trigger and size and points at `cv show <id> --kind compaction_boundary,compaction_summary`.
+- Hooks answer inside the harness's turn, so each reads at most 8 MiB of transcript (streaming
+  costs ~4.5 ms/MB against a 100 ms budget) and says in its text what it left unread.
+- **compact** gives the exact index and ordinal up to 8 MiB; above, it reads the last 8 MiB for
+  trigger and size, says so, and points at `cv show <id> --kind compaction_boundary,compaction_summary`.
   [`cv show --pre-compaction`](cli.md#cv-show) reads the compacted records;
   [`cv rewind --at`](cli.md#cv-rewind) resumes before them.
 - **start** reads the catalog without a freshness probe: sessions newer than the last `cv ls` /
-  `cv archive sync` are missing. The sha is the last `[branch sha]` line in the transcript's
-  final 512 KiB.
+  `cv archive sync` are missing. The sha is the last `[branch sha]` line in the transcript's tail,
+  the 8 MiB split across the rows; a row with none there says how far back it looked.
 - **Codex** uses the same events; the edit matcher is `apply_patch`, and the guard checks every
   added, updated, removed or moved path. Codex rejects `ask`, so a live conflict is `deny`.
   Threads under one root (`parent_thread_id` headers, or the lane ledger for an unindexed child)

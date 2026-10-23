@@ -316,8 +316,8 @@ fn each_hook_answers_the_docs_payload_for_its_event() {
         "another directory's session is not listed:\n{ctx}"
     );
     assert!(
-        ctx.chars().count() <= 4000,
-        "the start pack stays under its 4,000-char cap (START_PACK_MAX):\n{ctx}"
+        ctx.chars().count() <= 10_000,
+        "the start pack fits the harness's 10,000-char hook context, by the bound on each line:\n{ctx}"
     );
     // Nothing to say, nothing printed.
     let out = hook(
@@ -989,4 +989,31 @@ fn removed_hook_harness_variable_exits_two_with_a_pointer() {
         err.contains("CV_HOOK_HARNESS") && err.contains("cv hooks install codex"),
         "{err}"
     );
+}
+
+/// Past the hooks' 8 MiB read budget the compact hook reads the transcript's tail, and its text
+/// says how much of how large a transcript it read, and that the index is left to `cv show`.
+#[test]
+fn the_compact_hook_names_what_its_budget_left_unread() {
+    let w = World::new("compact-budget");
+    let big = "word ".repeat(2 * 1024 * 1024);
+    w.write_session(
+        "bigsess",
+        &[
+            user("bigsess", "u0", "2026-10-01T10:00:00Z", &big),
+            boundary("b0", "2026-10-01T10:01:00Z"),
+        ],
+    );
+    let out = hook(
+        &w,
+        "compact",
+        &with(common(&w, "bigsess", "SessionStart"), json!({"source": "compact"})),
+        &[],
+    );
+    let ctx = context_of(&out);
+    assert!(
+        ctx.contains("context compacted (auto, 180,412 tokens; the hook read the last 8.0 MB of this 10.0 MB transcript, so the index is not given)"),
+        "{ctx}"
+    );
+    assert!(ctx.contains("--kind compaction_boundary,compaction_summary"), "{ctx}");
 }
