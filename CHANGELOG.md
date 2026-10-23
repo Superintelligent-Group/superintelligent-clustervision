@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.18.0-rc.2 — 2026-10-23 — one write costs one session
 
 **Breaking: commands, MCP, HTTP and JSON.**
 - `message_count` is prompts and replies only: Claude, Cline and Roo stop counting tool results, OpenClaw sub-agent returns; OpenCode counts at `cv index`.

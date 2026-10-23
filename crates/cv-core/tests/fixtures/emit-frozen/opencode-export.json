@@ -1,6 +1,6 @@
 {
-"opencode-drop": {"logical":"156d61f9153c95cef89ccfa9ff7fdfc86b52873d759d46a94fd0fcfe919b9f64"},
-"opencode-native": {"logical":"e9a976bbdaee6d82f7fbc2104ec25dfd5ee427cd4fa473e080b66541167c5f00"},
-"opencode-portable": {"logical":"e2d349197040da6094ab937754c9240778e5003e946a0b21ae11ac28e6830755"},
-"opencode-text": {"logical":"e2d349197040da6094ab937754c9240778e5003e946a0b21ae11ac28e6830755"}
+"opencode-drop": {"logical":"78af33e3e6fccbd678f95beb5b9ae048c459f8d2f0f094d341a874acbbf4a54a"},
+"opencode-native": {"logical":"aed3093a45ec2bc56507a8a51071bac5031f9da724b70d6cf1cb62405de97ba0"},
+"opencode-portable": {"logical":"b52b636d53d99a55237818683528ea22af8fb5556c9d06b0afbddb099141b2da"},
+"opencode-text": {"logical":"b52b636d53d99a55237818683528ea22af8fb5556c9d06b0afbddb099141b2da"}
 }
