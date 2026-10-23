@@ -29,6 +29,9 @@ pub(super) struct Queue {
     pub(super) stopped: bool,
     /// No more groups will arrive.
     pub(super) closed: bool,
+    /// Sessions [`Feed::push`] could not queue: their old baselines could not be invalidated, so
+    /// their docs, baselines and marks stay as they were and a later pass reads them.
+    deferred: Vec<Unreadable>,
 }
 
 /// The largest waiting group that fits. The workload is finite, so a large waiting group cannot
@@ -42,6 +45,7 @@ impl Queue {
             draining: false,
             stopped: false,
             closed: false,
+            deferred: Vec::new(),
         }
     }
     /// Queue one group under its charge ([`job_cost`], taken once here).
@@ -184,13 +188,25 @@ pub(super) struct Feed<'a> {
 
 impl Feed<'_> {
     /// Queue `jobs`, invalidating the old dependency baselines of those that rewrite docs first.
-    /// Fails once the sweep stopped.
-    pub(super) fn push(&self, jobs: Vec<Job>) -> Result<()> {
+    /// When that fails (the catalog cannot be opened or written: out of descriptors, say), the
+    /// jobs that rewrite docs are not run: each is named unreadable for this pass, its docs and
+    /// baseline left for the next. Fails once the sweep stopped.
+    pub(super) fn push(&self, mut jobs: Vec<Job>) -> Result<()> {
         let changing: Vec<_> = jobs.iter().filter(|j| j.fts).map(|j| j.r.clone()).collect();
-        anyhow::ensure!(
-            cv_core::source::invalidate(self.consumer, &changing),
-            "invalidating old search dependency baselines"
-        );
+        if let Err(err) = cv_core::source::invalidate(self.consumer, &changing) {
+            let reason = cv_core::ir::truncate(&format!("invalidating old search dependency baselines: {err:#}"), 512);
+            let (deferred, rest): (Vec<Job>, Vec<Job>) = jobs.into_iter().partition(|j| j.fts);
+            jobs = rest;
+            let mut q = self.queue.lock().unwrap();
+            for job in deferred {
+                eprintln!("cv: index deferred for {} ({}): {reason}", job.r.id, job.r.harness);
+                q.deferred.push(Unreadable {
+                    id: job.r.id,
+                    harness: job.r.harness.to_string(),
+                    reason: reason.clone(),
+                });
+            }
+        }
         let mut by_id: HashMap<String, usize> = HashMap::new();
         let mut groups: Vec<Vec<Job>> = Vec::new();
         for j in jobs {
@@ -419,6 +435,7 @@ pub(super) fn run_fed(
             }
         }
         let fed = fed.join().unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+        ran.unreadable.append(&mut queue.lock().unwrap().deferred);
         match failure.map_or(fed, Err) {
             Err(e) => Err(e),
             Ok(()) => {

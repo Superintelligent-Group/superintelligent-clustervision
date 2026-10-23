@@ -3,6 +3,7 @@
 ## Unreleased
 
 - `cv index` holds a few open files per worker, not two per compressed Codex rollout, so a cold index stays under macOS's 256-file limit.
+- `cv index` defers a session whose old search baseline cannot be invalidated (catalog unopenable), names it, and completes the pass instead of aborting.
 
 ## 0.18.0-rc.4 — 2026-10-23 — the release an agent can trust
 

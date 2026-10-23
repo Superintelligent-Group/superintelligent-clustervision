@@ -585,7 +585,7 @@ fn report(swept: Swept, rebuild: bool, strict: bool) -> Result<Indexed> {
     );
     if let Some(first) = swept.unreadable.first() {
         let summary = format!(
-            "{unread} session(s) could not be read and stay out of the index until a later pass (first: {} ({}): {})",
+            "{unread} session(s) could not be indexed this pass and are retried by the next (first: {} ({}): {})",
             first.id, first.harness, first.reason
         );
         anyhow::ensure!(!strict, "index incomplete: {summary}");
@@ -2462,10 +2462,7 @@ pub(crate) fn index_refs(dir: &Path, refs: &[cv_core::SessionRef], catalog: bool
     let (index, f) = open_or_create(dir)?;
     let mut writer = open_writer(&index, 50_000_000)?;
     let consumer = source_consumer(dir)?;
-    anyhow::ensure!(
-        cv_core::source::invalidate(&consumer, refs),
-        "invalidating old search dependency baselines"
-    );
+    cv_core::source::invalidate(&consumer, refs).context("invalidating old search dependency baselines")?;
     writer.delete_all_documents().context("clearing index")?;
     let mut probe = cv_core::source::Probe::default();
     let mut dependencies = Vec::new();
@@ -3682,6 +3679,62 @@ mod tests {
         ));
         assert!(cv_core::resume::MarkTable::load().get(&r).is_none());
         assert!(cv_core::catalog::AffordanceTable::load().counts(&r).is_none());
+    }
+
+    /// A pass that cannot invalidate a session's old baseline (the catalog cannot be opened: the
+    /// process is out of descriptors, say) defers that session instead of failing: the pass
+    /// completes and names it, its docs and baseline stand, and the next pass reads it.
+    #[test]
+    fn a_failed_baseline_invalidation_defers_the_session_and_the_pass_completes() {
+        let home = IsolatedHome::new();
+        let path = write_claude(&home.home, "deferred", "zqbefore");
+        let r = cv_core::SessionRef::new("deferred", cv_core::Harness::Claude, &path);
+        let dir = tmpdir();
+        index_refs(&dir, std::slice::from_ref(&r), true).unwrap();
+        let consumer = source_consumer(&dir).unwrap();
+        let baseline = || cv_core::source::Table::<InIndex>::load(&consumer).get(&r).is_some();
+        assert!(baseline(), "the first pass published a baseline");
+
+        write_claude(&home.home, "deferred", "zqafter");
+        let db = home.home.join("catalog.db");
+        let aside = home.home.join("catalog.db.aside");
+        std::fs::rename(&db, &aside).unwrap();
+        std::fs::create_dir(&db).unwrap();
+        let (index, fields) = open_or_create(&dir).unwrap();
+        let mut writer = open_writer(&index, 15_000_000).unwrap();
+        let job = || Job {
+            existing: true,
+            ..ingest_job(r.clone())
+        };
+        let ran = run_jobs(&mut writer, &fields, vec![job()], &consumer).unwrap();
+        writer.commit().unwrap();
+        assert_eq!(ran.changed, 0);
+        assert_eq!(ran.unreadable.len(), 1, "the session is named");
+        assert_eq!(ran.unreadable[0].id, "deferred");
+        assert!(
+            ran.unreadable[0]
+                .reason
+                .contains("invalidating old search dependency baselines"),
+            "{}",
+            ran.unreadable[0].reason
+        );
+        let hits = |q: &str| {
+            let reader = index.reader().unwrap();
+            reader.reload().unwrap();
+            let query = tantivy::query::QueryParser::for_index(&index, vec![fields.body])
+                .parse_query(q)
+                .unwrap();
+            reader.searcher().search(&query, &tantivy::collector::Count).unwrap()
+        };
+        assert_eq!((hits("zqbefore"), hits("zqafter")), (1, 0), "its docs stand");
+
+        std::fs::remove_dir(&db).unwrap();
+        std::fs::rename(&aside, &db).unwrap();
+        assert!(baseline(), "its baseline stands for the next pass");
+        let ran = run_jobs(&mut writer, &fields, vec![job()], &consumer).unwrap();
+        writer.commit().unwrap();
+        assert_eq!((ran.changed, ran.unreadable.len()), (1, 0), "the next pass reads it");
+        assert_eq!((hits("zqbefore"), hits("zqafter")), (0, 1));
     }
 
     #[test]
@@ -7681,8 +7734,14 @@ mod tests {
         assert_eq!(report(swept(1, 0, 0), true, false).unwrap().unreadable.len(), 1);
         assert_eq!(report(swept(0, 1, 0), true, false).unwrap().total, 2);
         for (error, expected) in [
-            (report(swept(1, 0, 0), true, true).unwrap_err(), "could not be read"),
-            (report(swept(0, 0, 0), true, false).unwrap_err(), "could not be read"),
+            (
+                report(swept(1, 0, 0), true, true).unwrap_err(),
+                "could not be indexed this pass",
+            ),
+            (
+                report(swept(0, 0, 0), true, false).unwrap_err(),
+                "could not be indexed this pass",
+            ),
             (
                 report(swept(1, 0, 1), true, false).unwrap_err(),
                 "event publication failed",

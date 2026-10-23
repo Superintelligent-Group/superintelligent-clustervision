@@ -1301,32 +1301,27 @@ pub(crate) fn publish_in<T: Payload>(
 /// Invalidate old baselines before changing consumer output. Failure must prevent that output
 /// write: otherwise an older stamp could certify newer output after dependencies revert.
 #[cfg(feature = "sqlite")]
-pub fn invalidate(consumer: &str, refs: &[SessionRef]) -> bool {
-    if crate::env::frozen() {
-        return false;
-    }
+pub fn invalidate(consumer: &str, refs: &[SessionRef]) -> anyhow::Result<()> {
+    anyhow::ensure!(!crate::env::frozen(), "the catalog is frozen");
     if refs.is_empty() {
-        return true;
+        return Ok(());
     }
-    let clear = || -> Option<()> {
-        let mut conn = open()?;
-        let tx = conn.transaction().ok()?;
-        for r in refs {
-            let (h, id, path) = key(r);
-            tx.execute(
-                "DELETE FROM source_dependencies WHERE consumer=?1 AND harness=?2 AND id=?3 AND path=?4",
-                rusqlite::params![consumer, h, id, path],
-            )
-            .ok()?;
-        }
-        tx.commit().ok()
-    };
-    clear().is_some()
+    let mut conn = open().ok_or_else(|| anyhow::anyhow!("the catalog cannot be opened"))?;
+    let tx = conn.transaction()?;
+    for r in refs {
+        let (h, id, path) = key(r);
+        tx.execute(
+            "DELETE FROM source_dependencies WHERE consumer=?1 AND harness=?2 AND id=?3 AND path=?4",
+            rusqlite::params![consumer, h, id, path],
+        )?;
+    }
+    tx.commit()?;
+    Ok(())
 }
 
 #[cfg(not(feature = "sqlite"))]
-pub fn invalidate(_consumer: &str, _refs: &[SessionRef]) -> bool {
-    true
+pub fn invalidate(_consumer: &str, _refs: &[SessionRef]) -> anyhow::Result<()> {
+    Ok(())
 }
 
 /// Publish after a consumer whose output lives outside the catalog commits it (its payload is
