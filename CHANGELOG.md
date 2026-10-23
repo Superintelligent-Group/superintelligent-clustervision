@@ -1,10 +1,10 @@
 # Changelog
 
-## Unreleased
+## 0.18.0-rc.4 — 2026-10-23 — the release an agent can trust
 
+**Breaking: commands, MCP, HTTP and JSON.** A removed name exits 2 with a pointer to its replacement.
 **Breaking: commands, MCP, HTTP and JSON.**
 - `cv search --json` (and MCP `search`) prints `{"hits": [...], "total": M}`, not an array; the table footer reads `N of M matches`.
-
 - `/api/search` adds `X-Cv-Search-Total`, every session that matched; its note says `N of M matches` when `limit` cut it.
 - `cv pack --excerpt-bytes N` (default 1600) bounds each excerpt message; the bundle's `Bounds:` line names every bound and what it cut.
 - `CV_PACK_LLM` digests send up to the model's provider-reported context window (was 60K chars), or `--context-bytes N`; the bundle states bytes sent and the limit.
@@ -17,10 +17,6 @@
 - Hooks read at most 8 MiB of transcript and say what they left unread: `compact` names the tail it read, `start` a row's commit search span.
 - `cv show` on a pipe prints the whole transcript (no 200 KB head+tail guard); MCP `show` adds no default `last`/`max_bytes` window.
 - MCP `observe_stream` returns everything appended by default; `char_cap`, when given, is stated with a `truncated` count.
-
-## 0.18.0-rc.3 — 2026-10-23 — the release an agent can trust
-
-**Breaking: commands, MCP, HTTP and JSON.** A removed name exits 2 with a pointer to its replacement.
 - Cursor counts only bubbles a read keeps (capability markers dropped); a composer with external bubble cells counts at `cv index`.
 - `source::VERSION` is 8: listings rediscover once, so rc.2's cached Cursor counts are recounted.
 - `message_count` counts prompts and replies only (no tool results or sub-agent returns) and is `null`, not `0`, until counted: `ls --json`, `/api/sessions`, search rows.
