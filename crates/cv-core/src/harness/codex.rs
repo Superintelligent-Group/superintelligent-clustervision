@@ -2844,7 +2844,7 @@ mod tests {
         let cx = Codex {
             roots: vec![root.join("sessions")],
         };
-        let (handoff, decoded) = crate::codex_handoff::channel(1);
+        let (handoff, decoded) = crate::codex_handoff::channel(1, 1);
         let refs = crate::codex_handoff::within(&Some(handoff), || cx.discover().unwrap());
         assert_eq!(refs.len(), 2);
         let (r, bytes) = decoded.recv().expect("the compressed rollout is handed over");

@@ -99,7 +99,9 @@ Cost-only (results identical; fallback at file:line):
   value is used but not retained, reloaded on next use (scope.rs:99, :150); stderr says so once.
   OpenClaw charges `Selection::RETAINED_BYTES` 1 MiB, an admission estimate (openclaw.rs:882).
 - `fts/sweep.rs` `IN_FLIGHT_BYTES` / `DECODED_WINDOW` 2 GiB: an oversized job runs alone
-  (sweep.rs:57). `query/facts.rs` `SOURCE_BYTES` 2 GiB likewise (facts.rs:787).
+  (sweep.rs:68). `decoded_slots` 2 × workers (`available_parallelism`): decoded rollouts handed
+  ahead, two descriptors each; discovery waits for a free slot (codex_handoff.rs:129).
+  `query/facts.rs` `SOURCE_BYTES` 2 GiB likewise (facts.rs:787).
 - `ingest.rs` `DOCUMENT_BYTES` 64 MiB: a larger document is admitted alone (ingest.rs:52).
   `COMMIT_EVERY` 256 docs: at 8× the workers drain for a commit (sweep.rs:409).
 - `spill/exact.rs`, `spill/ordered.rs` `MEMORY_BYTES`, `store/bytes.rs` `MEMORY_LIMIT`: memory

@@ -450,7 +450,7 @@ pub fn index_all(
 /// Discovery beside [`sweep_decoded`], then the full sweep over what discovery found.
 fn sweep_all(dir: &Path, rebuild: bool, subagents: bool) -> Result<(Swept, Vec<cv_core::SessionRef>)> {
     let sources = cv_core::source::read_scope();
-    let (handoff, decoded) = cv_core::codex_handoff::channel(DECODED_WINDOW);
+    let (handoff, decoded) = cv_core::codex_handoff::channel(DECODED_WINDOW, decoded_slots());
     let (early, refs) = std::thread::scope(|scope| {
         let sources = &sources;
         let discovery = scope.spawn(cv_core::env::carry(move || {

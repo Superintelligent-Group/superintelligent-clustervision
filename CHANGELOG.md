@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- `cv index` holds a few open files per worker, not two per compressed Codex rollout, so a cold index stays under macOS's 256-file limit.
+
 ## 0.18.0-rc.4 — 2026-10-23 — the release an agent can trust
 
 **Breaking: commands, MCP, HTTP and JSON.** A removed name exits 2 with a pointer to its replacement.

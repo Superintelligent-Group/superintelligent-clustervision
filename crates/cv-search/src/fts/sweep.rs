@@ -9,6 +9,13 @@ pub(super) const IN_FLIGHT_BYTES: u64 = 2 << 30;
 /// Decoded bytes discovery may hand to [`sweep_decoded`] ahead of it (a larger rollout alone).
 pub(super) const DECODED_WINDOW: u64 = 2 << 30;
 
+/// Decoded rollouts discovery may hand ahead at once: one being read by each sweep worker and
+/// one waiting for each. A handed rollout keeps two descriptors open (its source and its decoded
+/// copy) until its job is done, so the early sweep holds a few per worker, never one per session.
+pub(super) fn decoded_slots() -> usize {
+    2 * available_workers()
+}
+
 /// The worker queue admits logical-session groups, largest first. Planning chooses one
 /// preferred copy per ID; group reservations bound concurrent source bytes.
 pub(super) struct Queue {
