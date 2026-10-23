@@ -335,8 +335,6 @@ impl Adapter for Claude {
             deferred_wrapper: None,
             // Native spans retain the same full-extra metadata.
             rich_spans: true,
-            // Tiny native transcripts cost less to parse than to validate and replay a ledger.
-            usage_cache_floor: 64 * 1024,
         }
     }
 

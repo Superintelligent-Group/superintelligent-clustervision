@@ -308,7 +308,6 @@ impl Adapter for Hermes {
             // leaves the wrapper in place.
             deferred_wrapper: Some(DEFERRED_WRAPPER),
             rich_spans: false,
-            usage_cache_floor: 0,
         }
     }
 

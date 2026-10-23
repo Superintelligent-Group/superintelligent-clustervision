@@ -393,10 +393,6 @@ pub struct Capabilities {
     /// Whether a [`Demand::RICH`] stream with spans keeps the same full-extra metadata as an
     /// inline one, so a tail can leave large payloads in the source; `false`: read inline.
     pub rich_spans: bool,
-    /// cv's own tuning, not a harness fact: the primary size below which parsing a transcript costs
-    /// less than validating and replaying its usage-cache ledger, so the cache is skipped; 0: always
-    /// use it.
-    pub usage_cache_floor: u64,
 }
 
 impl Capabilities {
@@ -407,7 +403,6 @@ impl Capabilities {
         lane_stops: None,
         deferred_wrapper: None,
         rich_spans: false,
-        usage_cache_floor: 0,
     };
 }
 

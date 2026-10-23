@@ -230,12 +230,6 @@ fn usage_hits(
         return Ok(None);
     };
     #[cfg(feature = "sqlite")]
-    // Below its adapter's floor a transcript costs less to parse than to validate and replay a ledger.
-    let cache = cache.filter(|_| {
-        let floor = adapter.capabilities().usage_cache_floor;
-        floor == 0 || std::fs::metadata(adapter.resume_source(r)).is_ok_and(|metadata| metadata.len() >= floor)
-    });
-    #[cfg(feature = "sqlite")]
     let source = cache.map(|_| crate::source::Probe::default().snapshot(r));
     #[cfg(feature = "sqlite")]
     if let Some(batch) = cache.and_then(|cache| cache.load(r, source.as_ref()?)) {
@@ -938,7 +932,8 @@ mod tests {
 
     #[cfg(feature = "sqlite")]
     #[test]
-    fn tiny_native_sources_parse_without_publishing_usage_cache() -> anyhow::Result<()> {
+    /// A tiny source is cached like any other (no size floor) and replays the same stats.
+    fn tiny_native_sources_are_cached_and_replay_the_same_stats() -> anyhow::Result<()> {
         let world = crate::test_world("token-stats-tiny");
         let path = world.write_session(
             "tiny",
@@ -957,7 +952,7 @@ mod tests {
         assert!(usage_cache::Cache::new()
             .unwrap()
             .load(&r, &crate::source::Probe::default().snapshot(&r))
-            .is_none());
+            .is_some());
         frozen.check()
     }
 

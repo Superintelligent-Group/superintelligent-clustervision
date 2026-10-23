@@ -258,7 +258,6 @@ impl Adapter for OpenCode {
             lane_stops: None,
             deferred_wrapper: None,
             rich_spans: false,
-            usage_cache_floor: 0,
         }
     }
 
