@@ -30,13 +30,13 @@
 //! 2. **Hand-written, MCP-only** — the two tools with no CLI equivalent, because they block or
 //!    hold a cursor:
 //!    - `await_omen(regex, …)` — block until another agent's session emits a matching message.
-//!    - `observe_stream(cwd_contains?, harness?, since_cursor?, max_messages=50, char_cap?)` — the
+//!    - `observe_stream(cwd_contains?, harness?, since_cursor?, max_messages?, char_cap?)` — the
 //!      non-blocking sibling: drains the *newly-appended* messages since an opaque cursor and
 //!      returns immediately with a fresh cursor, so a senior agent can poll a junior's activity on
-//!      its own cadence. Bounded + read-only.
+//!      its own cadence. Everything appended by default; the caller's bounds are stated in the
+//!      output. Read-only.
 //!
-//! `show` is windowed by default over MCP (`--last 50 --max-bytes 200000`) so a whole transcript is
-//! never what an agent accidentally pulls into its context.
+//! `show` returns what `cv show` does: the whole transcript unless the caller windows it.
 
 use super::mcp_tools::CliTools;
 use anyhow::Context as _;
@@ -600,8 +600,8 @@ fn instructions() -> String {
         "clustervision lets you read OTHER agents' sessions across harnesses and time. \
          Start with `ls` (add `cwd` to see what happened — or is happening — in the current project, \
          `query` for the filter calculus) and `search` for a past conversation by content; then `show` \
-         a transcript (windowed by default: `last` 50 messages, `max_bytes` 200000 — pass `first`, \
-         `last`, `range`, `around`+`context` or `max_bytes` to move the window) and `cat` one tool \
+         a transcript (whole by default — pass `first`, `last`, `range`, `around`+`context` or \
+         `max_bytes` to window it) and `cat` one tool \
          call's full output by its tool_use_id. `pack` builds task-relevant context out of the whole \
          corpus; `doctor` explains why a session's context window keeps filling; `workflow`, `show` \
          with `tree` or `subagents` open up sub-agent forests, and `show` with `kind` reads only what \
@@ -690,15 +690,15 @@ impl NativeTool {
             }),
             Self::ObserveStream => json!(        {
                 "name": self.name(),
-                "description": "The NON-BLOCKING sibling of await_omen: drain the newly-appended messages from another agent's session(s) since an opaque cursor and return IMMEDIATELY with a fresh cursor — so a senior orchestrator can poll a junior agent's live activity on its own cadence (await_omen blocks until ONE regex matches; observe_stream tails the incremental stream of everything). The first call (no cursor) records a baseline and returns no backlog — pass the returned cursor to the next call to get only what was appended since. Read-only (never writes the board); bounded by max_messages + char_cap. Scope it with cwd_contains and/or harness, e.g. observe_stream(cwd_contains='/junior-proj').",
+                "description": "The NON-BLOCKING sibling of await_omen: drain the newly-appended messages from another agent's session(s) since an opaque cursor and return IMMEDIATELY with a fresh cursor — so a senior orchestrator can poll a junior agent's live activity on its own cadence (await_omen blocks until ONE regex matches; observe_stream tails the incremental stream of everything). The first call (no cursor) records a baseline and returns no backlog — pass the returned cursor to the next call to get only what was appended since. Read-only (never writes the board). Returns everything appended unless max_messages or char_cap bounds it. Scope it with cwd_contains and/or harness, e.g. observe_stream(cwd_contains='/junior-proj').",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "cwd_contains": { "type": "string", "description": "Only observe sessions whose recorded cwd contains this substring." },
                         "harness": { "type": "string", "description": "Only observe this harness (any name `cv ls --harness` takes)." },
                         "since_cursor": { "type": "string", "description": "Opaque cursor from a previous observe_stream call. Omit on the first call to start from the current tail (baseline; returns no messages)." },
-                        "max_messages": { "type": "number", "description": "Max messages to return this call (default 50). Remaining unread messages are reported as more_pending; poll again with the returned cursor to drain them." },
-                        "char_cap": { "type": "number", "description": "Optional cap on total characters of message text returned; the last message is truncated to fit (default 16000)." }
+                        "max_messages": { "type": "number", "description": "Max messages to return this call (default: all). Remaining unread messages are reported as more_pending; poll again with the returned cursor to drain them." },
+                        "char_cap": { "type": "number", "description": "Cap on total characters of message text returned (default: none). The message that crosses it is cut, ends in …, and is counted in `truncated`; the cursor moves past it." }
                     }
                 }
             }),
@@ -969,8 +969,11 @@ fn observe_stream(args: &Value, cancelled: Cancellation<'_>) -> anyhow::Result<S
         harness: parse_harness(args)?,
         cwd_contains: arg_str(args, "cwd_contains")?.map(str::to_string),
     };
-    let max_messages = arg_usize(args, "max_messages", 50)?.max(1);
-    let char_cap = arg_usize(args, "char_cap", 16_000)?.max(1);
+    let max_messages = arg_usize(args, "max_messages", usize::MAX)?.max(1);
+    let char_cap = match args.get("char_cap") {
+        None | Some(Value::Null) => None,
+        Some(_) => Some(arg_usize(args, "char_cap", 0)?.max(1)),
+    };
     let prev = arg_str(args, "since_cursor")?.and_then(Cursor::decode);
     let baseline = prev.is_none();
     let mut watcher = match prev {
@@ -983,12 +986,19 @@ fn observe_stream(args: &Value, cancelled: Cancellation<'_>) -> anyhow::Result<S
         baseline,
         max_messages,
         char_cap,
-        |message, resolver, room| {
-            let (mut text, truncated) = cv_core::projection::searchable_prefix_checked(message, resolver, room, check)?;
-            if truncated {
-                text.push('…');
+        |message, resolver, room| match room {
+            None => Ok((
+                cv_core::projection::searchable_text_checked(message, resolver, check)?,
+                false,
+            )),
+            Some(room) => {
+                let (mut text, truncated) =
+                    cv_core::projection::searchable_prefix_checked(message, resolver, room, check)?;
+                if truncated {
+                    text.push('…');
+                }
+                Ok((text, truncated))
             }
-            Ok(text)
         },
         check,
     )
@@ -999,8 +1009,8 @@ fn observe_poll(
     watcher: &mut Watcher,
     baseline: bool,
     max_messages: usize,
-    char_cap: usize,
-    project: impl FnMut(&cv_core::Message, &cv_core::Resolver, usize) -> anyhow::Result<String>,
+    char_cap: Option<usize>,
+    project: impl FnMut(&cv_core::Message, &cv_core::Resolver, Option<usize>) -> anyhow::Result<(String, bool)>,
 ) -> anyhow::Result<String> {
     observe_poll_checked(watcher, baseline, max_messages, char_cap, project, || Ok(()))
 }
@@ -1009,12 +1019,13 @@ fn observe_poll_checked(
     watcher: &mut Watcher,
     baseline: bool,
     max_messages: usize,
-    char_cap: usize,
-    mut project: impl FnMut(&cv_core::Message, &cv_core::Resolver, usize) -> anyhow::Result<String>,
+    char_cap: Option<usize>,
+    mut project: impl FnMut(&cv_core::Message, &cv_core::Resolver, Option<usize>) -> anyhow::Result<(String, bool)>,
     mut check: impl FnMut() -> anyhow::Result<()>,
 ) -> anyhow::Result<String> {
     let mut out_msgs: Vec<Value> = Vec::new();
     let mut chars_used = 0usize;
+    let mut truncated = 0usize;
     let mut projection_error = None;
     let more_pending = !baseline
         && watcher.try_poll(
@@ -1032,12 +1043,15 @@ fn observe_poll_checked(
                 let resolver = cv_core::Resolver::new(Some(r.path.clone()));
                 let mut taken = 0;
                 for m in &ev.new_messages {
-                    let room = char_cap.saturating_sub(chars_used);
-                    if room == 0 {
+                    let room = char_cap.map(|cap| cap.saturating_sub(chars_used));
+                    if room == Some(0) {
                         break;
                     }
                     let text = match project(m, &resolver, room) {
-                        Ok(text) => text,
+                        Ok((text, cut)) => {
+                            truncated += usize::from(cut);
+                            text
+                        }
                         Err(error) => {
                             projection_error = Some(error);
                             break;
@@ -1062,14 +1076,20 @@ fn observe_poll_checked(
     }
 
     check()?;
-    Ok(serde_json::to_string_pretty(&json!({
+    let mut out = json!({
         "baseline": baseline,
         "messages": out_msgs,
         "count": out_msgs.len(),
         "more_pending": more_pending,
         "rereads": watcher.rereads(),
         "cursor": watcher.to_cursor(&READERS).encode(),
-    }))?)
+    });
+    // A caller's char_cap is stated beside what it cut.
+    if let Some(cap) = char_cap {
+        out["char_cap"] = cap.into();
+        out["truncated"] = truncated.into();
+    }
+    Ok(serde_json::to_string_pretty(&out)?)
 }
 
 /// All matchable text in a message: text + thinking + tool-result content.
@@ -1152,18 +1172,19 @@ mod projection_tests {
     fn owned_observe_oracle(watcher: &mut Watcher, cap: usize) -> anyhow::Result<String> {
         let mut rows = Vec::new();
         let mut used = 0usize;
+        let mut cut = 0usize;
         let more = watcher.try_poll(Poll { max: 50, strict: true, ..Poll::default() }, |event| {
             let r=&event.reference; let mut taken=0;
             for m in event.new_messages {
                 let full=message_text(&m).unwrap(); let room=cap.saturating_sub(used);
                 if room==0 { break; }
-                let text=if full.len()>room {format!("{}…",&full[..floor_char(&full,room)])} else {full};
+                let text=if full.len()>room {cut+=1; format!("{}…",&full[..floor_char(&full,room)])} else {full};
                 used+=text.len();
                 rows.push(json!({"harness":r.harness.as_str(),"session_id":r.id,"cwd":r.cwd.as_ref().map(|p|p.to_string_lossy().to_string()),"role":cv_core::render::role_label(m.role),"timestamp":m.timestamp.map(|t|t.to_rfc3339()),"text":text}));taken+=1;
             } taken
         })?;
         Ok(serde_json::to_string_pretty(
-            &json!({"baseline":false,"messages":rows,"count":rows.len(),"more_pending":more,"rereads":watcher.rereads(),"cursor":watcher.to_cursor(&READERS).encode()}),
+            &json!({"baseline":false,"messages":rows,"count":rows.len(),"more_pending":more,"rereads":watcher.rereads(),"cursor":watcher.to_cursor(&READERS).encode(),"char_cap":cap,"truncated":cut}),
         )?)
     }
 
@@ -1178,12 +1199,12 @@ mod projection_tests {
             let mut watcher = Watcher::with_discovery(Filter::default(), true, discover);
             if retained {
                 std::hint::black_box(
-                    observe_poll(&mut watcher, false, 50, 16000, |m, r, cap| {
-                        let (mut text, truncated) = cv_core::projection::searchable_prefix(m, r, cap)?;
+                    observe_poll(&mut watcher, false, 50, Some(16000), |m, r, cap| {
+                        let (mut text, truncated) = cv_core::projection::searchable_prefix(m, r, cap.unwrap())?;
                         if truncated {
                             text.push('…');
                         }
-                        Ok(text)
+                        Ok((text, truncated))
                     })
                     .unwrap(),
                 );
@@ -1236,12 +1257,12 @@ mod projection_tests {
                     let mut watcher = Watcher::with_discovery(Filter::default(), true, discover);
                     let baseline = cv_testkit::heap::begin();
                     let output = if retained {
-                        observe_poll(&mut watcher, false, 50, 16000, |m, r, cap| {
-                            let (mut text, truncated) = cv_core::projection::searchable_prefix(m, r, cap)?;
+                        observe_poll(&mut watcher, false, 50, Some(16000), |m, r, cap| {
+                            let (mut text, truncated) = cv_core::projection::searchable_prefix(m, r, cap.unwrap())?;
                             if truncated {
                                 text.push('…');
                             }
-                            Ok(text)
+                            Ok((text, truncated))
                         })
                         .unwrap()
                     } else {
@@ -1279,12 +1300,12 @@ mod projection_tests {
             let mut old = Watcher::with_discovery(Filter::default(), true, discover);
             let oracle = owned_observe_oracle(&mut old, cap).unwrap();
             let mut watcher = Watcher::with_discovery(Filter::default(), true, discover);
-            let output = observe_poll(&mut watcher, false, 50, cap, |message, resolver, room| {
-                let (mut text, truncated) = cv_core::projection::searchable_prefix(message, resolver, room)?;
+            let output = observe_poll(&mut watcher, false, 50, Some(cap), |message, resolver, room| {
+                let (mut text, truncated) = cv_core::projection::searchable_prefix(message, resolver, room.unwrap())?;
                 if truncated {
                     text.push('…');
                 }
-                Ok(text)
+                Ok((text, truncated))
             })
             .unwrap();
             // Each cursor names its own watcher's reader generations; everything else is equal.
@@ -1295,6 +1316,45 @@ mod projection_tests {
             };
             assert_eq!(without_cursor(&output), without_cursor(&oracle), "cap={cap}");
         }
+    }
+
+    /// With no char_cap a poll returns every appended message whole and states no cap; with one,
+    /// it states the cap and how many messages it cut.
+    #[test]
+    fn observe_is_whole_unless_capped_and_says_what_a_cap_cut() {
+        let world = crate::test_world("observe-whole");
+        let body = "word ".repeat(10_000);
+        world.write_session("observe-whole", &[json!({"type":"assistant", "sessionId":"observe-whole", "uuid":"a", "message":{"role":"assistant","content":body}})]);
+        let poll = |cap: Option<usize>| -> Value {
+            let mut watcher = Watcher::with_discovery(Filter::default(), true, discover);
+            let out = observe_poll_checked(
+                &mut watcher,
+                false,
+                usize::MAX,
+                cap,
+                |m, r, room| match room {
+                    None => Ok((cv_core::projection::searchable_text_checked(m, r, || Ok(()))?, false)),
+                    Some(room) => cv_core::projection::searchable_prefix(m, r, room),
+                },
+                || Ok(()),
+            )
+            .unwrap();
+            serde_json::from_str(&out).unwrap()
+        };
+        let whole = poll(None);
+        assert_eq!(
+            whole["messages"][0]["text"].as_str().unwrap().trim_end(),
+            body.trim_end()
+        );
+        assert!(
+            whole.get("char_cap").is_none() && whole.get("truncated").is_none(),
+            "{whole}"
+        );
+        let capped = poll(Some(100));
+        assert_eq!(
+            (capped["char_cap"].as_u64(), capped["truncated"].as_u64()),
+            (Some(100), Some(1))
+        );
     }
 
     #[test]
@@ -1312,8 +1372,8 @@ mod projection_tests {
                 Some(c) => Watcher::from_cursor(Filter::default(), Cursor::decode(c).unwrap(), discover, &READERS),
                 None => Watcher::with_discovery(Filter::default(), false, discover),
             };
-            let out = observe_poll(&mut watcher, cursor.is_none(), 500, 1_000_000, |m, _, _| {
-                message_text(m)
+            let out = observe_poll(&mut watcher, cursor.is_none(), 500, None, |m, _, _| {
+                Ok((message_text(m)?, false))
             })
             .unwrap();
             let v: Value = serde_json::from_str(&out).unwrap();
@@ -1351,7 +1411,7 @@ mod projection_tests {
             &elsewhere,
         );
         let out: Value = serde_json::from_str(
-            &observe_poll(&mut watcher, false, 500, 1_000_000, |m, _, _| message_text(m)).unwrap(),
+            &observe_poll(&mut watcher, false, 500, None, |m, _, _| Ok((message_text(m)?, false))).unwrap(),
         )
         .unwrap();
         assert_eq!((out["count"].as_u64(), out["rereads"].as_u64()), (Some(12), Some(12)));
@@ -1369,7 +1429,11 @@ mod projection_tests {
         }
         let mut watcher = Watcher::with_discovery(Filter::default(), true, unreadable);
         let before = watcher.to_cursor(&READERS).encode();
-        assert!(observe_poll(&mut watcher, false, 50, 16_000, |m, _, _| message_text(m)).is_err());
+        assert!(observe_poll(&mut watcher, false, 50, Some(16_000), |m, _, _| Ok((
+            message_text(m)?,
+            false
+        )))
+        .is_err());
         assert_eq!(
             watcher.to_cursor(&READERS).encode(),
             before,
@@ -1406,9 +1470,9 @@ mod projection_tests {
             }
             let mut watcher = Watcher::with_discovery(Filter::default(), true, discover);
             let mut demanded = false;
-            let result = observe_poll(&mut watcher, false, 50, 16_000, |_, _, _| {
+            let result = observe_poll(&mut watcher, false, 50, Some(16_000), |_, _, _| {
                 demanded = true;
-                message_text(&source)
+                Ok((message_text(&source)?, false))
             });
             assert!(demanded, "must exercise a demanded callback projection");
             assert!(

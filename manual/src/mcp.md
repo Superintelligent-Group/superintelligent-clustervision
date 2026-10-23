@@ -52,7 +52,7 @@ validation (conflicting options, bad numbers) is a tool error from the child. To
 
 If this page and a live `tools/list` disagree, `tools/list` is right.
 
-## Windows: `show` never dumps a whole transcript by default
+## Windows: `show` returns what you ask for
 
 The [window flags](cli.md) are properties on `show` and `export`:
 
@@ -64,9 +64,8 @@ The [window flags](cli.md) are properties on `show` and `export`:
 | `around` + `context` | message N with K either side (default 5) |
 | `max_bytes` | stop after N bytes of rendered output, then print a `… continue with --range <next>..` line |
 
-Over MCP only, a `show` naming none of these gets `--last 50 --max-bytes 200000`; any selector
-(`max_bytes` alone, `pre_compaction`, a `kind` row view) drops both. The byte budget cuts at
-message boundaries and always admits the first message, so it is not a hard cap.
+A `show` naming none of these returns the whole transcript, as `cv show` does. The byte budget
+cuts at message boundaries and always admits the first message, so it is not a hard cap.
 
 ## The roster
 
@@ -115,8 +114,8 @@ call (no cursor) sets a baseline and returns no backlog.
 | `cwd_contains` | string | — | Only observe sessions whose cwd contains this substring. |
 | `harness` | string | — | Only observe this harness. |
 | `since_cursor` | string | — | Cursor from a previous call. Omit to baseline from the current tail. |
-| `max_messages` | number | `50` | Max messages this call; the rest are flagged `more_pending`. |
-| `char_cap` | number | `16000` | Cap on total characters returned; the last message is truncated to fit. |
+| `max_messages` | number | all | Max messages this call; the rest are flagged `more_pending`. |
+| `char_cap` | number | none | Cap on total characters; the message crossing it ends in `…`, and the output gives `char_cap` and `truncated` (messages cut). |
 
 It writes nothing. The cursor (version 2; a 0.17 cursor rebaselines) holds positions; reader
 state stays in the `cv mcp` process. `rereads` counts sessions reread from their start, once per

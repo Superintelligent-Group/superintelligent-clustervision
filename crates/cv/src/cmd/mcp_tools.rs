@@ -29,14 +29,6 @@ use super::mcp::InvalidParams;
 /// subcommands do (see [`select_tool_commands`]).
 const TOOL_GROUPS: [&str; 4] = ["Read", "Reshape", "Export", "System"];
 
-/// `show`'s MCP-only window defaults: applied when the caller names no selector at all.
-pub(crate) const SHOW_DEFAULT_LAST: u64 = 50;
-pub(crate) const SHOW_DEFAULT_MAX_BYTES: u64 = 200_000;
-
-/// The window selectors from INTERFACE-V2 §2, plus `pre_compaction` (which sets the window
-/// itself, so injecting a default on top of it would conflict).
-const WINDOW_SELECTORS: [&str; 6] = ["first", "last", "range", "around", "max_bytes", "pre_compaction"];
-
 /// One argument of one command, as `cv schema --commands --json` describes it.
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct ArgSpec {
@@ -376,12 +368,10 @@ fn tool_description(cmd: &CommandSpec) -> String {
     let json = if cmd.has_json() { " --json" } else { "" };
     let mut out = format!("{about} (runs `cv {}{json}`).", cmd.name);
     if cmd.tool_name() == "show" {
-        out.push_str(&format!(
-            " Over MCP this windows by default: with none of first/last/range/around/max_bytes \
-             (nor `kind`) given it reads the LAST {SHOW_DEFAULT_LAST} messages capped at \
-             {SHOW_DEFAULT_MAX_BYTES} bytes, so a whole transcript is never pulled in by accident. \
-             Ask for a window explicitly to override."
-        ));
+        out.push_str(
+            " With no first/last/range/around/max_bytes it returns the whole transcript; \
+             a window or byte budget bounds it, and a cut ends with where to continue.",
+        );
     }
     out
 }
@@ -553,34 +543,10 @@ pub(crate) fn build_argv(cmd: &CommandSpec, args: &Value) -> Result<Vec<String>>
         }
     }
 
-    apply_mcp_defaults(cmd, obj, &mut argv);
-
     if cmd.has_json() {
         argv.push("--json".into());
     }
     Ok(argv)
-}
-
-/// `show` without a window selector reads the tail, not the whole transcript (§6). A `kind` view
-/// (what the person said, the compaction seams) is rows, not a transcript: it gets no default.
-fn apply_mcp_defaults(cmd: &CommandSpec, obj: &Map<String, Value>, argv: &mut Vec<String>) {
-    if cmd.tool_name() != "show" {
-        return;
-    }
-    let windowed = WINDOW_SELECTORS
-        .iter()
-        .any(|k| cmd.arg(k).is_some() && present(obj, k).is_some());
-    if windowed || present(obj, "kind").is_some() {
-        return;
-    }
-    if cmd.arg("last").is_some() {
-        argv.push("--last".into());
-        argv.push(SHOW_DEFAULT_LAST.to_string());
-    }
-    if cmd.arg("max_bytes").is_some() {
-        argv.push("--max-bytes".into());
-        argv.push(SHOW_DEFAULT_MAX_BYTES.to_string());
-    }
 }
 
 /// An argument the caller actually supplied (JSON `null` counts as absent).
@@ -662,24 +628,6 @@ mod tests {
                     .unwrap();
             }
         });
-    }
-
-    /// `WINDOW_SELECTORS` is `WindowArgs`' own flags plus `pre_compaction`: a window flag added to
-    /// the shared struct must reach the MCP default-window rule, never a hand copy of the list.
-    #[test]
-    fn window_selectors_are_the_window_args_table() {
-        use clap::Args;
-        let cmd = crate::util::WindowArgs::augment_args(clap::Command::new("window"));
-        let mut table: Vec<&str> = cmd
-            .get_arguments()
-            .map(|a| a.get_id().as_str())
-            .filter(|id| *id != "context")
-            .collect();
-        table.push("pre_compaction");
-        table.sort_unstable();
-        let mut have = WINDOW_SELECTORS.to_vec();
-        have.sort_unstable();
-        assert_eq!(have, table);
     }
 
     fn spec(json_src: &str) -> CommandSpec {
@@ -867,33 +815,13 @@ mod tests {
         });
     }
 
+    /// `show` passes exactly what the caller asked for: no window is the whole transcript.
     #[test]
-    fn show_without_a_selector_gets_the_mcp_window_defaults() {
+    fn show_gets_no_window_the_caller_did_not_ask_for() {
         let argv = build_argv(&show(), &json!({"id": "abc"})).unwrap();
-        assert_eq!(
-            argv,
-            vec!["show", "abc", "--last", "50", "--max-bytes", "200000", "--json"]
-        );
-    }
-
-    #[test]
-    fn an_explicit_selector_suppresses_the_defaults() {
-        for sel in [
-            json!({"id": "abc", "first": 10}),
-            json!({"id": "abc", "range": "10..20"}),
-            json!({"id": "abc", "around": 7, "context": 2}),
-            json!({"id": "abc", "max_bytes": 4096}),
-            json!({"id": "abc", "pre_compaction": 1}),
-        ] {
-            let argv = build_argv(&show(), &sel).unwrap();
-            assert!(!argv.contains(&"--last".to_string()), "{sel} → {argv:?}");
-        }
+        assert_eq!(argv, vec!["show", "abc", "--json"]);
         let argv = build_argv(&show(), &json!({"id": "abc", "last": 3})).unwrap();
         assert_eq!(argv, vec!["show", "abc", "--last", "3", "--json"]);
-    }
-
-    #[test]
-    fn a_kind_view_gets_no_window_default() {
         let argv = build_argv(&show(), &json!({"id": "abc", "kind": "prompt,answer"})).unwrap();
         assert_eq!(argv, vec!["show", "abc", "--kind", "prompt,answer", "--json"]);
     }

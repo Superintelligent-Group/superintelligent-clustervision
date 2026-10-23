@@ -213,8 +213,8 @@ cv show da9174f4 --kind compaction_boundary,compaction_summary   # the compactio
 Labels show the [`kind`](architecture.md#the-unified-ir) when it adds to the role
 (`── system · injected_context/bash_output_audience_note ──`). `--json` is the IR, harness facts
 under `extra["<harness>"]`. A bare `cv show <agent-id>` resolves the sub-agent fleet-wide; several
-parents list `cv show <parent> --agent …` commands. Piped with no window, past ~200 KB, it prints
-the first and last 20 messages.
+parents list `cv show <parent> --agent …` commands. With no window it prints the whole transcript,
+on a terminal or a pipe; a window or `--max-bytes` bounds it.
 
 #### Views
 

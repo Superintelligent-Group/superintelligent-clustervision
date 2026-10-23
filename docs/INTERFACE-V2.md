@@ -230,9 +230,8 @@ description; positionals map to properties named after the argument; repeatable 
 scalar or an array; `long` carries the actual flag spelling. A call runs the same executable as
 `cv <cmd> <args> --json` (or without `--json` for commands that have no JSON form) and returns
 stdout as the first text block and nonempty successful stderr as a second block; a non-zero exit
-returns stderr as the error (or stdout when stderr is empty). Over MCP, transcript `show` defaults to
-`last: 50` and `max_bytes: 200000` when no window, byte cap or `pre_compaction` is supplied; a
-`kind` row view suppresses these defaults. `await_omen` and `observe_stream` keep hand-written
+returns stderr as the error (or stdout when stderr is empty). Over MCP, `show` adds no window the
+caller did not ask for. `await_omen` and `observe_stream` keep hand-written
 schemas. The 0.11 hand-written session tools are gone (`read_session` → `show`, `search_sessions`
 → `search`, `list_sessions`/`project_sessions` → `ls`, `recall` → `pack`, `prune_session` →
 `prune`, `prune_retrieve` → `cat`).

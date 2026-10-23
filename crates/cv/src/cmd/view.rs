@@ -10,15 +10,8 @@ use anyhow::{bail, Context, Result};
 use cv_core::ir::{truncate, Block, Harness, Message, MessageKind, Session, SessionRef};
 use cv_core::render::turn_label;
 use cv_core::Adapter;
-use std::io::{IsTerminal, Write};
+use std::io::Write;
 use std::path::PathBuf;
-
-/// A piped `cv show` with no selector prints at most this much before switching to head + tail:
-/// agents read cv through pipes constantly, and a full transcript in a tool result is the
-/// context-window failure mode this exists to prevent.
-const PIPE_GUARD_BYTES: usize = 200 * 1024;
-/// How many messages each end of the head + tail view shows.
-const PIPE_GUARD_EDGE: usize = 20;
 
 /// The views `cv show` offers instead of the plain transcript (each flag documented on `Cmd::Show`).
 pub(crate) struct ShowView {
@@ -243,10 +236,7 @@ pub(crate) fn cmd_show(
     if json {
         return print_session_json(adapter.as_ref(), &r, range, window.max_bytes, false, None).map(|_| ());
     }
-    // The pipe guard applies only to a selector-less, budget-less render (an explicit window or
-    // budget is the caller saying what they want).
-    let guard = selector.is_none() && pre_compaction.is_none() && window.max_bytes.is_none();
-    render_text(adapter.as_ref(), &r, range, window.max_bytes, guard)
+    render_text(adapter.as_ref(), &r, range, window.max_bytes)
 }
 
 /// The window `show` reads: the selector's, or — under `--pre-compaction <N>` — the span before
@@ -401,63 +391,10 @@ fn print_session_json(
     Ok(stats)
 }
 
-/// The pipe guard's output, from one read: the whole render if it fits [`PIPE_GUARD_BYTES`] or
-/// has too few messages to elide any, else the first and last [`PIPE_GUARD_EDGE`] with a hint.
-fn render_pipe_guarded(adapter: &dyn Adapter, r: &SessionRef, out: &mut impl Write) -> Result<()> {
-    let mut views = PipeGuard::default();
-    stream_session_render_inner(
-        adapter,
-        r,
-        &mut std::io::sink(),
-        show_header,
-        show_message,
-        RenderOpts::default(),
-        Mode::PipeGuard(&mut views),
-    )?;
-    let total = views.total;
-    if !views.over || total <= 2 * PIPE_GUARD_EDGE {
-        // It fits, or there are too few messages to elide any: the size is in the messages.
-        out.write_all(views.header.as_bytes())?;
-        for s in views.fit.iter().chain(&views.head).chain(&views.tail) {
-            out.write_all(s.as_bytes())?;
-        }
-        return Ok(());
-    }
-    out.write_all(views.head_header.as_bytes())?;
-    for s in &views.head {
-        out.write_all(s.as_bytes())?;
-    }
-    writeln!(
-        out,
-        "… {} messages omitted ({total} total; the full render exceeds {} KB on a pipe) — read them with \
-         --first N, --last N, --range A..B, or --around N; --max-bytes N caps output\n",
-        total - 2 * PIPE_GUARD_EDGE,
-        PIPE_GUARD_BYTES / 1024,
-    )?;
-    for s in &views.tail {
-        out.write_all(s.as_bytes())?;
-    }
-    Ok(())
-}
-
-/// The rendered-transcript path of `cv show`, with the pipe guard: a selector-less render to a
-/// non-terminal stdout that would exceed [`PIPE_GUARD_BYTES`] becomes the first and last
-/// [`PIPE_GUARD_EDGE`] messages with a hint line between them.
-fn render_text(
-    adapter: &dyn Adapter,
-    r: &SessionRef,
-    range: Option<Window>,
-    max_bytes: Option<usize>,
-    guard: bool,
-) -> Result<()> {
+/// The rendered-transcript path of `cv show`: the window and byte budget the caller asked for,
+/// else the whole transcript, on a terminal and a pipe alike.
+fn render_text(adapter: &dyn Adapter, r: &SessionRef, range: Option<Window>, max_bytes: Option<usize>) -> Result<()> {
     let stdout = std::io::stdout();
-    if guard && !stdout.is_terminal() {
-        let mut out = std::io::BufWriter::new(stdout.lock());
-        render_pipe_guarded(adapter, r, &mut out)?;
-        out.flush()?;
-        return Ok(());
-    }
-
     let mut out = std::io::BufWriter::new(stdout.lock());
     let outcome = stream_session_render(
         adapter,
@@ -658,7 +595,7 @@ fn show_one_subagent(
         status,
         wf,
     );
-    render_text(adapter, &sub.session, range, window.max_bytes, false)
+    render_text(adapter, &sub.session, range, window.max_bytes)
 }
 
 #[derive(Clone, Copy)]
@@ -1075,49 +1012,10 @@ pub(crate) struct RenderOutcome {
     pub next: Option<usize>,
 }
 
-/// How a render delivers: to its writer, as a complete checked Markdown export, or into the
-/// [`PipeGuard`] views.
-enum Mode<'g> {
+/// How a render delivers: to its writer, or as a complete checked Markdown export.
+enum Mode {
     Plain,
     CheckedMarkdown,
-    PipeGuard(&'g mut PipeGuard),
-}
-
-/// The pipe guard's views of one complete render: the whole of it while it fits
-/// [`PIPE_GUARD_BYTES`] (as a `--max-bytes` render would cut it), and the first and last
-/// [`PIPE_GUARD_EDGE`] messages with the header a `--first` window would print. Messages are held
-/// by count (at most two edges), so the guard reads the session once.
-#[derive(Default)]
-struct PipeGuard {
-    /// A message (not the first) took the render past the budget.
-    over: bool,
-    total: usize,
-    header: String,
-    /// The header as a render stopped at message [`PIPE_GUARD_EDGE`] prints it.
-    head_header: String,
-    /// The rendered messages while the render fits the budget; emptied into the edges once not.
-    fit: Vec<String>,
-    head: Vec<String>,
-    tail: std::collections::VecDeque<String>,
-}
-impl PipeGuard {
-    fn push(&mut self, rendered: String) {
-        self.total += 1;
-        if !self.over {
-            self.fit.push(rendered);
-            return;
-        }
-        for s in std::mem::take(&mut self.fit).into_iter().chain([rendered]) {
-            if self.head.len() < PIPE_GUARD_EDGE {
-                self.head.push(s);
-            } else {
-                self.tail.push_back(s);
-                if self.tail.len() > PIPE_GUARD_EDGE {
-                    self.tail.pop_front();
-                }
-            }
-        }
-    }
 }
 
 /// Render a session to `out` by **streaming** — each message is rendered and written as it arrives,
@@ -1144,14 +1042,10 @@ fn stream_session_render_inner<W: std::io::Write>(
     header: impl Fn(&HeaderInfo) -> String,
     render_msg: impl Fn(&Message) -> Result<String>,
     opts: RenderOpts,
-    mode: Mode<'_>,
+    mode: Mode,
 ) -> Result<RenderOutcome> {
     use cv_core::{Demand, Flow, MessageSink};
     let checked = matches!(mode, Mode::CheckedMarkdown);
-    let views = match mode {
-        Mode::PipeGuard(views) => Some(views),
-        _ => None,
-    };
     anyhow::ensure!(
         !checked || (opts.range.is_none() && opts.max_bytes.is_none()),
         "checked Markdown export requires a complete render"
@@ -1198,7 +1092,6 @@ fn stream_session_render_inner<W: std::io::Write>(
         rendered: usize,
         next: Option<usize>,
         tail: Option<Tail>,
-        views: Option<&'w mut PipeGuard>,
     }
     impl<W: std::io::Write, H: Fn(&HeaderInfo) -> String, R: Fn(&Message) -> Result<String>> Sink<'_, W, H, R> {
         fn apply_meta(&mut self, s: Meta) {
@@ -1260,11 +1153,6 @@ fn stream_session_render_inner<W: std::io::Write>(
             }
             let head = self.header_now();
             self.bytes += head.len();
-            if let Some(views) = self.views.as_mut() {
-                views.header = head;
-                self.frames.printed = true;
-                return;
-            }
             self.frames.start(&head);
             if let Some(mut buffered) = self.checked_buf.take() {
                 if self.frames.result.is_ok() {
@@ -1318,13 +1206,6 @@ fn stream_session_render_inner<W: std::io::Write>(
                 return Flow::Stop;
             }
             let idx = self.window.idx;
-            if idx == PIPE_GUARD_EDGE {
-                // A render that stops here (a `--first` window) prints the header it knows now.
-                let head = (!self.frames.printed && self.views.is_some()).then(|| self.header_now());
-                if let Some(views) = self.views.as_mut() {
-                    views.head_header = head.unwrap_or_else(|| views.header.clone());
-                }
-            }
 
             // Past the window's end: nothing left to render — stop early so we never read the
             // rest of the file (the whole point of a windowed show on a huge session).
@@ -1402,18 +1283,6 @@ fn stream_session_render_inner<W: std::io::Write>(
                 }
             };
             drop(m);
-            if let Some(views) = self.views.as_mut() {
-                // The guard's budget, as a `--max-bytes` render would apply it.
-                views.over |= self.rendered > 0 && self.bytes + rendered.len() > PIPE_GUARD_BYTES;
-                self.bytes += rendered.len();
-                self.rendered += 1;
-                views.push(rendered);
-                let title_known = self.title.is_some() || self.first_prompt.is_some();
-                if !self.frames.printed && Frames::<W>::ready(self.model.is_some(), title_known, self.rendered) {
-                    self.flush_header();
-                }
-                return Flow::Continue;
-            }
             // The byte budget: stop BEFORE the message that would overflow it — unless it is the
             // first in-window message, which always renders so a window never comes back empty.
             if let Some(budget) = self.max_bytes {
@@ -1467,7 +1336,6 @@ fn stream_session_render_inner<W: std::io::Write>(
             metas: Vec::new(),
             first_model: None,
         }),
-        views,
     };
     // Windowed: lazy spans, so out-of-window giant fields arrive as 16-byte handles and only
     // in-window messages materialize (the sink already resolves per message). A full show reads
@@ -1578,109 +1446,6 @@ fn md_message(m: &Message, resolver: &cv_core::Resolver) -> Result<String> {
 mod tests {
     use super::*;
     use cv_core::ir::Role;
-
-    /// The pipe guard reads the session once and prints exactly what its former four passes did:
-    /// a `--max-bytes` render, a count, a `--first` window and a tail window.
-    #[test]
-    fn pipe_guard_reads_once_and_prints_what_four_passes_printed() {
-        struct Replay(Session, std::sync::atomic::AtomicUsize);
-        impl Adapter for Replay {
-            fn harness(&self) -> Harness {
-                Harness::Codex
-            }
-            fn roots(&self) -> Vec<PathBuf> {
-                Vec::new()
-            }
-            fn discover(&self) -> Result<cv_core::Discovered> {
-                Ok(Default::default())
-            }
-            fn stream(
-                &self,
-                _: &SessionRef,
-                _: &cv_core::Demand,
-                sink: &mut dyn cv_core::MessageSink,
-            ) -> Result<Session> {
-                self.1.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                cv_core::stream::replay(self.0.clone(), sink)
-            }
-        }
-        fn four_passes(adapter: &dyn Adapter, r: &SessionRef) -> Vec<u8> {
-            let mut buf = Vec::new();
-            let opts = |range, max_bytes| RenderOpts { range, max_bytes };
-            let probe = stream_session_render(
-                adapter,
-                r,
-                &mut buf,
-                show_header,
-                show_message,
-                opts(None, Some(PIPE_GUARD_BYTES)),
-            )
-            .unwrap();
-            if probe.next.is_none() {
-                return buf;
-            }
-            let total = count_messages(adapter, r).unwrap();
-            let mut out = Vec::new();
-            if total <= 2 * PIPE_GUARD_EDGE {
-                stream_session_render(adapter, r, &mut out, show_header, show_message, RenderOpts::default()).unwrap();
-                return out;
-            }
-            let head = Some(Window::Range(0, Some(PIPE_GUARD_EDGE)));
-            stream_session_render(adapter, r, &mut out, show_header, show_message, opts(head, None)).unwrap();
-            writeln!(
-                out,
-                "… {} messages omitted ({total} total; the full render exceeds {} KB on a pipe) — read them with \
-                 --first N, --last N, --range A..B, or --around N; --max-bytes N caps output\n",
-                total - 2 * PIPE_GUARD_EDGE,
-                PIPE_GUARD_BYTES / 1024,
-            )
-            .unwrap();
-            let tail = Some(Window::Range(total - PIPE_GUARD_EDGE, None));
-            stream_session_render(adapter, r, &mut out, |_| String::new(), show_message, opts(tail, None)).unwrap();
-            out
-        }
-        // (messages, bytes per message, first assistant turn carrying a model, session title)
-        let cases = [
-            (5, 100, 1, Some("small")),
-            (1, 300 * 1024, 0, None),
-            (30, 10 * 1024, 1, Some("over, too few to elide")),
-            (100, 5 * 1024, 1, Some("elided")),
-            (100, 5 * 1024, 21, None),
-            (45, 8 * 1024, 22, None),
-            (2000, 64, 3, None),
-        ];
-        for (n, size, model_at, title) in cases {
-            let mut session = Session::new("guard", Harness::Codex);
-            session.title = title.map(str::to_string);
-            for i in 0..n {
-                let role = if i % 2 == 0 { Role::User } else { Role::Assistant };
-                let mut m = Message::new(role);
-                if role == Role::Assistant && i >= model_at {
-                    m.model = Some("model-x".into());
-                }
-                m.content.push(Block::Text {
-                    text: format!("message {i} {}", "x".repeat(size)).into(),
-                });
-                session.messages.push(m);
-            }
-            let r = SessionRef::new("guard", Harness::Codex, "/nonexistent/guard.jsonl");
-            let adapter = Replay(session, std::sync::atomic::AtomicUsize::new(0));
-            let expected = four_passes(&adapter, &r);
-            adapter.1.store(0, std::sync::atomic::Ordering::Relaxed);
-            let mut actual = Vec::new();
-            render_pipe_guarded(&adapter, &r, &mut actual).unwrap();
-            assert_eq!(
-                adapter.1.load(std::sync::atomic::Ordering::Relaxed),
-                1,
-                "one read for {n}×{size}"
-            );
-            assert_eq!(
-                String::from_utf8(actual).unwrap(),
-                String::from_utf8(expected).unwrap(),
-                "{n}×{size} model_at={model_at}"
-            );
-        }
-    }
 
     #[test]
     fn fleetwide_agent_selection_honors_harness_and_zero_compaction_is_usage_error() {

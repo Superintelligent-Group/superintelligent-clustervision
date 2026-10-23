@@ -6,6 +6,8 @@
 - `cv search --scan` (`scan=1`, `cv pack` without an index) matches each session's whole exchange, streamed, instead of its first 256 KiB.
 - `cv index --semantic` reads each session as far as the model embeds (512 tokens × median token length) and prints it; the 64 KiB head is gone.
 - Hooks read at most 8 MiB of transcript and say what they left unread: `compact` names the tail it read, `start` a row's commit search span.
+- `cv show` on a pipe prints the whole transcript (no 200 KB head+tail guard); MCP `show` adds no default `last`/`max_bytes` window.
+- MCP `observe_stream` returns everything appended by default; `char_cap`, when given, is stated with a `truncated` count.
 
 ## 0.18.0-rc.3 — 2026-10-23 — the release an agent can trust
 
