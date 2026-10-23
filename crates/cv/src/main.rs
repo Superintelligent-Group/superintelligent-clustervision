@@ -797,7 +797,7 @@ enum Cmd {
         #[arg(long = "no-context")]
         no_context: bool,
         /// Fail if the fidelity check finds a loss the target format could have carried. Losses the
-        /// format inherently cannot hold are still only reported under `⚠ lost`.
+        /// format inherently cannot hold are still only reported under `⚠ lossy:`.
         #[arg(long)]
         strict: bool,
         /// Native keeps reasoning where the target holds it; portable demotes plaintext thinking to

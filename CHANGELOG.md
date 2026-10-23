@@ -117,6 +117,7 @@
 - Tool-filtered histograms keep edit counts; native edits reconcile by call and resolved path, never guessing relative paths in compound shell commands.
 
 **Reshaping.**
+- `cv port --strict` help names the actual `⚠ lossy:` output marker for losses the target format cannot hold.
 - `prune`, `rewind` and `port` take `--skills keep|drop|drop-stale` (default `keep`), legacy command-file skills included.
 - `cv prune`, `cv rewind`, `cv adopt` and Claude ports check the staged session resumes before publishing; else they refuse and leave nothing.
 - `cv prune`, `cv rewind` and adoption refuse a non-JSON-record line; `cv prune` refuses an empty transcript; minted ids are UUID v7.
