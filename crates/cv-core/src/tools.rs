@@ -295,6 +295,7 @@ impl MessageSink for CallSink {
                     self.msg_idx,
                     m.timestamp.map(|t| t.timestamp()),
                     self.state.cwd.as_deref(),
+                    true,
                     &mut rows,
                 ) {
                     return self.state.stop(error);

@@ -180,7 +180,7 @@ pub(super) fn command_string(view: JsonView<'_>) -> Result<Option<String>> {
     .then_some(text))
 }
 
-/// Small rolling prefix/substring state; the command itself is never assembled for event rows.
+/// Small rolling prefix/substring state that decides whether a command carries a patch.
 #[derive(Default)]
 struct Trigger {
     tail: Vec<u8>,
@@ -228,11 +228,15 @@ impl Trigger {
     }
 }
 
-pub(super) fn command_rows(view: JsonView<'_>) -> Result<Option<(String, Vec<String>)>> {
-    let mut command = String::new();
+/// A command call's whole command string (only when `whole`; a caller that keeps no command text
+/// streams the chunks for the patch decision and assembles nothing) and the files its patch edits.
+pub(super) fn command_rows(view: JsonView<'_>, whole: bool) -> Result<Option<(Option<String>, Vec<String>)>> {
+    let mut command = whole.then(String::new);
     let mut trigger = Trigger::default();
     let exists = command_chunks(view, |chunk| {
-        command.push_str(chunk);
+        if let Some(command) = &mut command {
+            command.push_str(chunk);
+        }
         trigger.push(chunk);
         Ok(())
     })?;

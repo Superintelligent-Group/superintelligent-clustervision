@@ -354,6 +354,9 @@ impl EventExtractor {
         Ok(())
     }
 
+    /// Classify `m` into `out`. With `details`, rows carry their text whole: a command's string
+    /// and an error's (resolved) text. Without, a caller that only counts or matches tools and
+    /// files reads and assembles neither.
     pub(crate) fn extract(
         &mut self,
         m: &Message,
@@ -416,7 +419,7 @@ fn extract_message(
         match b {
             Block::ToolUse { id, name, input, .. } => {
                 let before = staged.len();
-                extract_call_into(name, input, msg_idx, ts, cwd, &mut staged)?;
+                extract_call_into(name, input, msg_idx, ts, cwd, details.is_some(), &mut staged)?;
                 for event in staged[before..].iter().filter(|event| event.kind == "file_edit") {
                     if let Some(target) = &event.target {
                         extractor.note_target(id, target)?;
@@ -430,7 +433,7 @@ fn extract_message(
                 ..
             } => {
                 // The whole error text: a lazy one is read from the source. A caller that keeps
-                // no detail (`cv tools` counts rows) passes no resolver and reads nothing.
+                // no text (`cv tools` counts rows) passes no resolver and reads nothing.
                 let detail = match details {
                     Some(resolver) => Some(content.try_resolve(resolver)?)
                         .map(|text| text.trim().to_owned())
@@ -464,18 +467,21 @@ fn extract_message(
     Ok(())
 }
 
-/// Classify a borrowed call without cloning its possibly owned, oversized arguments.
+/// Classify a borrowed call without cloning its possibly owned, oversized arguments. A `command`
+/// row's target is the whole command only when `commands`; otherwise it is `None` and the command
+/// is never assembled.
 pub(crate) fn extract_call_into(
     name: &str,
     input: &crate::Json,
     msg_idx: usize,
     ts: Option<i64>,
     cwd: Option<&Path>,
+    commands: bool,
     out: &mut Vec<Event>,
 ) -> Result<()> {
     out.extend(
         input
-            .with_view(|view| classify_tool_view(name, view, cwd))?
+            .with_view(|view| classify_tool_view(name, view, cwd, commands))?
             .into_iter()
             .enumerate()
             .map(|(i, (kind, target))| Event {
@@ -497,6 +503,7 @@ fn classify_tool_view(
     name: &str,
     input: JsonView<'_>,
     cwd: Option<&Path>,
+    commands: bool,
 ) -> Result<Vec<(&'static str, Option<String>)>> {
     let workdir = arguments::file_key(input, &["workdir", "cwd"])?.map(|path| PathBuf::from(absolutize(&path, cwd)));
     let cwd = workdir.as_deref().or(cwd);
@@ -520,8 +527,8 @@ fn classify_tool_view(
         };
         return Ok(vec![(kind, Some(absolutize(&path, cwd)))]);
     }
-    if let Some((prefix, files)) = arguments::command_rows(input)? {
-        let mut rows = vec![("command", Some(prefix))];
+    if let Some((command, files)) = arguments::command_rows(input, commands)? {
+        let mut rows = vec![("command", command)];
         rows.extend(
             files
                 .into_iter()
@@ -1628,12 +1635,12 @@ mod tests {
             let owned: Value = serde_json::from_str(raw).unwrap();
             assert_eq!(
                 source
-                    .with_view(|view| classify_tool_view(name, view, Some(Path::new("/w"))))
+                    .with_view(|view| classify_tool_view(name, view, Some(Path::new("/w")), true))
                     .unwrap(),
                 expected
             );
             assert_eq!(
-                classify_tool_view(name, JsonView::from(&owned), Some(Path::new("/w"))).unwrap(),
+                classify_tool_view(name, JsonView::from(&owned), Some(Path::new("/w")), true).unwrap(),
                 expected
             );
             let mut message = msg(vec![
@@ -1680,9 +1687,11 @@ mod tests {
             let raw = serde_json::to_vec(&value).unwrap();
             std::fs::write(&path, &raw).unwrap();
             let source = Json::source(&path, 0, raw.len() as u64).unwrap();
-            let expected = classify_tool_view(name, JsonView::from(&value), None).unwrap();
+            let expected = classify_tool_view(name, JsonView::from(&value), None, true).unwrap();
             assert_eq!(
-                source.with_view(|view| classify_tool_view(name, view, None)).unwrap(),
+                source
+                    .with_view(|view| classify_tool_view(name, view, None, true))
+                    .unwrap(),
                 expected
             );
             assert!(expected
@@ -1890,6 +1899,23 @@ mod tests {
         }];
         let ev = extract(&m, 0, None, &crate::lazy::Resolver::new(None)).unwrap();
         assert_eq!(ev[0].detail, Some("e".repeat(1000)));
+    }
+
+    #[test]
+    fn a_caller_keeping_no_text_assembles_no_command() {
+        // Query facts and `cv tools` pass no resolver: the command row and its patched files
+        // still land, its text does not.
+        let command = format!(
+            "apply_patch *** Begin Patch\n*** Add File: a.rs\n{}*** End Patch",
+            "+x\n".repeat(10_000)
+        );
+        let m = msg(vec![tool_use("Bash", json!({ "command": command }))]);
+        let mut rows = vec![];
+        EventExtractor::default()
+            .extract(&m, 0, Some(Path::new("/w")), None, None, &mut rows)
+            .unwrap();
+        let rows: Vec<_> = rows.iter().map(|e| (e.kind, e.target.as_deref())).collect();
+        assert_eq!(rows, [("command", None), ("file_edit", Some("/w/a.rs"))]);
     }
 
     #[cfg(feature = "sqlite")]
