@@ -70,9 +70,23 @@ pub(crate) fn resolve_source(
 ) -> Result<(SessionRef, Box<dyn cv_core::harness::Adapter>)> {
     let p = Path::new(spec);
     let resolved = if p.is_file() {
+        cv_core::scope::check_configured()?;
         let h = harness.unwrap_or_else(cv_core::harness::derived_host);
         let a = cv_core::harness::for_harness(h).with_context(|| format!("no adapter for {h}"))?;
-        (SessionRef::from_path(p, h), a)
+        let mut r = SessionRef::from_path(p, h);
+        if cv_core::scope::is_active() {
+            let canon = std::fs::canonicalize(p).ok();
+            if let Some(found) = cv_core::sessions().into_iter().find(|cand| {
+                cand.path == p
+                    || canon
+                        .as_ref()
+                        .is_some_and(|c| std::fs::canonicalize(&cand.path).ok().as_ref() == Some(c))
+            }) {
+                r.cwd = found.cwd;
+            }
+            cv_core::scope::ensure_ref_allowed(&r)?;
+        }
+        (r, a)
     } else {
         resolve(spec, harness)?
     };

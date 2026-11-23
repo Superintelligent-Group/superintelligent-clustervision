@@ -17,12 +17,16 @@ use std::path::{Path, PathBuf};
 pub(crate) fn cmd_cat(session: &str, tool_use_id: &str, harness: Option<String>, input: bool) -> Result<()> {
     let want = parse_harness(&harness)?;
     let (r, adapter) = resolve(session, want)?;
+    let redact = cv_core::env::redact();
     // Lazy stream to the first message holding the block, then stop: giant results stay on disk
     // until the one block we print is resolved, and nothing before or after it is kept.
     let mut found = First {
         id: tool_use_id,
         input,
         hit: None,
+        resolver: cv_core::Resolver::new(Some(r.path.clone())),
+        redactor: redact.then(cv_core::redact::SessionRedactor::hashed),
+        error: None,
     };
     let mut parsed = cv_core::stream::stream_counted(
         adapter.as_ref(),
@@ -32,6 +36,7 @@ pub(crate) fn cmd_cat(session: &str, tool_use_id: &str, harness: Option<String>,
         cv_core::stream::Pass::RECORD,
     )?
     .session;
+    let mut redactor = found.redactor;
     parsed.messages = found.hit.into_iter().collect();
     let sidecar = sidecar_path(&r.path);
     let mut out = std::io::BufWriter::new(std::io::stdout().lock());
@@ -42,7 +47,13 @@ pub(crate) fn cmd_cat(session: &str, tool_use_id: &str, harness: Option<String>,
                 if let Block::ToolUse { id, name, input, .. } = b {
                     if id == tool_use_id {
                         eprintln!("✦ {name} ({id}) — input");
-                        writeln!(out, "{}", serde_json::to_string_pretty(input)?)?;
+                        if let Some(redactor) = redactor.as_mut() {
+                            let mut owned = input.resolve()?.into_owned();
+                            redactor.scrub_json(&mut owned);
+                            writeln!(out, "{}", serde_json::to_string_pretty(&owned)?)?;
+                        } else {
+                            writeln!(out, "{}", serde_json::to_string_pretty(input)?)?;
+                        }
                         return Ok(());
                     }
                 }
@@ -55,7 +66,7 @@ pub(crate) fn cmd_cat(session: &str, tool_use_id: &str, harness: Option<String>,
         ));
     }
 
-    print_result(&parsed, &r.id, tool_use_id, &sidecar, &mut out)
+    print_result(&parsed, &r.id, tool_use_id, &sidecar, redactor.as_mut(), &mut out)
 }
 
 fn print_result(
@@ -63,6 +74,7 @@ fn print_result(
     session_id: &str,
     tool_use_id: &str,
     sidecar: &Path,
+    mut redactor: Option<&mut cv_core::redact::SessionRedactor>,
     mut out: &mut impl Write,
 ) -> Result<()> {
     let resolver = parsed.resolver();
@@ -90,8 +102,14 @@ fn print_result(
                 let path = Path::new(p);
                 if path.is_file() {
                     eprintln!("✦ persisted output: {p}");
-                    let mut f = std::fs::File::open(path).with_context(|| format!("opening {p}"))?;
-                    std::io::copy(&mut f, &mut out)?;
+                    if let Some(redactor) = redactor.as_deref_mut() {
+                        let raw = std::fs::read_to_string(path).with_context(|| format!("reading {p}"))?;
+                        let scrubbed = redactor.scrub(&raw);
+                        out.write_all(scrubbed.as_bytes())?;
+                    } else {
+                        let mut f = std::fs::File::open(path).with_context(|| format!("opening {p}"))?;
+                        std::io::copy(&mut f, &mut out)?;
+                    }
                     out.flush()?;
                     return Ok(());
                 }
@@ -103,9 +121,12 @@ fn print_result(
             // 2. A prune marker: the original lives in the sidecar next to the transcript.
             if text.trim_start().starts_with(cv_core::prune::MARKER_PREFIX) {
                 if sidecar.try_exists()? {
-                    let v = cv_core::prune::retrieve(sidecar, tool_use_id)
+                    let mut v = cv_core::prune::retrieve(sidecar, tool_use_id)
                         .with_context(|| format!("reading prune sidecar {}", sidecar.display()))?;
                     eprintln!("✦ from prune sidecar {}", sidecar.display());
+                    if let Some(redactor) = redactor.as_deref_mut() {
+                        redactor.scrub_json(&mut v);
+                    }
                     return print_value(&mut out, &v);
                 }
                 eprintln!(
@@ -117,7 +138,11 @@ fn print_result(
             if let Some(name) = tool_name {
                 eprintln!("✦ {name} ({tool_use_id})");
             }
-            writeln!(out, "{text}")?;
+            if let Some(redactor) = redactor.as_deref_mut() {
+                writeln!(out, "{}", redactor.scrub(&text))?;
+            } else {
+                writeln!(out, "{text}")?;
+            }
             out.flush()?;
             return Ok(());
         }
@@ -126,9 +151,12 @@ fn print_result(
     // Not in the transcript at all: a sidecar can still carry it (e.g. a `toolUseResult`-only
     // stash from a prune of a session whose result block was itself dropped).
     if sidecar.try_exists()? {
-        let v = cv_core::prune::retrieve(sidecar, tool_use_id)
+        let mut v = cv_core::prune::retrieve(sidecar, tool_use_id)
             .with_context(|| format!("reading prune sidecar {}", sidecar.display()))?;
         eprintln!("✦ from prune sidecar {}", sidecar.display());
+        if let Some(redactor) = redactor {
+            redactor.scrub_json(&mut v);
+        }
         return print_value(&mut out, &v);
     }
     usage(format!(
@@ -144,15 +172,27 @@ struct First<'a> {
     id: &'a str,
     input: bool,
     hit: Option<cv_core::Message>,
+    resolver: cv_core::Resolver,
+    redactor: Option<cv_core::redact::SessionRedactor>,
+    error: Option<anyhow::Error>,
 }
 
 impl cv_core::MessageSink for First<'_> {
+    fn take_error(&mut self) -> Option<anyhow::Error> {
+        self.error.take()
+    }
     fn message(&mut self, m: cv_core::Message) -> cv_core::Flow {
         let wanted = m.content.iter().any(|b| match b {
             Block::ToolUse { id, .. } => self.input && id == self.id,
             Block::ToolResult { tool_use_id, .. } => !self.input && tool_use_id == self.id,
             _ => false,
         });
+        if let Some(redactor) = self.redactor.as_mut() {
+            if let Err(err) = redactor.observe_message(&m, &self.resolver) {
+                self.error = Some(err);
+                return cv_core::Flow::Stop;
+            }
+        }
         if !wanted {
             return cv_core::Flow::Continue;
         }
@@ -195,7 +235,7 @@ mod tests {
         std::fs::write(&sidecar, [0xff, b'\n']).unwrap();
         let session = cv_core::Session::new("s", cv_core::Harness::Claude);
         let mut out = Vec::new();
-        let error = print_result(&session, "s", "tool", &sidecar, &mut out).unwrap_err();
+        let error = print_result(&session, "s", "tool", &sidecar, None, &mut out).unwrap_err();
         let error = format!("{error:#}");
         assert!(error.contains("s.flat.jsonl"), "{error}");
         assert!(!error.contains("--drop"));
@@ -229,23 +269,26 @@ mod tests {
             id: "call",
             input: false,
             hit: None,
+            resolver: cv_core::Resolver::new(None),
+            redactor: None,
+            error: None,
         };
         assert_eq!(first.message(message), Flow::Stop);
         let mut session = Session::new("cat", Harness::Codex);
         session.messages = first.hit.into_iter().collect();
         let sidecar = world.base.join("absent.flat.jsonl");
         let mut output = Vec::new();
-        print_result(&session, &session.id, "call", &sidecar, &mut output).unwrap();
+        print_result(&session, &session.id, "call", &sidecar, None, &mut output).unwrap();
         assert_eq!(output, format!("{body}\n").as_bytes());
         let mut owned = session.clone();
         let resolver = owned.resolver();
         owned.messages[0].materialize(&resolver).unwrap();
         let mut expected = Vec::new();
-        print_result(&owned, &owned.id, "call", &sidecar, &mut expected).unwrap();
+        print_result(&owned, &owned.id, "call", &sidecar, None, &mut expected).unwrap();
         assert_eq!(output, expected);
         std::fs::remove_file(path).unwrap();
         let mut rejected = Vec::new();
-        assert!(print_result(&session, &session.id, "call", &sidecar, &mut rejected).is_err());
+        assert!(print_result(&session, &session.id, "call", &sidecar, None, &mut rejected).is_err());
         assert!(rejected.is_empty());
     }
 

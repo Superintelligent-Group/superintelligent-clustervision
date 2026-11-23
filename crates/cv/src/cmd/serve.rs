@@ -489,6 +489,9 @@ const SEARCH_LIMIT: usize = 20;
 /// parse error is a 400 quoting the core's own message; a `text:` term with no full-text index is
 /// a 503 naming `cv index`.
 fn stats(params: &Query) -> (u16, Value) {
+    if let Err(error) = cv_core::scope::check_configured() {
+        return err(403, &error.to_string());
+    }
     let q = match params.get("q") {
         Some(s) => match cv_core::SessionQuery::parse(&s) {
             Ok(q) => Some(q),
@@ -503,7 +506,9 @@ fn stats(params: &Query) -> (u16, Value) {
             crate::cmd::query::text_sets(q).and_then(|texts| cv_core::query::filter_refs(&mut refs, q, &texts))
         {
             // No index for `text:` is the service lacking it (as `/api/search` says), not a fault.
-            let status = if error.downcast_ref::<crate::util::UsageError>().is_some() {
+            let status = if error.downcast_ref::<cv_core::scope::ScopeError>().is_some() {
+                403
+            } else if error.downcast_ref::<crate::util::UsageError>().is_some() {
                 503
             } else {
                 500
@@ -591,6 +596,9 @@ fn search(params: &Query, searcher: &cv_search::Searcher) -> Reply {
     };
     let found = match searcher.search(&q, filter, limit, source, live_bytes) {
         Ok(found) => found,
+        Err(e) if e.downcast_ref::<cv_core::scope::ScopeError>().is_some() => {
+            return bad(403, &format!("{e:#}"));
+        }
         // A live scan cannot stand in for semantic ranking, so this is an error, exactly as
         // `cv search --semantic` exits non-zero rather than quietly changing mode.
         Err(e) if semantic => {
@@ -788,6 +796,9 @@ cv_core::routes! {
 }
 
 fn export(harness: &str, id: &str, query: &Query) -> Result<Download, (u16, Value)> {
+    if let Err(error) = cv_core::scope::check_configured() {
+        return Err(err(403, &error.to_string()));
+    }
     let format = query.get("format").unwrap_or_else(|| "markdown".into());
     let (content_type, extension, format) = match format.as_str() {
         "markdown" => (
@@ -804,7 +815,14 @@ fn export(harness: &str, id: &str, query: &Query) -> Result<Download, (u16, Valu
     };
     let harness = Harness::parse(harness).ok_or_else(|| err(400, "unknown harness"))?;
     let (r, adapter) = cv_core::find(id, Some(harness))
-        .map_err(|error| err(500, &error.to_string()))?
+        .map_err(|error| {
+            let status = if error.downcast_ref::<cv_core::scope::ScopeError>().is_some() {
+                403
+            } else {
+                500
+            };
+            err(status, &error.to_string())
+        })?
         .ok_or_else(|| err(404, "session not found"))?;
     let (body, bytes) = super::view::stage_export(adapter.as_ref(), &r, format)
         .map_err(|error| err(500, &format!("export failed: {error:#}")))?;

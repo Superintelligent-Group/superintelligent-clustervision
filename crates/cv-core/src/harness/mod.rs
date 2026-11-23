@@ -443,6 +443,7 @@ pub trait Adapter: Send + Sync {
     /// Checked stream boundary for all implementations, including third-party adapters which
     /// implement only [`Self::stream`]. Consumer failures are errors, never successful stops.
     fn try_stream(&self, r: &SessionRef, opts: &Demand, sink: &mut dyn MessageSink) -> Result<Session> {
+        crate::scope::ensure_ref_allowed(r)?;
         crate::stream::checked(sink, |sink| self.stream(r, opts, sink))
     }
 
@@ -462,6 +463,7 @@ pub trait Adapter: Send + Sync {
         from: crate::stream::Start<'_>,
         sink: &mut dyn MessageSink,
     ) -> Result<Option<Session>> {
+        crate::scope::ensure_ref_allowed(r)?;
         match from {
             crate::stream::Start::Whole => self.try_stream(r, opts, sink).map(Some),
             _ => Ok(None),

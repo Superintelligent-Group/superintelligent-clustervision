@@ -21,6 +21,14 @@ fn bar(frac: f64) -> String {
     "█".repeat((frac * 24.0).round() as usize)
 }
 
+fn visible_skipped() -> Vec<(cv_core::Harness, cv_core::Skipped)> {
+    if cv_core::scope::is_active() {
+        Vec::new()
+    } else {
+        cv_core::catalog::skipped_sources()
+    }
+}
+
 pub(crate) fn cmd_doctor(id: Option<String>, harness: Option<String>, recent: usize, json: bool) -> Result<()> {
     let want = crate::util::parse_harness(&harness)?;
 
@@ -40,7 +48,7 @@ pub(crate) fn cmd_doctor(id: Option<String>, harness: Option<String>, recent: us
         refs.truncate(recent.max(1));
         if refs.is_empty() {
             // An empty listing may be a store cv could not open: name it with the refusal.
-            let unreadable = skipped_lines(&cv_core::catalog::skipped_sources());
+            let unreadable = skipped_lines(&visible_skipped());
             anyhow::bail!(
                 "no sessions found for {} — pass an explicit <id>, or run from a project dir{}",
                 cwd.map(|c| c.display().to_string()).unwrap_or_default(),
@@ -79,7 +87,7 @@ pub(crate) fn cmd_doctor(id: Option<String>, harness: Option<String>, recent: us
         let mut v = rep.to_json();
         if let Some(obj) = v.as_object_mut() {
             obj.insert("hooks".into(), crate::cmd::hooks::doctor_json());
-            let skipped = cv_core::catalog::skipped_sources();
+            let skipped = visible_skipped();
             if !skipped.is_empty() {
                 obj.insert("skipped_sources".into(), skipped_json(&skipped));
             }
@@ -106,7 +114,7 @@ fn print_report(rep: &Report, label: &str, n_targets: usize) {
     }
 
     println!("{}", writer_versions_line(cv_core::catalog::writer_versions()));
-    for line in skipped_lines(&cv_core::catalog::skipped_sources()) {
+    for line in skipped_lines(&visible_skipped()) {
         println!("{line}");
     }
 

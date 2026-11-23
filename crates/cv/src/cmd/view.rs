@@ -98,6 +98,15 @@ fn print_affordances(
                 _ => true,
             }
     });
+    if cv_core::env::redact() {
+        let mut redactor = cv_core::redact::SessionRedactor::hashed();
+        for a in &mut rows {
+            a.summary = redactor.scrub(&a.summary);
+            for it in &mut a.items {
+                it.content = redactor.scrub(&it.content);
+            }
+        }
+    }
     if json {
         println!("{}", serde_json::to_string_pretty(&rows)?);
         return Ok(());
@@ -234,7 +243,8 @@ pub(crate) fn cmd_show(
 
     let range = show_range(&r, window, pre_compaction)?;
     if json {
-        return print_session_json(adapter.as_ref(), &r, range, window.max_bytes, false, None).map(|_| ());
+        let redact = cv_core::env::redact().then(cv_core::redact::RedactOptions::hashed);
+        return print_session_json(adapter.as_ref(), &r, range, window.max_bytes, false, redact.as_ref()).map(|_| ());
     }
     render_text(adapter.as_ref(), &r, range, window.max_bytes)
 }
@@ -369,16 +379,28 @@ fn print_session_json(
         out.flush()?;
         return Ok(cv_core::redact::RedactStats::default());
     }
-    // Redaction's cross-field rules require the materialized selected tree.
-    let (mut session, next) = session_json_window(adapter, r, window, max_bytes)?;
-    let mut stats = cv_core::redact::RedactStats::default();
+    // Redaction's cross-field rules require the materialized selected tree. When `opts.hashed`
+    // is active (`--redact` / `CV_REDACT=1` on `show`), run two-pass redaction across the whole
+    // session before slicing the window so secrets assigned outside the window still scrub echoes
+    // inside it.
+    let (session, next, stats) = if redact.is_some_and(|o| o.hashed) && window.is_some() {
+        let full = adapter.parse(r)?;
+        let (clean_full, st) = cv_core::redact::redact_with(&full, redact.unwrap())?;
+        let replay = PreRedactedAdapter(&clean_full);
+        let (windowed, next) = session_json_window(&replay, r, window, max_bytes)?;
+        (windowed, next, st)
+    } else {
+        let (mut session, next) = session_json_window(adapter, r, window, max_bytes)?;
+        let mut st = cv_core::redact::RedactStats::default();
+        if let Some(opts) = redact {
+            let (clean, s) = cv_core::redact::redact_with(&session, opts)?;
+            session = clean;
+            st = s;
+        }
+        (session, next, st)
+    };
     if let Some(next) = next {
         eprintln!("{}", continue_hint(next));
-    }
-    if let Some(opts) = redact {
-        let (clean, st) = cv_core::redact::redact_with(&session, opts)?;
-        session = clean;
-        stats = st;
     }
     if as_document {
         println!(
@@ -391,14 +413,46 @@ fn print_session_json(
     Ok(stats)
 }
 
+struct PreRedactedAdapter<'a>(&'a Session);
+
+impl Adapter for PreRedactedAdapter<'_> {
+    fn harness(&self) -> Harness {
+        self.0.harness
+    }
+    fn roots(&self) -> Vec<PathBuf> {
+        Vec::new()
+    }
+    fn discover(&self) -> Result<cv_core::Discovered> {
+        Ok(Default::default())
+    }
+    fn stream(&self, _r: &SessionRef, _opts: &cv_core::Demand, sink: &mut dyn cv_core::MessageSink) -> Result<Session> {
+        cv_core::stream::replay(self.0.clone(), sink)
+    }
+}
+
 /// The rendered-transcript path of `cv show`: the window and byte budget the caller asked for,
 /// else the whole transcript, on a terminal and a pipe alike.
 fn render_text(adapter: &dyn Adapter, r: &SessionRef, range: Option<Window>, max_bytes: Option<usize>) -> Result<()> {
+    let redacted_session = if cv_core::env::redact() {
+        let full = adapter.parse(r)?;
+        Some(cv_core::redact::redact_hashed(&full)?)
+    } else {
+        None
+    };
+    let replay_adapter = redacted_session.as_ref().map(PreRedactedAdapter);
+    let effective_adapter: &dyn Adapter = match &replay_adapter {
+        Some(a) => a,
+        None => adapter,
+    };
+    let mut r_clean = r.clone();
+    if let Some(clean) = &redacted_session {
+        r_clean.title = clean.title.clone();
+    }
     let stdout = std::io::stdout();
     let mut out = std::io::BufWriter::new(stdout.lock());
     let outcome = stream_session_render(
-        adapter,
-        r,
+        effective_adapter,
+        &r_clean,
         &mut out,
         show_header,
         show_message,
@@ -475,7 +529,21 @@ fn show_agent_fleetwide(agent_id: &str, want: Option<Harness>, json: bool, windo
 /// sub-agent with its type, journaled outcome, and final return value. `json` emits the structured
 /// [`AgentRef`] forest (each annotated with its return) for machine consumption.
 fn show_subagents(r: &SessionRef, json: bool) -> Result<()> {
-    let subs = cv_core::subagent_tree_of(r)?;
+    let mut subs = cv_core::subagent_tree_of(r)?;
+    let redact = cv_core::env::redact();
+    if redact {
+        for s in &mut subs {
+            if let Some(d) = s.description.as_mut() {
+                *d = cv_core::redact::redact_text_hashed(d);
+            }
+            if let Some(sum) = s.result_summary.as_mut() {
+                *sum = cv_core::redact::redact_text_hashed(sum);
+            }
+            if let Some(t) = s.session.title.as_mut() {
+                *t = cv_core::redact::redact_text_hashed(t);
+            }
+        }
+    }
 
     if json {
         // Enrich each with its final return value (direct agents report via the parent tool_result;
@@ -491,6 +559,11 @@ fn show_subagents(r: &SessionRef, json: bool) -> Result<()> {
                     // Direct agents have no journaled summary — attach their final return value.
                     if s.result_summary.is_none() {
                         if let Some(ret) = cv_core::harness::claude::subagent_return(&s.session.path)? {
+                            let ret = if redact {
+                                cv_core::redact::redact_text_hashed(&ret)
+                            } else {
+                                ret
+                            };
                             obj.insert("return".into(), serde_json::Value::String(ret));
                         }
                     }
@@ -516,6 +589,11 @@ fn show_subagents(r: &SessionRef, json: bool) -> Result<()> {
         // the `--json` path stays raw.
         if s.result_summary.is_none() {
             if let Some(ret) = cv_core::harness::claude::subagent_return(&s.session.path)? {
+                let ret = if redact {
+                    cv_core::redact::redact_text_hashed(&ret)
+                } else {
+                    ret
+                };
                 println!("  ↩ {}", truncate(&cv_core::sanitize::sanitize_line(&ret), 400));
             }
         }
@@ -571,12 +649,18 @@ fn show_one_subagent(
     let range = window.window()?;
 
     if json {
-        return print_session_json(adapter, &sub.session, range, window.max_bytes, false, None).map(|_| ());
+        let redact = cv_core::env::redact().then(cv_core::redact::RedactOptions::hashed);
+        return print_session_json(adapter, &sub.session, range, window.max_bytes, false, redact.as_ref()).map(|_| ());
     }
 
     // A small provenance banner so the reader knows which agent (and outcome) this is.
     if let Some(d) = &sub.description {
-        println!("# sub-agent: {}", truncate(d, 120));
+        let d = if cv_core::env::redact() {
+            std::borrow::Cow::Owned(cv_core::redact::redact_text_hashed(d))
+        } else {
+            std::borrow::Cow::Borrowed(d.as_str())
+        };
+        println!("# sub-agent: {}", truncate(&d, 120));
     }
     let wf = sub
         .workflow
@@ -612,22 +696,43 @@ pub(crate) fn stage_export(
     format: ExportFormat,
 ) -> Result<(cv_core::bytes::ByteSource, u64)> {
     let _reads = cv_core::source::read_scope();
+    let redacted = if cv_core::env::redact() {
+        let full = adapter.parse(r)?;
+        Some(cv_core::redact::redact_hashed(&full)?)
+    } else {
+        None
+    };
+    let replay = redacted.as_ref().map(PreRedactedAdapter);
+    let effective_adapter: &dyn Adapter = match &replay {
+        Some(a) => a,
+        None => adapter,
+    };
+    let mut r_clean = r.clone();
+    if let Some(clean) = &redacted {
+        r_clean.title = clean.title.clone();
+    }
     if matches!(format, ExportFormat::OpenSession) {
-        let (body, next) = staged_session_json_inner(adapter, r, None, None, true, true)?;
+        let (body, next) =
+            staged_session_json_inner(effective_adapter, &r_clean, None, None, true, redacted.is_none())?;
         anyhow::ensure!(next.is_none(), "full export unexpectedly truncated");
         let bytes = body.byte_len()?;
         return Ok((body, bytes));
     }
     let mut output = std::io::BufWriter::with_capacity(64 * 1024, cv_core::bytes::ByteStage::default());
     let resolver = cv_core::Resolver::new(Some(r.path.clone()));
+    let mode = if redacted.is_some() {
+        Mode::Plain
+    } else {
+        Mode::CheckedMarkdown
+    };
     let outcome = stream_session_render_inner(
-        adapter,
-        r,
+        effective_adapter,
+        &r_clean,
         &mut output,
         md_header,
         |m| md_message(m, &resolver),
         RenderOpts::default(),
-        Mode::CheckedMarkdown,
+        mode,
     )?;
     anyhow::ensure!(outcome.next.is_none(), "full export unexpectedly truncated");
     let stage = output.into_inner().map_err(|error| error.into_error())?;
@@ -805,11 +910,16 @@ fn read_tree(r: &SessionRef, adapter: &dyn Adapter) -> Result<(Session, Vec<Tree
 }
 
 fn print_tree(r: &SessionRef, adapter: &dyn Adapter) -> Result<()> {
-    let (session, rows, first_prompt) = read_tree(r, adapter)?;
-    println!(
-        "# {}",
-        cv_core::label_from(session.title.as_deref(), first_prompt.as_deref())
-    );
+    let (session, mut rows, first_prompt) = read_tree(r, adapter)?;
+    let mut label = cv_core::label_from(session.title.as_deref(), first_prompt.as_deref());
+    if cv_core::env::redact() {
+        let mut redactor = cv_core::redact::SessionRedactor::hashed();
+        label = redactor.scrub(&label);
+        for row in &mut rows {
+            row.line = redactor.scrub(&row.line);
+        }
+    }
+    println!("# {label}");
     println!("{} · {} · {} msg", session.harness, session.id, rows.len());
     println!();
     if rows.iter().any(|row| row.parent.is_some()) {
@@ -881,7 +991,14 @@ fn subagent_line(s: &cv_core::AgentRef) -> String {
         .result_summary
         .as_deref()
         .or(s.description.as_deref())
-        .map(|t| truncate(&cv_core::sanitize::sanitize_line(t), 88))
+        .map(|t| {
+            let clean = if cv_core::env::redact() {
+                std::borrow::Cow::Owned(cv_core::redact::redact_text_hashed(t))
+            } else {
+                std::borrow::Cow::Borrowed(t)
+            };
+            truncate(&cv_core::sanitize::sanitize_line(&clean), 88)
+        })
         .unwrap_or_default();
     format!(
         "{id}  {kind}{status}  {} msg  {blurb}",

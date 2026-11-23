@@ -17,6 +17,15 @@ use crate::ir::{Harness, SessionRef};
 use serde_json::{json, Value};
 use std::path::PathBuf;
 
+fn maybe_redact(s: Option<&str>) -> Option<std::borrow::Cow<'_, str>> {
+    let s = s?;
+    if crate::env::redact() {
+        Some(std::borrow::Cow::Owned(crate::redact::redact_text_hashed(s)))
+    } else {
+        Some(std::borrow::Cow::Borrowed(s))
+    }
+}
+
 /// THE session row (§3): the same nine keys `cv ls --json`, `cv search --json`, `cv serve`'s
 /// `/api/sessions` and the desktop app's `api` command emit. `size_bytes` is passed in because
 /// only the caller knows whether it already has the `stat` in hand. `message_count` is `null`
@@ -27,7 +36,7 @@ pub fn session_row(r: &SessionRef, size_bytes: Option<u64>) -> Value {
         "harness": r.harness.as_str(),
         "path": r.path.to_string_lossy(),
         "cwd": r.cwd.as_ref().map(|p| p.to_string_lossy()),
-        "title": r.title,
+        "title": maybe_redact(r.title.as_deref()),
         "created_at": r.created_at.map(|t| t.to_rfc3339()),
         "updated_at": r.updated_at.map(|t| t.to_rfc3339()),
         "message_count": r.message_count,
@@ -103,18 +112,25 @@ impl SearchRow<'_> {
                     Harness::parse(self.harness),
                     [self.cwd.is_some(), self.title.is_some()],
                 )
-            });
+            })
+            .filter(crate::scope::allows_ref);
         let reference = cataloged.as_ref();
         // Index cwd/title and valid dates win when present; the catalog supplies their fallbacks
         // plus canonical identity, path and count. Out-of-range index dates use the catalog too.
         let created = rfc3339(self.created_at).or_else(|| reference.and_then(|r| r.created_at).map(|t| t.to_rfc3339()));
         let updated = rfc3339(self.updated_at).or_else(|| reference.and_then(|r| r.updated_at).map(|t| t.to_rfc3339()));
+        let title = self.title.or_else(|| reference.and_then(|r| r.title.as_deref()));
+        let snippet = if crate::env::redact() {
+            std::borrow::Cow::Owned(crate::redact::redact_text_hashed(self.snippet))
+        } else {
+            std::borrow::Cow::Borrowed(self.snippet)
+        };
         json!({
             "id": reference.map_or(self.id, |r| r.id.as_str()),
             "harness": reference.map_or(self.harness, |r| r.harness.as_str()),
             "path": reference.map(|r| r.path.to_string_lossy()),
             "cwd": self.cwd.map(std::borrow::Cow::Borrowed).or_else(|| reference.and_then(|r| r.cwd.as_ref()).map(|p| p.to_string_lossy())),
-            "title": self.title.or_else(|| reference.and_then(|r| r.title.as_deref())),
+            "title": maybe_redact(title),
             "created_at": created,
             "updated_at": updated,
             "message_count": reference.map(|r| r.message_count),
@@ -126,7 +142,7 @@ impl SearchRow<'_> {
                     .or_insert_with(|| std::fs::metadata(&r.path).ok().map(|m| m.len()))
             }),
             "score": self.score,
-            "snippet": self.snippet,
+            "snippet": snippet,
             "agent_id": self.agent_id,
             "parent_id": self.parent_id,
             "workflow": self.workflow,
@@ -139,9 +155,9 @@ impl SearchRow<'_> {
 pub fn live_search_row(r: &SessionRef, title: &str, snippet: &str) -> Value {
     let mut row = session_row(r, std::fs::metadata(&r.path).ok().map(|m| m.len()));
     let obj = row.as_object_mut().expect("json object");
-    obj.insert("title".into(), json!(title));
+    obj.insert("title".into(), json!(maybe_redact(Some(title))));
     obj.insert("score".into(), Value::Null);
-    obj.insert("snippet".into(), json!(snippet));
+    obj.insert("snippet".into(), json!(maybe_redact(Some(snippet))));
     obj.insert("agent_id".into(), Value::Null);
     obj.insert("parent_id".into(), Value::Null);
     obj.insert("workflow".into(), Value::Null);
@@ -157,8 +173,8 @@ pub fn event_row(e: &EventRow) -> Value {
         "ts": rfc3339(e.ts),
         "kind": e.kind,
         "tool": e.tool,
-        "target": e.target,
-        "detail": e.detail,
+        "target": maybe_redact(e.target.as_deref()),
+        "detail": maybe_redact(e.detail.as_deref()),
         "agent_id": e.agent_id,
         "parent_id": e.parent_id,
         "workflow": e.workflow,
@@ -171,7 +187,7 @@ pub fn touched_row(t: &TouchedSession) -> Value {
     json!({
         "harness": t.harness,
         "session_id": t.session_id,
-        "title": t.title,
+        "title": maybe_redact(t.title.as_deref()),
         "edits": t.edits,
         "reads": t.reads,
         "last_ts": rfc3339(t.last_ts),
@@ -233,11 +249,11 @@ pub fn subagent_row(s: &crate::AgentRef, size_bytes: Option<u64>) -> Value {
     let added = [
         json!(s.agent_id()),
         json!(agent_type),
-        json!(description),
+        json!(maybe_redact(description.as_deref())),
         json!(tool_use_id),
         json!(workflow),
         json!(result_status),
-        json!(result_summary),
+        json!(maybe_redact(result_summary.as_deref())),
     ];
     for (key, value) in SUBAGENT_ROW_KEYS[SESSION_ROW_KEYS.len()..].iter().zip(added) {
         map.insert((*key).into(), value);

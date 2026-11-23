@@ -43,6 +43,9 @@ impl Filter {
     /// consumers (e.g. the MCP `observe_stream` tool) can reuse the exact same filtering semantics
     /// rather than re-deriving them and drifting.
     pub fn matches(&self, r: &SessionRef) -> bool {
+        if !crate::scope::allows_ref(r) {
+            return false;
+        }
         if let Some(h) = self.harness {
             if r.harness != h {
                 return false;
@@ -58,6 +61,7 @@ impl Filter {
 }
 
 fn resolve_checked(r: &SessionRef, mark: Mark, check: &mut dyn FnMut() -> anyhow::Result<()>) -> anyhow::Result<usize> {
+    crate::scope::ensure_ref_allowed(r)?;
     check()?;
     let count = match mark {
         Mark::Messages(n) => n,

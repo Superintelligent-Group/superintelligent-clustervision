@@ -352,6 +352,7 @@ pub fn live_search_filtered(
     limit: usize,
     mut select: impl FnMut(&crate::SessionRef) -> bool,
 ) -> Result<LiveSearch> {
+    crate::scope::check_configured()?;
     let _sources = crate::source::read_scope();
     let needle = query.to_lowercase();
     let mut out = LiveSearch {
@@ -364,9 +365,11 @@ pub fn live_search_filtered(
             continue;
         }
         let found = adapter.discover()?;
-        out.unreadable.extend(found.skipped);
+        if !crate::scope::is_active() {
+            out.unreadable.extend(found.skipped);
+        }
         for r in found.refs {
-            if !select(&r) {
+            if !crate::scope::allows_ref(&r) || !select(&r) {
                 continue;
             }
             // One session that cannot be read is skipped and named, never the end of the scan; one

@@ -2397,12 +2397,10 @@ impl MetadataDecisions {
     }
 }
 fn metadata_matches(doc: &TantivyDocument, fields: &Fields, harness: Option<&str>, cwd: Option<&str>) -> bool {
-    harness.is_none_or(|wanted| doc.get_first(fields.harness).and_then(|value| value.as_str()) == Some(wanted))
-        && cwd.is_none_or(|needle| {
-            doc.get_first(fields.cwd)
-                .and_then(|value| value.as_str())
-                .is_some_and(|value| value.contains(needle))
-        })
+    let doc_cwd = doc.get_first(fields.cwd).and_then(|value| value.as_str());
+    cv_core::scope::allows_cwd(doc_cwd.map(Path::new))
+        && harness.is_none_or(|wanted| doc.get_first(fields.harness).and_then(|value| value.as_str()) == Some(wanted))
+        && cwd.is_none_or(|needle| doc_cwd.is_some_and(|value| value.contains(needle)))
 }
 
 /// Optional index metadata is an accelerator: absence is normal, failed reads are named and retried.
@@ -2539,6 +2537,7 @@ fn parse_text_query(
 /// no ranking cap, snippet generation, discovery or transcript access. Chunk documents deduplicate
 /// into their session ID, with the same query syntax and conjunction default as ranked search.
 pub fn text_search_ids(dir: &Path, query: &str) -> Result<HashSet<String>> {
+    cv_core::scope::check_configured()?;
     let (index, f) = open_existing(dir)?;
     let reader = index.reader().context("opening index reader")?;
     matching_ids(&index, &f, &reader.searcher(), query)
@@ -2547,6 +2546,7 @@ pub fn text_search_ids(dir: &Path, query: &str) -> Result<HashSet<String>> {
 /// Resolve several needles against one reader snapshot. Setup failures fail the operation;
 /// malformed individual queries retain their own errors without discarding other needles.
 pub fn text_search_ids_batch(dir: &Path, queries: &[&str]) -> Result<Vec<Result<HashSet<String>>>> {
+    cv_core::scope::check_configured()?;
     if queries.is_empty() {
         return Ok(Vec::new());
     }
@@ -2569,6 +2569,7 @@ pub fn text_search_ids_suffixed(
     live: LiveRead,
     refs: &[cv_core::SessionRef],
 ) -> Result<(Vec<Result<HashSet<String>>>, Suffix)> {
+    cv_core::scope::check_configured()?;
     let indexed = if dir.join("meta.json").exists() || live == LiveRead::Frozen {
         Some(query_index(dir)?)
     } else {
@@ -2582,6 +2583,14 @@ pub fn text_search_ids_suffixed(
     )?;
     let empty = HashMap::new();
     let shadows = live.as_ref().map_or(&empty, |l| &l.shadows);
+    let indexed_decisions = indexed
+        .as_ref()
+        .filter(|_| cv_core::scope::is_active())
+        .map(|(_, f, searcher)| MetadataDecisions::new(searcher, f, crate::SearchFilter::default()));
+    let live_decisions = live
+        .as_ref()
+        .filter(|_| cv_core::scope::is_active())
+        .map(|l| MetadataDecisions::new(&l.searcher, &l.f, crate::SearchFilter::default()));
     let matches = queries
         .iter()
         .map(|query| -> Result<HashSet<String>> {
@@ -2589,19 +2598,40 @@ pub fn text_search_ids_suffixed(
             if let Some((index, f, searcher)) = &indexed {
                 let parsed = parse_text_query(index, f, query, crate::Scope::Exchange)?;
                 let parsed = live::without_shadowed(f, parsed, shadows);
-                ids.extend(
-                    searcher
-                        .search(&*parsed, &crate::session_collector::SessionIds(f.id))
-                        .context("matching session IDs")?,
-                );
+                let mut found = searcher
+                    .search(&*parsed, &crate::session_collector::SessionIds(f.id))
+                    .context("matching session IDs")?;
+                if let Some(decisions) = &indexed_decisions {
+                    let mut scoped = HashSet::with_capacity(found.len());
+                    for id in found.drain() {
+                        let accepted = match &live_decisions {
+                            Some(ld) if shadows.contains_key(&id) => ld.resolve(&id)?.accepted,
+                            _ => decisions.resolve(&id)?.accepted,
+                        };
+                        if accepted {
+                            scoped.insert(id);
+                        }
+                    }
+                    found = scoped;
+                }
+                ids.extend(found);
             }
             if let Some(l) = &live {
                 let parsed = parse_text_query(l.searcher.index(), &l.f, query, crate::Scope::Exchange)?;
-                ids.extend(
-                    l.searcher
-                        .search(&*parsed, &crate::session_collector::SessionIds(l.f.id))
-                        .context("matching live session IDs")?,
-                );
+                let mut found = l
+                    .searcher
+                    .search(&*parsed, &crate::session_collector::SessionIds(l.f.id))
+                    .context("matching live session IDs")?;
+                if let Some(decisions) = &live_decisions {
+                    let mut scoped = HashSet::with_capacity(found.len());
+                    for id in found.drain() {
+                        if decisions.resolve(&id)?.accepted {
+                            scoped.insert(id);
+                        }
+                    }
+                    found = scoped;
+                }
+                ids.extend(found);
             }
             Ok(ids)
         })
@@ -2611,9 +2641,20 @@ pub fn text_search_ids_suffixed(
 
 fn matching_ids(index: &Index, f: &Fields, searcher: &tantivy::Searcher, query: &str) -> Result<HashSet<String>> {
     let parsed = parse_text_query(index, f, query, crate::Scope::Exchange)?;
-    searcher
+    let mut ids = searcher
         .search(&parsed, &crate::session_collector::SessionIds(f.id))
-        .context("matching session IDs")
+        .context("matching session IDs")?;
+    if cv_core::scope::is_active() {
+        let decisions = MetadataDecisions::new(searcher, f, crate::SearchFilter::default());
+        let mut scoped = HashSet::with_capacity(ids.len());
+        for id in ids.drain() {
+            if decisions.resolve(&id)?.accepted {
+                scoped.insert(id);
+            }
+        }
+        ids = scoped;
+    }
+    Ok(ids)
 }
 
 /// Add live snippets to selected ranked hits. Only these source transcripts are read; unavailable
@@ -2708,6 +2749,7 @@ pub fn text_search_indexed_filtered(
     limit: usize,
     filter: crate::SearchFilter<'_>,
 ) -> Result<Vec<Hit>> {
+    cv_core::scope::check_configured()?;
     let (index, f, searcher) = query_index(dir)?;
     let decisions = std::sync::Arc::new(MetadataDecisions::new(&searcher, &f, filter));
     ranked_search(&index, &f, &searcher, query, limit, filter, decisions)
@@ -2737,6 +2779,7 @@ pub(crate) fn search_with_snippets(
     limit: usize,
     filter: crate::SearchFilter<'_>,
 ) -> Result<(Vec<Hit>, Option<String>)> {
+    cv_core::scope::check_configured()?;
     let (index, f, searcher) = query_index(dir)?;
     let decisions = std::sync::Arc::new(MetadataDecisions::new(&searcher, &f, filter));
     let mut hits = ranked_search(&index, &f, &searcher, query, limit, filter, decisions)?;
@@ -2755,6 +2798,7 @@ pub(crate) fn search_suffixed(
     live: LiveRead,
     refs: &[cv_core::SessionRef],
 ) -> Result<Searched> {
+    cv_core::scope::check_configured()?;
     let indexed = if dir.join("meta.json").exists() || live == LiveRead::Frozen {
         Some(query_index(dir)?)
     } else {
@@ -2907,7 +2951,7 @@ fn ranked_search(
 
 /// Whether a filter needs each session's metadata before ranking.
 fn filtered(filter: crate::SearchFilter<'_>) -> bool {
-    filter.harness.is_some() || filter.cwd.is_some()
+    filter.harness.is_some() || filter.cwd.is_some() || cv_core::scope::is_active()
 }
 
 /// The top `limit` sessions `query` matches in `searcher`, each ranked by its best chunk under

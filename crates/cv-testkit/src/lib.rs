@@ -57,6 +57,9 @@ pub const CLEARED_ENV: &[&str] = &[
     "CV_PACK_LLM",
     "CV_SERVE_TOKEN",
     "CVD_TOKEN",
+    "CV_ALLOWED_ROOTS",
+    "CV_REQUIRE_SCOPE",
+    "CV_REDACT",
 ];
 
 /// `(stdout, stderr)` of a run that succeeded or failed as asserted.

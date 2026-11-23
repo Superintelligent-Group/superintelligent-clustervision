@@ -30,6 +30,9 @@ pub(crate) fn cmd_share(
     let (r, adapter) = resolve(id, want)?;
 
     if no_redact {
+        if cv_core::env::redact() {
+            return crate::util::usage("--no-redact cannot be used when --redact or CV_REDACT=1 is active");
+        }
         eprintln!("⚠ --no-redact: secrets and PII will NOT be scrubbed — review the file before sharing it");
     }
 

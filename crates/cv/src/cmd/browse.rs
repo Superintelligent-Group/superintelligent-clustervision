@@ -297,16 +297,28 @@ pub(crate) fn cmd_ls(args: LsArgs<'_>) -> Result<()> {
                             map.insert("enrich_error".into(), serde_json::json!(format!("{error:#}")));
                         }
                         Ok((session, display_title)) => {
+                            let redact = cv_core::env::redact();
                             // `git`: the same object `cv show --json` emits (branch/commit/remote,
                             // skip-none), omitted entirely when the transcript records no git context.
                             if let Some(git) = &session.git {
-                                if let Ok(g) = serde_json::to_value(git) {
+                                let mut git = git.clone();
+                                if redact {
+                                    if let Some(remote) = git.remote.as_mut() {
+                                        *remote = cv_core::redact::redact_text_hashed(remote);
+                                    }
+                                }
+                                if let Ok(g) = serde_json::to_value(&git) {
                                     map.insert("git".into(), g);
                                 }
                             }
                             // `display_title`: `title` with a first-real-user-text fallback. Explicit
                             // null (not absent) when a session has neither, so consumers can tell "no
                             // title anywhere" from "not enriched" (the key is absent without --enrich).
+                            let display_title = if redact {
+                                display_title.map(|t| cv_core::redact::redact_text_hashed(&t))
+                            } else {
+                                display_title
+                            };
                             map.insert("display_title".into(), serde_json::json!(display_title));
                         }
                     }
@@ -322,6 +334,7 @@ pub(crate) fn cmd_ls(args: LsArgs<'_>) -> Result<()> {
     } else {
         println!("{total} session(s)\n");
     }
+    let redact = cv_core::env::redact();
     // The exists() check guards the catalog read path's one residual lie — a session deleted since
     // the probe last looked — and is bounded by `limit`, not the fleet (it stats only listed rows).
     for r in refs.iter().filter(|r| r.path.exists()).take(limit) {
@@ -335,7 +348,13 @@ pub(crate) fn cmd_ls(args: LsArgs<'_>) -> Result<()> {
             r.message_count.map_or("–".to_string(), |n| n.to_string()),
             r.title
                 .as_deref()
-                .map(|t| truncate(&sanitize_line(t), 60))
+                .map(|t| {
+                    if redact {
+                        truncate(&sanitize_line(&cv_core::redact::redact_text_hashed(t)), 60)
+                    } else {
+                        truncate(&sanitize_line(t), 60)
+                    }
+                })
                 .unwrap_or_else(|| sanitize_line(&dim_cwd(r.cwd.as_deref())).into_owned()),
         );
     }

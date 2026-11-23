@@ -153,7 +153,13 @@ pub(crate) fn print_prompts(
     answers: bool,
     json: bool,
 ) -> Result<()> {
-    let rows = collect_prompts(r, adapter, window, prompts, answers)?;
+    let mut rows = collect_prompts(r, adapter, window, prompts, answers)?;
+    if cv_core::env::redact() {
+        let mut redactor = cv_core::redact::SessionRedactor::hashed();
+        for p in &mut rows {
+            p.text = redactor.scrub(&p.text);
+        }
+    }
     if json {
         println!("{}", serde_json::to_string_pretty(&rows)?);
         return Ok(());
@@ -380,6 +386,20 @@ pub(crate) fn cmd_lanes(
             eprintln!("⚠ {}", sanitize_line(w));
         }
         cv_core::lanes::attach_tasks(&mut all, &outcome.model);
+    }
+    if cv_core::env::redact() {
+        let mut redactor = cv_core::redact::SessionRedactor::hashed();
+        for l in &mut all {
+            if let Some(d) = l.description.as_mut() {
+                *d = redactor.scrub(d);
+            }
+            if let Some(t) = l.last_text.as_mut() {
+                *t = redactor.scrub(t);
+            }
+            if let Some(f) = l.failure_detail.as_mut() {
+                *f = redactor.scrub(f);
+            }
+        }
     }
     let lanes: Vec<&Lane> = all.iter().filter(|lane| lane_passes(lane, filter)).collect();
 
@@ -953,6 +973,13 @@ pub(crate) fn cmd_deferrals(
     let (r, adapter) = resolve(id, want)?;
     let regexes = load_phrases(phrases_file.as_deref())?;
     let mut found = collect_deferrals(&r, adapter.as_ref(), since.unwrap_or(0), &regexes)?;
+    if cv_core::env::redact() {
+        let mut redactor = cv_core::redact::SessionRedactor::hashed();
+        for d in &mut found {
+            d.context = redactor.scrub(&d.context);
+            d.sentence = redactor.scrub(&d.sentence);
+        }
+    }
 
     if open_tasks {
         let outcome = cv_core::task::replay()?;
