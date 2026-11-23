@@ -1088,6 +1088,7 @@ mod db {
     /// All persisted events of one session in transcript order, optionally filtered by kind.
     /// Empty for an un-ingested session; an event catalog that cannot open or answer is an error.
     pub fn events_for(harness: &str, session_id: &str, kind: Option<&str>) -> Result<Vec<EventRow>> {
+        crate::scope::check_configured()?;
         let conn = open().context("the event catalog cannot be opened")?;
         let mut stmt = conn.prepare(
             "SELECT es.harness, es.session_id, e.msg_idx, e.ts, e.kind, e.tool, t.target, e.detail,
@@ -1151,6 +1152,7 @@ mod db {
     }
 
     fn touching(abs: &str, suffix: Option<&str>, edits_only: bool) -> Result<Vec<TouchedSession>> {
+        crate::scope::check_configured()?;
         let conn = open().context("the event catalog cannot be opened")?;
         let having = if edits_only { "HAVING edits > 0" } else { "" };
         // With a suffix: `target = ?1 OR target LIKE ?2` — the IN-subquery (not a join) pins the
@@ -1166,10 +1168,12 @@ mod db {
                     SUM(e.kind='file_read') AS reads,
                     MAX(e.ts) AS last_ts,
                     MAX(s.title) AS title,
-                    es.parent_id, es.agent_id, es.workflow
+                    es.parent_id, es.agent_id, es.workflow,
+                    COALESCE(MAX(s.cwd), MAX(sp.cwd)) AS scope_cwd
              FROM events e
              JOIN event_sessions es ON es.id = e.session
              LEFT JOIN sessions s ON s.harness = es.harness AND s.id = es.session_id
+             LEFT JOIN sessions sp ON es.parent_id IS NOT NULL AND sp.harness = es.harness AND sp.id = es.parent_id
              WHERE e.kind IN ('file_edit','file_read')
                AND e.target_id IN (SELECT id FROM event_targets WHERE {target_where})
              GROUP BY es.harness, es.session_id
@@ -1179,23 +1183,31 @@ mod db {
         let mut stmt = conn.prepare(&sql)?;
         // rusqlite refuses a parameter the SQL never references, so bind exactly what it names.
         let map = |row: &rusqlite::Row| {
-            Ok(TouchedSession {
-                harness: row.get(0)?,
-                session_id: row.get(1)?,
-                edits: row.get(2)?,
-                reads: row.get(3)?,
-                last_ts: row.get(4)?,
-                title: row.get(5)?,
-                parent_id: row.get(6)?,
-                agent_id: row.get(7)?,
-                workflow: row.get(8)?,
-            })
+            Ok((
+                TouchedSession {
+                    harness: row.get(0)?,
+                    session_id: row.get(1)?,
+                    edits: row.get(2)?,
+                    reads: row.get(3)?,
+                    last_ts: row.get(4)?,
+                    title: row.get(5)?,
+                    parent_id: row.get(6)?,
+                    agent_id: row.get(7)?,
+                    workflow: row.get(8)?,
+                },
+                row.get::<_, Option<String>>(9)?,
+            ))
         };
         let rows = match suffix {
             Some(sfx) => stmt.query_map(params![abs, sfx], map)?,
             None => stmt.query_map(params![abs], map)?,
         };
-        Ok(rows.collect::<rusqlite::Result<_>>()?)
+        let all: Vec<(TouchedSession, Option<String>)> = rows.collect::<rusqlite::Result<_>>()?;
+        Ok(all
+            .into_iter()
+            .filter(|(_, cwd)| crate::scope::allows_cwd(cwd.as_deref().map(Path::new)))
+            .map(|(row, _)| row)
+            .collect())
     }
 
     /// Every `file_edit` event on one file, with session metadata riding along, oldest first.
@@ -1206,6 +1218,7 @@ mod db {
     /// path still surface. The LEFT JOIN is grouped per event row because a session may be
     /// cataloged at more than one path. Empty on a cold catalog; a catalog error is an error.
     pub fn edits_touching_file(abs: &str, rel: &str) -> Result<Vec<EditEvent>> {
+        crate::scope::check_configured()?;
         let conn = open().context("the event catalog cannot be opened")?;
         let escaped = rel.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
         let suffix = format!("%/{escaped}");
@@ -1213,11 +1226,12 @@ mod db {
         // back to event_targets only resolves the matched rows' target strings by rowid.
         let mut stmt = conn.prepare(
             "SELECT es.harness, es.session_id, e.msg_idx, e.ts, t.target,
-                    MAX(s.title), MAX(s.cwd), MAX(s.created_at), MAX(s.updated_at), MAX(es.parent_id)
+                    MAX(s.title), COALESCE(MAX(s.cwd), MAX(sp.cwd)), MAX(s.created_at), MAX(s.updated_at), MAX(es.parent_id)
              FROM events e
              JOIN event_targets t ON t.id = e.target_id
              JOIN event_sessions es ON es.id = e.session
              LEFT JOIN sessions s ON s.harness = es.harness AND s.id = es.session_id
+             LEFT JOIN sessions sp ON es.parent_id IS NOT NULL AND sp.harness = es.harness AND sp.id = es.parent_id
              WHERE e.kind = 'file_edit'
                AND e.target_id IN (SELECT id FROM event_targets
                                    WHERE target = ?1 OR target = ?2 OR target LIKE ?3 ESCAPE '\\')
@@ -1238,7 +1252,11 @@ mod db {
                 parent_id: row.get(9)?,
             })
         })?;
-        Ok(rows.collect::<rusqlite::Result<_>>()?)
+        let all: Vec<EditEvent> = rows.collect::<rusqlite::Result<_>>()?;
+        Ok(all
+            .into_iter()
+            .filter(|e| crate::scope::allows_cwd(e.cwd.as_deref().map(Path::new)))
+            .collect())
     }
 
     /// Whether *any* events have ever been ingested — lets callers distinguish "no sessions

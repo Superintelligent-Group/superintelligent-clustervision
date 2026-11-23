@@ -24,6 +24,8 @@ pub struct Env {
     home: Option<PathBuf>,
     cache: Option<PathBuf>,
     frozen: bool,
+    redact: bool,
+    scope: crate::scope::Scope,
     /// What the library keeps alive while this environment is in use: its current catalog's scan
     /// cache. Shared by the copies [`Scope::set`] makes, so a variable change keeps it.
     retained: Arc<Mutex<Option<Arc<dyn Any + Send + Sync>>>>,
@@ -35,14 +37,36 @@ thread_local! {
     static SCOPED: RefCell<Option<Arc<Env>>> = const { RefCell::new(None) };
 }
 
+fn is_truthy(val: Option<&OsString>) -> bool {
+    val.and_then(|v| v.to_str()).is_some_and(|s| {
+        let s = s.trim();
+        s == "1" || s.eq_ignore_ascii_case("true") || s.eq_ignore_ascii_case("yes")
+    })
+}
+
 impl Env {
     /// The process environment, with `dirs`' home and cache dirs.
     pub fn from_process() -> Env {
+        let vars: HashMap<OsString, OsString> = std::env::vars_os().collect();
+        let home = dirs::home_dir();
+        let cache = dirs::cache_dir();
+        let frozen = vars.get(OsStr::new("CV_FROZEN")).is_some_and(|v| v == "1");
+        let redact = is_truthy(vars.get(OsStr::new("CV_REDACT")));
+        let require_scope = is_truthy(vars.get(OsStr::new("CV_REQUIRE_SCOPE")));
+        let raw_roots = vars.get(OsStr::new("CV_ALLOWED_ROOTS")).and_then(|v| v.to_str());
+        let scope = crate::scope::Scope::from_env_values(
+            raw_roots,
+            require_scope,
+            home.as_deref(),
+            std::env::current_dir().ok().as_deref(),
+        );
         Env {
-            vars: std::env::vars_os().collect(),
-            home: dirs::home_dir(),
-            cache: dirs::cache_dir(),
-            frozen: std::env::var_os("CV_FROZEN").is_some_and(|v| v == "1"),
+            vars,
+            home,
+            cache,
+            frozen,
+            redact,
+            scope,
             retained: Default::default(),
         }
     }
@@ -64,8 +88,36 @@ impl Env {
         self
     }
 
+    /// Enable deterministic secret redaction across read/pack/export surfaces, including in child
+    /// commands inheriting this environment.
+    pub fn with_redact(mut self) -> Self {
+        self.set("CV_REDACT", Some(OsStr::new("1")));
+        self
+    }
+
+    /// Apply repeatable `--allowed-root` CLI flags, narrowing any existing `CV_ALLOWED_ROOTS`
+    /// allowlist (never widening) and propagating the resolved roots to child commands.
+    pub fn with_allowed_roots(mut self, cli_roots: &[PathBuf]) -> Result<Self, crate::scope::ScopeError> {
+        if cli_roots.is_empty() {
+            return Ok(self);
+        }
+        let narrowed =
+            self.scope
+                .narrow_with_cli(cli_roots, self.home.as_deref(), std::env::current_dir().ok().as_deref())?;
+        let joined = crate::scope::join_allowed_roots(&narrowed);
+        self.set("CV_ALLOWED_ROOTS", Some(OsStr::new(&joined)));
+        Ok(self)
+    }
+
+    /// The resolved project-root allowlist policy for this environment.
+    pub fn scope(&self) -> &crate::scope::Scope {
+        &self.scope
+    }
+
     fn derive(&mut self) {
         self.frozen = self.vars.get(OsStr::new("CV_FROZEN")).is_some_and(|v| v == "1");
+        self.redact = is_truthy(self.vars.get(OsStr::new("CV_REDACT")));
+        let require_scope = is_truthy(self.vars.get(OsStr::new("CV_REQUIRE_SCOPE")));
         let var = |k: &str| self.var_os(k).filter(|v| !v.is_empty()).map(PathBuf::from);
         let home = if cfg!(windows) { var("USERPROFILE") } else { var("HOME") };
         let cache = if cfg!(target_os = "macos") {
@@ -77,6 +129,13 @@ impl Env {
                 .filter(|p| p.is_absolute())
                 .or_else(|| home.as_ref().map(|h| h.join(".cache")))
         };
+        let raw_roots = self.vars.get(OsStr::new("CV_ALLOWED_ROOTS")).and_then(|v| v.to_str());
+        self.scope = crate::scope::Scope::from_env_values(
+            raw_roots,
+            require_scope,
+            home.as_deref(),
+            std::env::current_dir().ok().as_deref(),
+        );
         self.home = home;
         self.cache = cache;
     }
@@ -262,6 +321,12 @@ impl Drop for Scope {
 /// Resolved once with the environment; scoped callers and their workers share the same policy.
 pub fn frozen() -> bool {
     Env::current().frozen
+}
+
+/// Whether deterministic secret redaction is enabled (`--redact` or `CV_REDACT=1`).
+/// Resolved once with the environment; scoped callers and their workers share the same policy.
+pub fn redact() -> bool {
+    Env::current().redact
 }
 
 /// `std::env::var_os` over [`Env::current`].

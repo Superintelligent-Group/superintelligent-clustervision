@@ -48,8 +48,15 @@ macro_rules! routes {
 /// Route a decoded path (`["api", "session", "claude", "abc"]`) plus a raw query string.
 /// Never panics; an unknown path is a 404.
 pub fn route_json(parts: &[&str], query: &str) -> (u16, Value) {
+    if let Err(e) = crate::scope::check_configured() {
+        return err(403, &format!("{e:#}"));
+    }
     let _reads = crate::source::read_scope();
-    read(false, parts, query)
+    let (status, mut value) = read(false, parts, query);
+    if status == 200 && crate::env::redact() {
+        crate::redact::redact_json_hashed(&mut value);
+    }
+    (status, value)
 }
 
 routes! {
@@ -122,6 +129,23 @@ pub struct StagedJson {
 /// Bounded backend for the HTTP message-window route. Other routes keep `route_json`.
 /// Source and serialization failures are converted into a staged error before publication.
 pub fn route_staged(parts: &[&str], query: &str) -> anyhow::Result<Option<StagedJson>> {
+    if crate::env::redact() {
+        // Fall through to `route_json` when redacting so cross-field/value-hashed redaction runs
+        // over the decoded JSON response.
+        return Ok(None);
+    }
+    if let Err(e) = crate::scope::check_configured() {
+        let mut output = crate::bytes::ByteStage::default();
+        let (_, payload) = err(403, &format!("{e:#}"));
+        let bytes = serde_json::to_vec(&payload)?;
+        let len = bytes.len() as u64;
+        std::io::Write::write_all(&mut output, &bytes)?;
+        return Ok(Some(StagedJson {
+            status: 403,
+            body: output.finish()?,
+            bytes: len,
+        }));
+    }
     let _reads = crate::source::read_scope();
     let ["api", "session", harness, id, "messages"] = parts else {
         return Ok(None);
@@ -329,6 +353,7 @@ fn lookup(harness: &str, id: &str) -> Result<(SessionRef, Box<dyn crate::Adapter
     match crate::find(id, Some(h)) {
         Ok(Some(found)) => Ok(found),
         Ok(None) => Err(err(404, "session not found")),
+        Err(e) if e.downcast_ref::<crate::scope::ScopeError>().is_some() => Err(err(403, &e.to_string())),
         Err(e) => Err(err(500, &e.to_string())),
     }
 }

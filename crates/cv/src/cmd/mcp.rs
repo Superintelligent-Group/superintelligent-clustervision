@@ -923,12 +923,18 @@ fn await_poll(
             check()?;
             let snippet_start = hit.start().saturating_sub(80);
             let snippet_end = hit.end().saturating_add(80).min(text.len());
+            let raw_snippet = &text[floor_char(&text, snippet_start)..ceil_char(&text, snippet_end)];
+            let matched_text = if cv_core::env::redact() {
+                std::borrow::Cow::Owned(cv_core::redact::redact_text_hashed(raw_snippet))
+            } else {
+                std::borrow::Cow::Borrowed(raw_snippet)
+            };
             matched = Some(json!({
                 "matched": true,
                 "harness": reference.harness.as_str(), "id": reference.id,
                 "cwd": reference.cwd.as_ref().map(|p| p.to_string_lossy()),
                 "role": cv_core::render::role_label(message.role),
-                "matched_text": &text[floor_char(&text, snippet_start)..ceil_char(&text, snippet_end)],
+                "matched_text": matched_text,
                 "event": match kind { cv_core::watch::EventKind::New => "new_session", _ => "appended" },
             }));
             Ok(cv_core::Flow::Stop)
@@ -1050,7 +1056,11 @@ fn observe_poll_checked(
                     let text = match project(m, &resolver, room) {
                         Ok((text, cut)) => {
                             truncated += usize::from(cut);
-                            text
+                            if cv_core::env::redact() {
+                                cv_core::redact::redact_text_hashed(&text)
+                            } else {
+                                text
+                            }
                         }
                         Err(error) => {
                             projection_error = Some(error);

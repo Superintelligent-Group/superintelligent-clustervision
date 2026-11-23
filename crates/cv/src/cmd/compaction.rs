@@ -9,11 +9,19 @@ use cv_core::ir::{truncate, SessionRef};
 /// Print boundaries for r. JSON and summaries include full summary text; ordinary terminal
 /// rows demand only a bounded preview.
 pub(crate) fn print_compactions(r: &SessionRef, summaries: bool, json: bool) -> Result<()> {
-    let comps = if json || summaries {
+    let mut comps = if json || summaries {
         cv_core::compaction::detect(r, true)?
     } else {
         cv_core::compaction::detect_preview(r, 200)?
     };
+    if cv_core::env::redact() {
+        let mut redactor = cv_core::redact::SessionRedactor::hashed();
+        for c in &mut comps {
+            if let Some(s) = c.summary.as_mut() {
+                *s = redactor.scrub(s);
+            }
+        }
+    }
 
     if json {
         // `compaction::row`: the same row `/api/session/{h}/{id}/compactions` serves.

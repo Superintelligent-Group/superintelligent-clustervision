@@ -179,6 +179,21 @@ fn print_event_row(
     detail: Option<&str>,
     wide: bool,
 ) {
+    let redact = cv_core::env::redact();
+    let target = target.map(|t| {
+        if redact {
+            std::borrow::Cow::Owned(cv_core::redact::redact_text_hashed(t))
+        } else {
+            std::borrow::Cow::Borrowed(t)
+        }
+    });
+    let detail = detail.map(|d| {
+        if redact {
+            std::borrow::Cow::Owned(cv_core::redact::redact_text_hashed(d))
+        } else {
+            std::borrow::Cow::Borrowed(d)
+        }
+    });
     let cell = |text: &str, column: usize| {
         if wide {
             text.replace('\n', " ")
@@ -195,9 +210,9 @@ fn print_event_row(
         time,
         kind,
         tool.unwrap_or("-"),
-        target.map(|t| cell(t, TARGET_COLUMN)).unwrap_or_default(),
+        target.as_deref().map(|t| cell(t, TARGET_COLUMN)).unwrap_or_default(),
     );
-    if let Some(d) = detail {
+    if let Some(d) = detail.as_deref() {
         println!("       ↳ {}", cell(d, DETAIL_COLUMN));
     }
 }
@@ -234,7 +249,17 @@ pub(crate) fn cmd_touched(path: &str, edits_only: bool, json: bool) -> Result<()
             short_id(&t.session_id),
             date,
             counts,
-            t.title.as_deref().map(|s| truncate(s, 56)).unwrap_or_default(),
+            t.title
+                .as_deref()
+                .map(|s| {
+                    let clean = if cv_core::env::redact() {
+                        std::borrow::Cow::Owned(cv_core::redact::redact_text_hashed(s))
+                    } else {
+                        std::borrow::Cow::Borrowed(s)
+                    };
+                    truncate(&clean, 56)
+                })
+                .unwrap_or_default(),
         );
         // Folded-in sub-agent rows (`cv index --subagents`) carry attribution: surface which agent
         // of which workflow of which parent the touch came from.

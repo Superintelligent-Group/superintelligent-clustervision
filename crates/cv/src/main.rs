@@ -137,6 +137,20 @@ struct Cli {
     #[arg(long, global = true)]
     frozen: bool,
 
+    /// Restrict session discovery, search, and reads to projects under this directory
+    /// (repeatable; also CV_ALLOWED_ROOTS, colon/semicolon-separated). When CV_ALLOWED_ROOTS is
+    /// already set, --allowed-root may only narrow it; sessions outside the allowlist are hidden
+    /// from scans and refused fail-closed on direct lookup. Set CV_REQUIRE_SCOPE=1 to fail closed
+    /// when empty.
+    #[arg(id = "allowed_root", long = "allowed-root", global = true, value_name = "PATH")]
+    allowed_roots: Vec<PathBuf>,
+
+    /// Scrub credentials and secrets from output (also CV_REDACT=1). Read, search, pack, and MCP
+    /// surfaces emit deterministic value-hashed `<REDACTED:rule:sha8>` tags across prompts,
+    /// tool_use inputs, and tool_result outputs; `export` and `dataset` emit `[REDACTED:kind]`.
+    #[arg(long, global = true)]
+    redact: bool,
+
     #[command(subcommand)]
     cmd: Cmd,
 }
@@ -837,10 +851,6 @@ enum Cmd {
         harness: Option<String>,
         #[command(flatten)]
         window: WindowArgs,
-        /// Scrub secrets/PII first — API keys, private keys, JWTs, emails, `KEY=value` assignments,
-        /// high-entropy blobs — with the same pass `cv share` runs; per-class counts go to stderr.
-        #[arg(long)]
-        redact: bool,
     },
     /// Export the corpus as a fine-tuning dataset (JSONL, one session per line).
     /// `chatml`/`sharegpt` import directly into Unsloth Studio / TRL / HF — no adapter.
@@ -867,9 +877,6 @@ enum Cmd {
         /// Skip sessions with fewer than this many messages (drops trivial/empty ones).
         #[arg(long, default_value_t = 2)]
         min_messages: usize,
-        /// Scrub secrets/PII from every session before emitting (cv_core::redact).
-        #[arg(long)]
-        redact: bool,
         /// Scrub only these secret classes (comma list: `private_key`, `api_key`, `jwt`, `email`,
         /// `blob`, `assignment`), leaving everything else intact — e.g. `--redact-only private_key`
         /// to strip PEM blocks but keep identities. Implies redaction; overrides `--redact`.
@@ -1198,9 +1205,12 @@ fn main() {
     }
     if let Err(e) = run() {
         // Caller mistakes (unknown/ambiguous id, removed command/flag, bad window, a taken output
-        // name) exit 2 with the bare message; everything else is a real failure: the anyhow
-        // chain, exit 1.
-        if e.downcast_ref::<UsageError>().is_some() || e.downcast_ref::<cv_core::publish::Exists>().is_some() {
+        // name, or a project-scope refusal) exit 2 with the clean message; everything else is a
+        // real failure: the anyhow chain, exit 1.
+        if e.downcast_ref::<UsageError>().is_some()
+            || e.downcast_ref::<cv_core::publish::Exists>().is_some()
+            || e.downcast_ref::<cv_core::scope::ScopeError>().is_some()
+        {
             eprintln!("{e:#}");
             std::process::exit(2);
         }
@@ -1223,11 +1233,14 @@ fn run() -> Result<()> {
         Err(e) => e.exit(),
     };
     // Install before any library read, and enter it so subprocesses (including MCP tools)
-    // inherit the flag as CV_FROZEN without mutating the process environment.
+    // inherit CV_FROZEN / CV_REDACT / CV_ALLOWED_ROOTS without mutating the process environment.
     let env = cv_core::env::Env::from_process();
     let env = if cli.frozen { env.with_frozen() } else { env };
+    let env = if cli.redact { env.with_redact() } else { env };
+    let env = env.with_allowed_roots(&cli.allowed_roots)?;
     cv_core::env::Env::install(env.clone());
     let _env = env.enter();
+    cv_core::scope::check_configured()?;
     if cv_core::env::frozen() {
         let writes = match &cli.cmd {
             Cmd::Index { .. }
@@ -1330,8 +1343,7 @@ fn run() -> Result<()> {
             format,
             harness,
             window,
-            redact,
-        } => view::cmd_export(&id, &format, harness, &window, redact),
+        } => view::cmd_export(&id, &format, harness, &window, cv_core::env::redact()),
         Cmd::Dataset {
             format,
             harness,
@@ -1339,7 +1351,6 @@ fn run() -> Result<()> {
             subagents,
             limit,
             min_messages,
-            redact,
             redact_only,
             file,
             out_removed,
@@ -1351,7 +1362,7 @@ fn run() -> Result<()> {
                      everywhere else)",
                 );
             }
-            reshape::cmd_dataset(reshape::DatasetArgs { format: &format, harness, query, subagents, limit, min_messages, redact, redact_only, file, force })
+            reshape::cmd_dataset(reshape::DatasetArgs { format: &format, harness, query, subagents, limit, min_messages, redact: cv_core::env::redact(), redact_only, file, force })
         }
         Cmd::Port {
             id,

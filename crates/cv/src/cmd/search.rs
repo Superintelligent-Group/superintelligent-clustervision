@@ -123,17 +123,31 @@ fn render(found: Found, query: &str, json: bool) -> Result<()> {
         }
         return Ok(());
     }
+    let redact = cv_core::env::redact();
     for h in &hits {
         // Titles and snippets are transcript-derived (untrusted) — sanitize at the terminal
         // seam (G5); JSON surfaces stay raw.
-        let title = sanitize_line(h.title.as_deref().unwrap_or_default());
+        let raw_title = h.title.as_deref().unwrap_or_default();
+        let scrubbed_title;
+        let title_src = if redact {
+            scrubbed_title = cv_core::redact::redact_text_hashed(raw_title);
+            scrubbed_title.as_str()
+        } else {
+            raw_title
+        };
+        let title = sanitize_line(title_src);
+        let snippet = if redact {
+            cv_core::redact::redact_text_hashed(&h.snippet)
+        } else {
+            h.snippet.clone()
+        };
         if source == Source::Live {
             let date = h
                 .updated_at
                 .and_then(|t| crate::util::fmt_local_ts(t, "%Y-%m-%d"))
                 .unwrap_or_else(|| "----------".into());
             println!("{:8}  {:8}  {:10}  {}", h.harness, short_id(&h.id), date, title);
-            println!("          … {}", sanitize_line(&h.snippet));
+            println!("          … {}", sanitize_line(&snippet));
             continue;
         }
         // Dates ride on the hit straight from the index (FTS); semantic hits carry none.
@@ -155,8 +169,8 @@ fn render(found: Found, query: &str, json: bool) -> Result<()> {
             None => (short_id(&h.id), String::new()),
         };
         println!("{:8}  {:8}  {:10}  {}{}", h.harness, id_disp, date, title, provenance);
-        if !h.snippet.trim().is_empty() {
-            println!("          … {}", truncate(&sanitize_line(&h.snippet), 120));
+        if !snippet.trim().is_empty() {
+            println!("          … {}", truncate(&sanitize_line(&snippet), 120));
         }
     }
     if hits.is_empty() {

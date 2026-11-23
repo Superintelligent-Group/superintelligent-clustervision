@@ -424,6 +424,9 @@ fn archive_event(
 /// `cv archive ls`: what's in the archive, newest activity first.
 pub(crate) fn cmd_ls(archive: &Archive) -> Result<()> {
     let mut entries = archive.load_catalog()?;
+    if cv_core::scope::is_active() {
+        entries.retain(|e| cv_core::scope::allows_ref(&e.session));
+    }
     if entries.is_empty() {
         println!("(archive empty — run `cv archive sync`)");
         println!("archive: {}", archive.home().display());
@@ -437,7 +440,10 @@ pub(crate) fn cmd_ls(archive: &Archive) -> Result<()> {
     });
 
     for e in &entries {
-        let title = e.session.title.clone().unwrap_or_else(|| "(untitled)".to_string());
+        let mut title = e.session.title.clone().unwrap_or_else(|| "(untitled)".to_string());
+        if cv_core::env::redact() {
+            title = cv_core::redact::redact_text_hashed(&title);
+        }
         let archived = e.archived_at.format("%Y-%m-%d %H:%M");
         println!(
             "{:<9} {:<10} {:>4} msgs  {}  [{}]  {}",

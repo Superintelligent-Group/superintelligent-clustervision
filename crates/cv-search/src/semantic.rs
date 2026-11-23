@@ -763,6 +763,7 @@ impl<M> ResidentState<M> {
         load: impl FnOnce(&ModelSpec) -> Result<M>,
         encode: impl FnOnce(&M, &str) -> Vec<f32>,
     ) -> Result<(Vec<Hit>, usize)> {
+        cv_core::scope::check_configured()?;
         let path = &self.path;
         let mut before = Probe::default();
         if self
@@ -976,7 +977,8 @@ fn ranked_rows<'a>(store: &'a Store, q: &[f32], k: usize, filter: crate::SearchF
 
 /// Whether `filter` admits a stored session: its harness, and its cwd containing the needle.
 fn admits(filter: crate::SearchFilter<'_>, meta: &RecordMeta) -> bool {
-    filter.harness.is_none_or(|h| meta.session.harness.as_str() == h)
+    cv_core::scope::allows_cwd(meta.session.cwd.as_deref())
+        && filter.harness.is_none_or(|h| meta.session.harness.as_str() == h)
         && filter.cwd.is_none_or(|needle| {
             meta.session
                 .cwd

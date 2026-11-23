@@ -108,6 +108,7 @@ pub(crate) fn cmd_pack(args: PackArgs<'_>) -> Result<()> {
     }
 
     // 2. DISTILL — one structured digest per recalled span.
+    let mut redactor = cv_core::env::redact().then(cv_core::redact::SessionRedactor::hashed);
     let mut sources: Vec<PackSource> = Vec::with_capacity(hits.len());
     for hit in hits {
         match build_source(
@@ -116,9 +117,29 @@ pub(crate) fn cmd_pack(args: PackArgs<'_>) -> Result<()> {
             llm_model.as_ref().map(|model| model.as_deref()),
             context_bytes,
             excerpt_bytes,
+            redactor.as_mut(),
         ) {
             Ok(s) => sources.push(s),
             Err(e) => eprintln!("cv pack: skipping {} ({}): {e:#}", short_id(&hit.id), hit.harness),
+        }
+    }
+    if let Some(redactor) = redactor.as_mut() {
+        // Cross-source pass: ensure any secret value discovered in a later span also scrubs
+        // bare echoes in an earlier span.
+        for s in &mut sources {
+            if let Some(t) = s.hit.title.as_mut() {
+                *t = redactor.scrub(t);
+            }
+            s.hit.snippet = redactor.scrub(&s.hit.snippet);
+            for (_, text, _) in &mut s.excerpt {
+                *text = redactor.scrub(text);
+            }
+            for cmd in &mut s.commands {
+                *cmd = redactor.scrub(cmd);
+            }
+            if let Some(d) = s.llm_digest.as_mut() {
+                d.text = redactor.scrub(&d.text);
+            }
         }
     }
     if sources.is_empty() {
@@ -347,6 +368,9 @@ fn live_scan_adapters<'a>(
             continue;
         }
         for r in adapter.discover()? {
+            if !cv_core::scope::allows_ref(&r) {
+                continue;
+            }
             // The words place the excerpt; the whole task scores on top.
             let needles = words.iter().map(|w| w.to_string()).chain([needle.clone()]).collect();
             let mut sink = ScanSink::new(&r.path, Matcher::new(needles, words.len()));
@@ -431,28 +455,75 @@ fn build_source(
     llm_model: Option<Option<&str>>,
     context_bytes: Option<usize>,
     excerpt_bytes: usize,
+    mut redactor: Option<&mut cv_core::redact::SessionRedactor>,
 ) -> Result<PackSource> {
     let want = Harness::parse(&hit.harness);
     let (r, adapter) =
         cv_core::find(&hit.id, want)?.with_context(|| format!("session {} no longer on disk", short_id(&hit.id)))?;
 
     // Stale events ride the excerpt pass; event failure remains best effort.
-    let (excerpt, excerpt_range) = best_window_and_ingest(adapter.as_ref(), &r, task, excerpt_bytes)?;
+    let (mut excerpt, excerpt_range) = if let Some(redactor) = redactor.as_deref_mut() {
+        // When redacting, run two-pass session redaction first so cross-read tool results
+        // (`Read` of `~/.ssh` / `.env`, `Bash` outputs, etc.) scrub both the window AND any
+        // echoed secret values before excerpt extraction or optional LLM digesting.
+        let full = adapter.parse(&r)?;
+        let resolver = full.resolver();
+        for m in &full.messages {
+            redactor.observe_message(m, &resolver)?;
+        }
+        let clean = cv_core::redact::redact_hashed(&full)?;
+        struct Replay<'a>(&'a Session);
+        impl cv_core::Adapter for Replay<'_> {
+            fn harness(&self) -> Harness {
+                self.0.harness
+            }
+            fn roots(&self) -> Vec<PathBuf> {
+                Vec::new()
+            }
+            fn discover(&self) -> Result<cv_core::Discovered> {
+                Ok(Default::default())
+            }
+            fn stream(&self, _r: &cv_core::SessionRef, _opts: &Demand, sink: &mut dyn MessageSink) -> Result<Session> {
+                cv_core::stream::replay(self.0.clone(), sink)
+            }
+        }
+        if cv_core::events::needs_ingest(&r) {
+            let _ = cv_core::events::ingest_ref(&r);
+        }
+        best_window(&Replay(&clean), &r, task, excerpt_bytes)?
+    } else {
+        best_window_and_ingest(adapter.as_ref(), &r, task, excerpt_bytes)?
+    };
     let rows = cv_core::events::events_for(r.harness.as_str(), &r.id, None)?;
     let EventFacts {
         edits,
         reads,
-        commands,
+        mut commands,
         commands_dropped,
         commands_shortened,
     } = event_facts(&rows);
 
-    // Optional abstractive pass over just this span (never the whole session).
+    let mut clean_hit = hit.clone();
+    if let Some(redactor) = redactor.as_deref_mut() {
+        if let Some(t) = clean_hit.title.as_mut() {
+            *t = redactor.scrub(t);
+        }
+        clean_hit.snippet = redactor.scrub(&clean_hit.snippet);
+        for (_, text, _) in &mut excerpt {
+            *text = redactor.scrub(text);
+        }
+        for cmd in &mut commands {
+            *cmd = redactor.scrub(cmd);
+        }
+    }
+
+    // Optional abstractive pass over just this span (never the whole session; already scrubbed
+    // when `--redact` / `CV_REDACT=1` is active).
     let llm_digest = llm_model.and_then(|model| {
         let mut mini = Session {
-            cwd: hit.cwd.as_ref().map(PathBuf::from),
-            title: hit.title.clone(),
-            ..Session::new(hit.id.clone(), r.harness)
+            cwd: clean_hit.cwd.as_ref().map(PathBuf::from),
+            title: clean_hit.title.clone(),
+            ..Session::new(clean_hit.id.clone(), r.harness)
         };
         for (role, text, _) in &excerpt {
             let mut m = Message::new(*role);
@@ -468,14 +539,17 @@ fn build_source(
         };
         match crate::llm::digest(&mini, &opts) {
             Ok(mut d) => {
-                eprintln!("cv pack: digest of {}: {}", short_id(&hit.id), digest_input(&d));
+                eprintln!("cv pack: digest of {}: {}", short_id(&clean_hit.id), digest_input(&d));
                 d.text = d.text.trim().to_string();
+                if let Some(redactor) = redactor {
+                    d.text = redactor.scrub(&d.text);
+                }
                 Some(d)
             }
             Err(e) => {
                 eprintln!(
                     "cv pack: LLM digest failed for {} ({e:#}); keeping the extractive digest",
-                    short_id(&hit.id)
+                    short_id(&clean_hit.id)
                 );
                 None
             }
@@ -483,7 +557,7 @@ fn build_source(
     });
 
     Ok(PackSource {
-        hit: hit.clone(),
+        hit: clean_hit,
         excerpt,
         excerpt_range,
         edits,
@@ -523,17 +597,24 @@ fn event_facts(rows: &[cv_core::events::EventRow]) -> EventFacts {
                 }
             }
             "command" => {
+                // A whole shell pipeline isn't memory; its head is. Scrub secrets BEFORE truncating
+                // when redaction is active so a cut at COMMAND_CHARS cannot slice a token tail too
+                // short for its recognizer.
                 if let Some(c) = &e.target {
                     if !seen.insert(c.as_str()) {
                         continue;
                     }
-                    // A whole shell pipeline isn't memory; its head is.
-                    let head = cv_core::ir::truncate(c, COMMAND_CHARS);
+                    let scrubbed_cmd = if cv_core::env::redact() {
+                        std::borrow::Cow::Owned(cv_core::redact::redact_text_hashed(c))
+                    } else {
+                        std::borrow::Cow::Borrowed(c.as_str())
+                    };
+                    let head = cv_core::ir::truncate(&scrubbed_cmd, COMMAND_CHARS);
                     if commands.contains(&head) {
                         continue;
                     }
                     if commands.len() < MAX_COMMANDS {
-                        commands_shortened += usize::from(head != *c);
+                        commands_shortened += usize::from(head != scrubbed_cmd.as_ref());
                         commands.push(head);
                     } else {
                         dropped.insert(c.as_str());

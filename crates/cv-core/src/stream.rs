@@ -790,6 +790,7 @@ pub fn stream_counted(
     sink: &mut dyn MessageSink,
     pass: Pass<'_>,
 ) -> Result<Streamed> {
+    crate::scope::ensure_ref_allowed(r)?;
     // Captured before the adapter opens anything; a guarded pass's covers the resume source.
     let guard = pass.guard.then(|| {
         let primary = adapter.resume_source(r);

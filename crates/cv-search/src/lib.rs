@@ -195,6 +195,7 @@ impl Searcher {
         source: Source,
         live_bytes: Option<u64>,
     ) -> Result<Found> {
+        cv_core::scope::check_configured()?;
         let mut found = Found {
             hits: Vec::new(),
             source,

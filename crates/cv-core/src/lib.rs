@@ -54,6 +54,7 @@ pub mod rewind;
 pub mod rows;
 pub mod sanitize;
 pub mod scan;
+pub mod scope;
 pub mod source;
 pub(crate) mod spill;
 pub mod splice;
@@ -85,7 +86,7 @@ use anyhow::Result;
 /// [`sessions`] a trustworthy fast read afterwards. Most read-side callers want [`sessions`]
 /// instead; call this when you need a guaranteed-fresh scan (e.g. `cv ls --fresh`, indexers).
 pub fn discover_all() -> Vec<SessionRef> {
-    discover_all_with_catalog(catalog::Reader::open())
+    scope::filter_refs(discover_all_with_catalog(catalog::Reader::open()))
 }
 
 /// [`discover_all`], handing every rollout it decodes in full to `handoff`'s consumer (an index
@@ -95,6 +96,10 @@ pub fn discover_all_handing_off(handoff: codex_handoff::Handoff) -> Vec<SessionR
 }
 
 fn discover_all_with_catalog(mut catalog: Option<catalog::Reader>) -> Vec<SessionRef> {
+    if scope::check_configured().is_err() {
+        return Vec::new();
+    }
+    let scoped = scope::is_active();
     let _sources = source::read_scope();
     let _cache_scope = catalog.as_ref().map(catalog::Reader::discovery_scope);
     let discovery = discover_cache::read::Context::current();
@@ -176,37 +181,45 @@ fn discover_all_with_catalog(mut catalog: Option<catalog::Reader>) -> Vec<Sessio
                 .filter_map(|(_, _, found, _)| found.as_mut())
                 .flat_map(|found| found.refs.iter_mut()),
         );
-        catalog.persist_discovery(true);
+        catalog.persist_discovery(!scoped);
     } else {
-        discover_cache::persist(true);
+        discover_cache::persist(!scoped);
     }
 
-    // Publish every successful harness in one SQL snapshot. Enumeration remains fresh;
-    // unchanged rows can be retained only after comparing the complete ordered inventory.
-    let publications: Vec<_> = results
-        .iter()
-        .filter_map(|(h, roots, found, before)| {
-            found
-                .as_ref()
-                .zip(harness::rootless(*h))
-                .map(|(found, a)| (*h, found.refs.as_slice(), catalog::watches_for(a, roots, found), before))
-        })
-        .collect();
-    let skipped: Vec<_> = results
-        .iter()
-        .filter_map(|(h, _, found, _)| Some((*h, found.as_ref()?.skipped.as_slice())))
-        .collect();
-    note_skipped(&skipped);
-    if let Some(catalog) = &mut catalog {
-        catalog.publish_all(&publications);
-        catalog.record_skipped(&skipped);
+    if !scoped {
+        // Publish every successful harness in one SQL snapshot. Enumeration remains fresh;
+        // unchanged rows can be retained only after comparing the complete ordered inventory.
+        let publications: Vec<_> = results
+            .iter()
+            .filter_map(|(h, roots, found, before)| {
+                found
+                    .as_ref()
+                    .zip(harness::rootless(*h))
+                    .map(|(found, a)| (*h, found.refs.as_slice(), catalog::watches_for(a, roots, found), before))
+            })
+            .collect();
+        let skipped: Vec<_> = results
+            .iter()
+            .filter_map(|(h, _, found, _)| Some((*h, found.as_ref()?.skipped.as_slice())))
+            .collect();
+        note_skipped(&skipped);
+        if let Some(catalog) = &mut catalog {
+            catalog.publish_all(&publications);
+            catalog.record_skipped(&skipped);
+        }
     }
-    drop((publications, skipped));
-    results
+    let all_refs: Vec<SessionRef> = results
         .into_iter()
         .filter_map(|(_, _, found, _)| found)
         .flat_map(|found| found.refs)
-        .collect()
+        .collect();
+    if scoped {
+        // Additive upsert of allowed sessions only: preserves existing unscoped catalog rows while
+        // ensuring allowed sessions exist in `sessions` for event/touched joins on cold homes.
+        let allowed: Vec<SessionRef> = all_refs.iter().filter(|r| scope::allows_ref(r)).cloned().collect();
+        catalog::sync(&allowed);
+    }
+    all_refs
 }
 
 /// The one stderr line a discovery that could not open some sources prints per process; the
@@ -235,7 +248,7 @@ fn note_skipped(skipped: &[(Harness, &[Skipped])]) {
 /// by the time backstop. Metadata identities do not hash file contents. `cv ls --fresh` or
 /// `CLUSTERVISION_MAX_STALE_SECS=0` forces full discovery.
 pub fn sessions() -> Vec<SessionRef> {
-    sessions_impl().0
+    scope::filter_refs(sessions_impl().0)
 }
 
 /// Enumerate the requested harness without opening unrelated stores. A qualified scope uses
@@ -246,6 +259,9 @@ pub fn sessions_for(harness: Option<Harness>) -> Vec<SessionRef> {
     let Some(harness) = harness else {
         return sessions();
     };
+    if scope::check_configured().is_err() {
+        return Vec::new();
+    }
     let mut reader = catalog::Reader::open();
     let refs = discover_harness(harness, reader.as_mut()).unwrap_or_default();
     if let Some(reader) = &mut reader {
@@ -253,7 +269,7 @@ pub fn sessions_for(harness: Option<Harness>) -> Vec<SessionRef> {
     } else {
         discover_cache::persist(false);
     }
-    refs
+    scope::filter_refs(refs)
 }
 
 /// The catalog exactly as it stands: no freshness probe, no discovery, never a fleet scan. Empty
@@ -261,12 +277,19 @@ pub fn sessions_for(harness: Option<Harness>) -> Vec<SessionRef> {
 /// — the `cv hook` commands Claude Code runs on its own events — and can say "as of the last
 /// `cv ls` / `cv archive sync`" honestly. Everything else wants [`sessions`].
 pub fn cataloged_sessions() -> Vec<SessionRef> {
-    catalog::all_sessions().unwrap_or_default()
+    if scope::check_configured().is_err() {
+        return Vec::new();
+    }
+    scope::filter_refs(catalog::all_sessions().unwrap_or_default())
 }
 
 /// [`sessions`] plus whether the answer came from a full [`discover_all`] (so `find` knows not to
-/// escalate to a second full scan).
+/// escalate to a second full scan). Returns raw unscoped refs so [`find`] can distinguish unknown
+/// ids from disallowed cross-project lookups; public [`sessions`] filters via [`scope::filter_refs`].
 fn sessions_impl() -> (Vec<SessionRef>, bool) {
+    if scope::check_configured().is_err() {
+        return (Vec::new(), true);
+    }
     let max_stale = env::var("CLUSTERVISION_MAX_STALE_SECS")
         .ok()
         .and_then(|s| s.parse::<i64>().ok())
@@ -316,6 +339,7 @@ fn discover_harness(h: Harness, mut catalog: Option<&mut catalog::Reader>) -> Op
     #[cfg(test)]
     HARNESS_DISCOVERIES.with(|n| n.set(n.get() + 1));
     let a = harness::for_harness(h)?;
+    let scoped = scope::is_active();
     let _sources = source::read_scope();
     let _cache_scope = catalog.as_ref().map(|reader| reader.discovery_scope());
     let before = catalog
@@ -334,11 +358,19 @@ fn discover_harness(h: Harness, mut catalog: Option<&mut catalog::Reader>) -> Op
             }
         }
     };
-    note_skipped(&[(h, &skipped)]);
+    if !scoped {
+        note_skipped(&[(h, &skipped)]);
+    }
     if let Some(reader) = catalog.as_mut() {
         reader.refill_turns(refs.iter_mut());
-        reader.replace_harness(h, &refs, &catalog::watches_for(a.as_ref(), &roots, &refs), &before);
-        reader.record_skipped(&[(h, &skipped)]);
+        if !scoped {
+            reader.replace_harness(h, &refs, &catalog::watches_for(a.as_ref(), &roots, &refs), &before);
+            reader.record_skipped(&[(h, &skipped)]);
+        }
+    }
+    if scoped {
+        let allowed: Vec<SessionRef> = refs.iter().filter(|r| scope::allows_ref(r)).cloned().collect();
+        catalog::sync(&allowed);
     }
     Some(refs)
 }
@@ -444,7 +476,18 @@ pub fn subagent_tree_filtered_of(
     workflow: Option<&str>,
     select: impl Fn(&str, Option<&str>) -> bool + Sync,
 ) -> Result<Vec<AgentRef>> {
-    harness::rootless(r.harness).map_or_else(|| Ok(Vec::new()), |a| a.forest(r, demand, workflow, &select))
+    scope::ensure_ref_allowed(r)?;
+    let mut tree =
+        harness::rootless(r.harness).map_or_else(|| Ok(Vec::new()), |a| a.forest(r, demand, workflow, &select))?;
+    if let Some(parent_cwd) = &r.cwd {
+        for sub in &mut tree {
+            if sub.session.cwd.is_none() {
+                sub.session.cwd = Some(parent_cwd.clone());
+            }
+        }
+    }
+    tree.retain(|sub| scope::allows_ref(&sub.session));
+    Ok(tree)
 }
 
 /// The full sub-agent **forest** a session spawned: directly-spawned (`Agent`/`Task`) sub-agents
@@ -564,6 +607,7 @@ pub fn workflow_of(r: &SessionRef, run_id: &str) -> Option<Workflow> {
 /// When several files carry the same id (one session under two storage roots), the most recently
 /// updated one is returned.
 pub fn find(id: &str, harness: Option<Harness>) -> Result<Option<(SessionRef, Box<dyn Adapter>)>> {
+    scope::check_configured()?;
     match find_inner(id, harness)? {
         (Some(hit), _) => Ok(Some(hit)),
         // An unqualified probe-path miss escalates to the full scan (a session in one of the probe's documented
@@ -571,7 +615,7 @@ pub fn find(id: &str, harness: Option<Harness>) -> Result<Option<(SessionRef, Bo
         // A qualified miss has exhausted its harness. An `agent-…` shaped id gets one last
         // reading as a sub-agent transcript.
         (None, true) => find_subagent_session(id, harness),
-        (None, false) => match resolve_id(discover_all(), id, harness)? {
+        (None, false) => match resolve_id(discover_all_with_catalog(None), id, harness)? {
             Some(hit) => Ok(Some(hit)),
             None => find_subagent_session(id, harness),
         },
@@ -584,6 +628,7 @@ pub fn find(id: &str, harness: Option<Harness>) -> Result<Option<(SessionRef, Bo
 /// multi-second full scan on every such miss. Escalate yourself via [`find`] once every cheaper
 /// interpretation has failed.
 pub fn find_cheap(id: &str, harness: Option<Harness>) -> Result<Option<(SessionRef, Box<dyn Adapter>)>> {
+    scope::check_configured()?;
     match find_inner(id, harness)?.0 {
         Some(hit) => Ok(Some(hit)),
         None => find_subagent_session(id, harness),
@@ -605,9 +650,32 @@ fn find_subagent_session(id: &str, harness: Option<Harness>) -> Result<Option<Fo
     if !id.starts_with("agent-") || harness.is_some_and(|h| workflow_store(h).is_none()) {
         return Ok(None);
     }
-    let parents = find_subagent_parents(id);
+    let parents: Vec<SessionRef> = find_subagent_parents(id)
+        .into_iter()
+        .filter(|p| harness.is_none_or(|h| p.harness == h))
+        .collect();
     let parent = match parents.as_slice() {
-        [] => return Ok(None),
+        [] => {
+            if scope::is_active() {
+                let want = format!("agent-{}", id.strip_prefix("agent-").unwrap_or(id));
+                let unscoped: Vec<(SessionRef, &'static dyn harness::Workflows)> = sessions_impl()
+                    .0
+                    .into_iter()
+                    .filter(|r| harness.is_none_or(|h| r.harness == h) && !scope::allows_ref(r))
+                    .filter_map(|r| workflow_store(r.harness).map(|w| (r, w)))
+                    .collect();
+                let mut blocked = par_filter_map(unscoped, move |(r, store)| store.has_agent(&r, &want).then_some(r));
+                blocked.sort_by_key(|r| std::cmp::Reverse(r.updated_at.or(r.created_at)));
+                if let Some(out_of_scope_parent) = blocked.first() {
+                    return Err(scope::ScopeError::OutsideAllowedRoots {
+                        id: id.to_string(),
+                        cwd: out_of_scope_parent.cwd.clone(),
+                    }
+                    .into());
+                }
+            }
+            return Ok(None);
+        }
         [one] => one,
         // Copies of ONE agent under several sessions (`cv adopt` moved it into a live session):
         // the newest parent's copy is the one that continues, so it wins.
@@ -674,11 +742,14 @@ type FoundSession = (SessionRef, Box<dyn Adapter>);
 /// The shared catalog-then-probe resolution behind [`find`]/[`find_cheap`]. The `bool` reports
 /// whether discovery already exhausted the requested scope (fleet or qualified harness).
 fn find_inner(id: &str, harness: Option<Harness>) -> Result<(Option<FoundSession>, bool)> {
+    scope::check_configured()?;
     // Fast path: the persisted catalog resolves the id without touching the fleet. We trust a row
-    // only if its file still exists (a stale row — session deleted/moved — falls through to scan).
+    // only if its file still exists (a stale row — session deleted/moved — falls through to scan)
+    // and lies within the active project-root allowlist (disallowed rows fall through so a newer
+    // allowed session sharing a prefix can win before we refuse fail-closed in `resolve_id`).
     let live: Vec<SessionRef> = catalog::lookup(id, harness)
         .into_iter()
-        .filter(|r| r.path.exists())
+        .filter(|r| r.path.exists() && scope::allows_ref(r))
         .collect();
     if let Some(r) = pick(live, id)? {
         if let Some(a) = harness::for_harness(r.harness) {
@@ -692,9 +763,9 @@ fn find_inner(id: &str, harness: Option<Harness>) -> Result<(Option<FoundSession
         let mut reader = catalog::Reader::open();
         let refs = discover_harness(h, reader.as_mut()).unwrap_or_default();
         if let Some(reader) = &mut reader {
-            reader.persist_discovery(false);
+            reader.persist_discovery(!scope::is_active());
         } else {
-            discover_cache::persist(false);
+            discover_cache::persist(!scope::is_active());
         }
         return Ok((resolve_id(refs, id, Some(h))?, true));
     }
@@ -707,19 +778,31 @@ fn find_inner(id: &str, harness: Option<Harness>) -> Result<(Option<FoundSession
 
 /// Match `id` (exact first, then as a prefix) against `refs` — `find`'s matching contract.
 /// Multiple distinct prefix hits are an error rather than a silent "first one wins".
+/// When project-root scope is active, allowed sessions are matched first; if none match and a
+/// session outside the allowlist matches `id`, fails closed with [`scope::ScopeError`].
 fn resolve_id(
     refs: Vec<SessionRef>,
     id: &str,
     harness: Option<Harness>,
 ) -> Result<Option<(SessionRef, Box<dyn Adapter>)>> {
-    let hits: Vec<SessionRef> = refs
+    let candidates: Vec<SessionRef> = refs
         .into_iter()
         .filter(|r| harness.is_none_or(|h| r.harness == h) && r.id.starts_with(id))
         // Mirror the fast path: never return a session whose file has vanished (deleted between
         // the scan and now, or a stale probe-path catalog row). Stat only the id matches — cheap.
         .filter(|r| r.path.exists())
         .collect();
-    Ok(pick(hits, id)?.and_then(|r| harness::for_harness(r.harness).map(|a| (r, a))))
+    if !scope::is_active() {
+        return Ok(pick(candidates, id)?.and_then(|r| harness::for_harness(r.harness).map(|a| (r, a))));
+    }
+    let (allowed, disallowed): (Vec<SessionRef>, Vec<SessionRef>) = candidates.into_iter().partition(scope::allows_ref);
+    if !allowed.is_empty() {
+        return Ok(pick(allowed, id)?.and_then(|r| harness::for_harness(r.harness).map(|a| (r, a))));
+    }
+    if let Some(blocked) = disallowed.iter().find(|r| r.id == id).or_else(|| disallowed.first()) {
+        scope::ensure_ref_allowed(blocked)?;
+    }
+    Ok(None)
 }
 
 /// Choose among the live sessions matching `id` — `find`'s matching contract, shared by the

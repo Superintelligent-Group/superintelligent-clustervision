@@ -704,6 +704,7 @@ pub(crate) fn cmd_dataset(args: DatasetArgs<'_>) -> Result<()> {
     let redact_opts = match &redact_only {
         Some(spec) => Some(cv_core::redact::RedactOptions {
             classes: cv_core::redact::RedactClasses::parse_only(spec).map_err(|e| anyhow::anyhow!(e))?,
+            ..Default::default()
         }),
         None => redact.then(cv_core::redact::RedactOptions::default),
     };
